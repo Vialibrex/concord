@@ -32,6 +32,7 @@ fn core_options(options: Options) -> CoreOptions {
         skip_cert_verify: options.skip_cert_verify,
         delay_test_timeout: options.delay_test_timeout,
         mitm_capture: options.mitm_capture,
+        mitm_trusted_ca: options.mitm_trusted_ca,
     }
 }
 

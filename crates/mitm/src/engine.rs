@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use concord_common::intercept::{ConnInterceptor, InterceptFlow, Offer, UpstreamDialer};
 use concord_common::sync::lock;
@@ -60,6 +60,7 @@ pub(crate) struct Shared {
     pub dialer: Arc<dyn UpstreamDialer>,
     pub scripts: Arc<ScriptHost>,
     pub clock: Arc<dyn LocalClock>,
+    pub trusted_ca: ArcSwapOption<String>,
 }
 
 #[derive(Default)]
@@ -187,7 +188,14 @@ impl Core {
             return None;
         }
         let ca = self.shared.authority.available()?;
-        if !self.config.ca_fingerprint.is_empty() && ca.fingerprint() != self.config.ca_fingerprint
+        if !self.config.ca_fingerprint.is_empty()
+            && (ca.fingerprint() != self.config.ca_fingerprint
+                || self
+                    .shared
+                    .trusted_ca
+                    .load()
+                    .as_deref()
+                    .is_some_and(|trusted| *trusted != self.config.ca_fingerprint))
         {
             return None;
         }

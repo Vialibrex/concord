@@ -1350,6 +1350,13 @@
         "mitmCapture": {
           "type": "boolean",
           "default": false
+        },
+        "mitmTrustedCa": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The fingerprint of the CA the host has just found the device trusting, empty when it\ntrusts none. While the profile pins a `ca-fingerprint`, TLS is decrypted only when\nthis agrees with it. Absent leaves the profile's choice alone."
         }
       }
     },

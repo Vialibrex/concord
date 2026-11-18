@@ -110,6 +110,7 @@ These are host tests. Android was exercised by hand in an embedding app on an em
 | # | Behaviour | Status | Tests and notes |
 |---|---|---|---|
 | 51 | A request that presents the `hostCredential` of `config.patch`, or of the `host` of `config.apply`, to a proxy listener over loopback passes `authentication`, names no `in-user`, and MITM never takes it; the credential never reaches the origin, a config apply keeps it, and a wrong credential or a non-loopback source is handled as before | verified | `concord-engine::e2e::mitm::mitm_leaves_the_hosts_own_requests_alone`, `concord-inbound::http::{the_host_credential_passes_authentication_and_never_reaches_the_origin, a_wrong_host_credential_is_an_ordinary_credential}`, `concord-inbound::spec::tests::the_host_credential_is_offered_to_loopback_clients_only`, `concord-mitm::engine_tests::leaves_the_hosts_own_connections_alone`, `concord-api::behaviour::an_apply_hands_the_host_settings_to_a_core_nobody_patched` |
+| 52 | While a config pins `ca-fingerprint`, a `mitmTrustedCa` option that names another CA, or none, stops TLS decryption until an option names the pinned CA again or leaves the field out; a config that pins none decrypts as before | verified | `concord-mitm::engine_tests::a_pinned_ca_decrypts_only_while_the_host_finds_it_trusted`, `concord-engine::e2e::mitm::mitm_decrypts_under_its_pinned_ca_only_while_the_host_finds_it_trusted` |
 
 ## Go tests ported
 

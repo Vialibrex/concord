@@ -11,7 +11,7 @@ use crate::ca::{Authority, CaError, CertificateInfo};
 use crate::capture::{Body, CaptureStore, Exchange, ExchangeList};
 use concord_config::mitm::MitmDef;
 
-use crate::config::{Config, ParseEnv, RawConfig, Validation, check};
+use crate::config::{Config, ParseEnv, RawConfig, Validation, check, normalize_fingerprint};
 use crate::cron::LocalClock;
 use crate::engine::{MitmEngine, Shared};
 use crate::limits::Pressure;
@@ -91,6 +91,7 @@ impl Mitm {
             dialer: env.dialer,
             scripts: Arc::new(ScriptHost::new(runtime)),
             clock: env.clock,
+            trusted_ca: ArcSwapOption::empty(),
         });
         Mitm {
             #[cfg(feature = "script")]
@@ -241,6 +242,13 @@ impl Mitm {
 
     pub fn set_capture(&self, on: bool) {
         self.shared.captures.set_capture(on);
+    }
+
+    /// What the `mitmTrustedCa` option of the API describes; `None` leaves the config's pin alone.
+    pub fn set_trusted_ca(&self, fingerprint: Option<String>) {
+        self.shared
+            .trusted_ca
+            .store(fingerprint.map(|text| Arc::new(normalize_fingerprint(&text))));
     }
 
     pub fn exchanges(&self, connection: &str) -> ExchangeList {

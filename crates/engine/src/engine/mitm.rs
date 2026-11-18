@@ -19,6 +19,7 @@ use crate::error::Failure;
 pub struct MitmService {
     pressure: AtomicI32,
     capture: AtomicBool,
+    trusted_ca: ArcSwapOption<String>,
     current: ArcSwapOption<Mitm>,
     table: Arc<ConnTable>,
 }
@@ -30,6 +31,7 @@ impl MitmService {
         MitmService {
             pressure: AtomicI32::new(0),
             capture: AtomicBool::new(false),
+            trusted_ca: ArcSwapOption::empty(),
             current: ArcSwapOption::empty(),
             table,
         }
@@ -49,6 +51,7 @@ impl MitmService {
             tasks,
         }));
         mitm.set_capture(self.capture.load(Ordering::Relaxed));
+        mitm.set_trusted_ca(self.trusted_ca.load_full().as_deref().cloned());
         mitm.set_pressure(u8::try_from(self.pressure()).unwrap_or(0));
         mitm.set_running(running);
         tunnel.set_interceptor(mitm.interceptor());
@@ -154,6 +157,13 @@ impl MitmService {
         self.capture.store(on, Ordering::Relaxed);
         if let Some(mitm) = self.current.load_full() {
             mitm.set_capture(on);
+        }
+    }
+
+    pub(crate) fn set_trusted_ca(&self, fingerprint: Option<String>) {
+        self.trusted_ca.store(fingerprint.clone().map(Arc::new));
+        if let Some(mitm) = self.current.load_full() {
+            mitm.set_trusted_ca(fingerprint);
         }
     }
 

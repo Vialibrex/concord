@@ -310,6 +310,8 @@ impl Engine {
         current.skip_cert_verify = options.skip_cert_verify;
         current.mitm_capture = options.mitm_capture;
         self.mitm.set_capture(options.mitm_capture);
+        current.mitm_trusted_ca.clone_from(&options.mitm_trusted_ca);
+        self.mitm.set_trusted_ca(options.mitm_trusted_ca.clone());
         self.shared.options.current.store(Arc::new(current));
     }
 

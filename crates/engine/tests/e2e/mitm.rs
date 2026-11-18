@@ -528,6 +528,34 @@ async fn decrypting_rig(rules: &str, lines: &str, capture: bool) -> (Rig, Socket
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mitm_decrypts_under_its_pinned_ca_only_while_the_host_finds_it_trusted() {
+    let (rig, server, ca) = decrypting_rig("  - MATCH,DIRECT\n", "", false).await;
+    let fingerprint = rig.engine.mitm().certificate().unwrap().unwrap()["fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (trusted, decrypts) in [
+        (Some(String::new()), false),
+        (Some(fingerprint), true),
+        (None, true),
+    ] {
+        rig.engine
+            .update(UpdateRequest {
+                options: Some(CoreOptions {
+                    mitm_trusted_ca: trusted.clone(),
+                    ..CoreOptions::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let through = tls_through(rig.mixed, "mitm.test", server.port(), &ca).await;
+        assert_eq!(through.is_ok(), decrypts, "{trusted:?}");
+    }
+    rig.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mitm_captures_the_exchanges_of_a_decrypted_connection() {
     let (rig, server, ca) = decrypting_rig(
         "  - MATCH,DIRECT\n",

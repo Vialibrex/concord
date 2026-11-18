@@ -91,6 +91,8 @@ impl MitmService {
 
     pub(crate) fn set_capture(&self, _on: bool) {}
 
+    pub(crate) fn set_trusted_ca(&self, _fingerprint: Option<String>) {}
+
     pub(crate) fn network_changed(&self) {}
 
     pub(crate) fn shutdown(&self) {}

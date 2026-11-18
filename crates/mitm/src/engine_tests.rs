@@ -371,6 +371,36 @@ async fn skips_verifying_only_the_hosts_listed_for_it() {
 }
 
 #[tokio::test]
+async fn a_pinned_ca_decrypts_only_while_the_host_finds_it_trusted() {
+    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let fingerprint = rig
+        .mitm
+        .authority()
+        .current()
+        .unwrap()
+        .fingerprint()
+        .to_string();
+    let pinned =
+        json!({"enable": true, "hostname": ["example.test"], "ca-fingerprint": fingerprint});
+    let decrypts = |trusted: Option<&str>| {
+        rig.mitm.set_trusted_ca(trusted.map(str::to_string));
+        rig.mitm
+            .engine()
+            .unwrap()
+            .match_tcp(&flow("example.test", 443))
+    };
+    rig.config(pinned);
+    assert!(decrypts(None));
+    assert!(!decrypts(Some("")));
+    assert!(decrypts(Some(&fingerprint.replace(':', "").to_lowercase())));
+    rig.config(json!({"enable": true, "hostname": ["example.test"]}));
+    assert!(
+        decrypts(Some("")),
+        "a config that pins no CA decrypts whatever the host found"
+    );
+}
+
+#[tokio::test]
 async fn decrypts_only_for_the_clients_listed() {
     let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
     rig.config(json!({

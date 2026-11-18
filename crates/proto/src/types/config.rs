@@ -97,6 +97,11 @@ dto! {
         pub delay_test_timeout: i64,
         #[serde(default)]
         pub mitm_capture: bool,
+        /// The fingerprint of the CA the host has just found the device trusting, empty when it
+        /// trusts none. While the profile pins a `ca-fingerprint`, TLS is decrypted only when
+        /// this agrees with it. Absent leaves the profile's choice alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub mitm_trusted_ca: Option<String>,
     }
 
     #[derive(Default)]

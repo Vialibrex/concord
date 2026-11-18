@@ -13,6 +13,8 @@ pub struct CoreOptions {
     pub delay_test_timeout: i64,
     #[serde(rename = "mitm-capture")]
     pub mitm_capture: bool,
+    #[serde(rename = "mitm-trusted-ca")]
+    pub mitm_trusted_ca: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
