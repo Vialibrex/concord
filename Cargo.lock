@@ -1276,6 +1276,7 @@ dependencies = [
 name = "concord-mitm"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "arc-swap",
  "async-trait",
  "base64 0.22.1",
@@ -1300,6 +1301,7 @@ dependencies = [
  "jaq-std",
  "rand 0.9.5",
  "rcgen",
+ "regex-syntax",
  "rquickjs",
  "rustls",
  "rustls-pki-types",

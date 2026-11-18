@@ -208,6 +208,7 @@ impl Config {
             }
         });
         env.scripts.keep(&config.rules.scripts);
+        config.rules.index();
         config.plain_http = config.rules.acts_on_requests();
         config.def = def;
         (config, errors)

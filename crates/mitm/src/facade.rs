@@ -166,6 +166,7 @@ impl Mitm {
             self.shared.captures.clear();
             if let Some(previous) = previous {
                 previous.stop();
+                previous.wind_down();
             }
             return Vec::new();
         };
@@ -187,6 +188,7 @@ impl Mitm {
         self.current.store(Some(engine.clone()));
         if let Some(previous) = &previous {
             previous.stop();
+            previous.wind_down();
         }
         if state.running {
             engine.start();

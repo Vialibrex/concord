@@ -93,6 +93,7 @@ indexmap = { version = "2", features = ["serde"] }
 regex = "1.13.1"
 fancy-regex = "0.20"
 aho-corasick = "1.1.5"
+regex-syntax = "0.8.11"
 maxminddb = "0.32"
 prost = "0.14.4"
 ruzstd = "0.9.1"

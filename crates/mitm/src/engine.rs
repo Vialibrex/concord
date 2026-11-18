@@ -15,6 +15,7 @@ use rustls::AlertDescription;
 use tokio::sync::Semaphore;
 use tokio::time::{timeout, timeout_at};
 use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 
 use crate::ca::{Authority, Ca};
 use crate::capture::CaptureStore;
@@ -93,6 +94,9 @@ pub(crate) struct Core {
     pub task_gate: ScriptGate,
     /// Where this section's sessions, scripts and schedule run; the engine stops them.
     pub tasks: concord_common::Tasks,
+    /// Cancelled once another section's engine takes over or MITM is turned off: each
+    /// session finishes the requests it is serving and takes no new one.
+    pub replaced: CancellationToken,
     sessions: AtomicUsize,
     quic: Mutex<QuicCache>,
     trust: Arc<TrustStore>,
@@ -342,6 +346,7 @@ impl MitmEngine {
             session_gate: ScriptGate::new(limits.script_concurrency),
             task_gate: ScriptGate::new(TASK_CONCURRENCY),
             tasks,
+            replaced: CancellationToken::new(),
             sessions: AtomicUsize::new(0),
             quic: Mutex::default(),
             client_h2: OnceLock::new(),
@@ -353,6 +358,11 @@ impl MitmEngine {
             core,
             tasks: Arc::default(),
         }
+    }
+
+    /// Lets its sessions finish what they serve and close, as [Core::replaced] says.
+    pub(crate) fn wind_down(&self) {
+        self.core.replaced.cancel();
     }
 
     pub fn config(&self) -> &Config {

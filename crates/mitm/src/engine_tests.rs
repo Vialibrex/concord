@@ -1614,3 +1614,181 @@ async fn a_finished_session_ends_the_tasks_that_still_hold_it() {
         .await
         .expect("a task holding the session outlived it");
 }
+
+fn section(rewrite: &str) -> serde_json::Value {
+    json!({
+        "enable": true,
+        "hostname": ["example.test"],
+        "skip-server-cert-verify": true,
+        "h2": true,
+        "url-rewrite": [format!(r"^https://example\.test/{rewrite} _ reject")],
+    })
+}
+
+fn closed(client: &Client) -> bool {
+    match &client.wire {
+        Wire::H1(sender) => sender.is_closed(),
+        Wire::H2(sender) => sender.is_closed(),
+    }
+}
+
+fn held_origin() -> (Service, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+    let (entered, release) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let service: Service = {
+        let (entered, release) = (entered.clone(), release.clone());
+        Arc::new(move |_request| {
+            let (entered, release) = (entered.clone(), release.clone());
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                http::Response::builder().body(full_body("done")).unwrap()
+            })
+        })
+    };
+    (service, entered, release)
+}
+
+#[tokio::test]
+async fn a_replaced_engine_closes_its_idle_sessions_and_is_dropped() {
+    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    rig.config(section("a"));
+    let old = Arc::downgrade(&rig.mitm.engine().unwrap().core);
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+    assert_eq!(client.get("/x").await.status, 200);
+
+    rig.config(section("b"));
+    eventually(|| closed(&client)).await;
+    eventually(|| old.upgrade().is_none()).await;
+}
+
+#[tokio::test]
+async fn an_apply_of_the_same_section_leaves_the_sessions_open() {
+    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    rig.config(section("a"));
+    let old = Arc::downgrade(&rig.mitm.engine().unwrap().core);
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+    assert_eq!(client.get("/x").await.status, 200);
+
+    rig.config(section("a"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!closed(&client));
+    assert_eq!(client.get("/y").await.status, 200);
+    assert!(old.upgrade().is_some());
+}
+
+#[tokio::test]
+async fn turning_mitm_off_closes_the_idle_sessions() {
+    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    rig.config(section("a"));
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+    assert_eq!(client.get("/x").await.status, 200);
+
+    rig.config(json!({"enable": false}));
+    eventually(|| closed(&client)).await;
+}
+
+#[tokio::test]
+async fn a_request_under_way_when_its_engine_is_replaced_is_answered_in_full() {
+    let (service, entered, release) = held_origin();
+    let server = start_service(&["http/1.1"], service).await;
+    let rig = rig_for(&server, None);
+    rig.config(section("a"));
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+    let request = client.request("GET", "/slow", &[], "");
+    let pending = tokio::spawn(async move {
+        let answer = client.send(request).await;
+        (client, answer)
+    });
+    entered.notified().await;
+
+    rig.config(section("b"));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    release.notify_one();
+    let (client, answer) = pending.await.unwrap();
+    assert_eq!(answer.unwrap().text(), "done");
+    eventually(|| closed(&client)).await;
+}
+
+#[tokio::test]
+async fn an_h2_client_of_a_replaced_engine_gets_goaway_and_its_open_stream_finishes() {
+    use http_body_util::BodyExt;
+
+    let (service, entered, release) = held_origin();
+    let server = start_service(&["h2"], service).await;
+    let rig = rig_for(&server, None);
+    rig.config(section("a"));
+    let client = Client::tls(&rig, "example.test", 443, &["h2"])
+        .await
+        .unwrap();
+    let Wire::H2(sender) = &client.wire else {
+        panic!("not h2")
+    };
+    let get = |path: &str| {
+        http::Request::builder()
+            .uri(format!("https://example.test{path}"))
+            .body(http_body_util::Full::new(bytes::Bytes::new()))
+            .unwrap()
+    };
+    let mut first = sender.clone();
+    let open = tokio::spawn(async move { first.send_request(get("/slow")).await });
+    entered.notified().await;
+
+    rig.config(section("b"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let refused = tokio::time::timeout(
+        Duration::from_secs(2),
+        sender.clone().send_request(get("/next")),
+    )
+    .await
+    .expect("a new stream after GOAWAY hung");
+    assert!(refused.is_err(), "a stream opened after GOAWAY was served");
+
+    release.notify_one();
+    let response = open.await.unwrap().unwrap();
+    assert_eq!(response.status(), 200);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(&body[..], b"done");
+    eventually(|| closed(&client)).await;
+}
+
+#[tokio::test]
+async fn a_websocket_keeps_its_replaced_engine_until_it_closes() {
+    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    rig.config(section("a"));
+    let old = Arc::downgrade(&rig.mitm.engine().unwrap().core);
+    let (near, _offer) = offer_on(rig.mitm.interceptor(), flow("example.test", 443));
+    let name = rustls::pki_types::ServerName::try_from("example.test").unwrap();
+    let connector =
+        tokio_rustls::TlsConnector::from(crate::testing::client_config(&rig.root, &["http/1.1"]));
+    let mut tls = connector.connect(name, near).await.unwrap();
+    tls.write_all(b"GET /socket HTTP/1.1\r\nHost: example.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n")
+        .await
+        .unwrap();
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        head.push(tls.read_u8().await.unwrap());
+    }
+    assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101"));
+
+    rig.config(section("b"));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    tls.write_all(b"ping").await.unwrap();
+    let mut echoed = [0u8; 4];
+    tls.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"ping");
+    assert!(old.upgrade().is_some());
+
+    drop(tls);
+    eventually(|| old.upgrade().is_none()).await;
+}

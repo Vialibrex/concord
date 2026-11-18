@@ -34,6 +34,8 @@ http = { workspace = true }
 http-body-util = { workspace = true }
 futures-util = { workspace = true }
 fancy-regex = { workspace = true }
+aho-corasick = { workspace = true }
+regex-syntax = { workspace = true }
 jaq-core = { workspace = true }
 jaq-std = { workspace = true }
 jaq-json = { workspace = true }

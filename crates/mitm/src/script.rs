@@ -222,6 +222,10 @@ impl std::fmt::Debug for Script {
 }
 
 impl Script {
+    pub(crate) fn pattern(&self) -> Option<&Pattern> {
+        self.pattern.as_ref()
+    }
+
     pub fn is_task(&self) -> bool {
         self.kind.is_task()
     }

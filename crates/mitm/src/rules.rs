@@ -16,6 +16,7 @@ use crate::view::LineView;
 
 pub(crate) use concord_config::mitm::UrlAction;
 
+mod index;
 mod views;
 
 const TINY_GIF_BASE64: &str = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
@@ -86,6 +87,7 @@ pub struct Rules {
     /// Loon's `mock-request-body`: bodies a request goes upstream with instead of its own.
     pub(crate) request_mocks: Vec<MapLocal>,
     pub(crate) scripts: Vec<std::sync::Arc<Script>>,
+    indexes: index::Indexes,
 }
 
 pub fn tiny_gif() -> Vec<u8> {
@@ -325,10 +327,12 @@ pub(crate) fn parse_map_local(
     )
 }
 
-fn first_local<'r>(rules: &'r [MapLocal], url: &str, heads: &Heads<'_>) -> Option<&'r MapLocal> {
-    rules
-        .iter()
-        .find(|rule| rule.pattern.is_match(url) && heads.allow(&rule.conditions))
+fn first_local<'r>(
+    mut rules: impl Iterator<Item = &'r MapLocal>,
+    url: &str,
+    heads: &Heads<'_>,
+) -> Option<&'r MapLocal> {
+    rules.find(|rule| rule.pattern.is_match(url) && heads.allow(&rule.conditions))
 }
 
 impl Rules {
@@ -351,7 +355,7 @@ impl Rules {
         url: &str,
         heads: &Heads<'_>,
     ) -> Option<(&UrlRewrite, String)> {
-        for rule in &self.url_rewrites {
+        for rule in self.url_rewrite_candidates(url) {
             if !rule.pattern.is_match(url) || !heads.request_allows(rule.head.as_ref()) {
                 continue;
             }
@@ -365,11 +369,11 @@ impl Rules {
     }
 
     pub(crate) fn map_local(&self, url: &str, heads: &Heads<'_>) -> Option<&MapLocal> {
-        first_local(&self.map_locals, url, heads)
+        first_local(self.map_local_candidates(url), url, heads)
     }
 
     pub(crate) fn request_mock(&self, url: &str, heads: &Heads<'_>) -> Option<&MapLocal> {
-        first_local(&self.request_mocks, url, heads)
+        first_local(self.request_mock_candidates(url), url, heads)
     }
 
     /// The header rewrites for an exchange, picked before any of them runs so that each
@@ -380,8 +384,7 @@ impl Rules {
         response: bool,
         heads: &Heads<'_>,
     ) -> Vec<&HeaderRewrite> {
-        self.header_rewrites
-            .iter()
+        self.header_rewrite_candidates(url)
             .filter(|rule| rule.response == response && rule.pattern.is_match(url))
             .filter(|rule| heads.allow(&rule.conditions))
             .collect()
@@ -393,8 +396,7 @@ impl Rules {
         response: bool,
         heads: &Heads<'_>,
     ) -> Vec<std::sync::Arc<BodyRewrite>> {
-        self.body_rewrites
-            .iter()
+        self.body_rewrite_candidates(url)
             .filter(|rule| rule.response == response && rule.pattern.is_match(url))
             .filter(|rule| heads.allow(&rule.conditions))
             .cloned()
@@ -409,8 +411,7 @@ impl Rules {
         response: bool,
         heads: &Heads<'_>,
     ) -> Option<&std::sync::Arc<Script>> {
-        self.scripts
-            .iter()
+        self.script_candidates(url)
             .find(|script| script.matches_http(url, response) && heads.allow(&script.conditions))
     }
 }

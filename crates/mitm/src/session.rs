@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -402,7 +403,8 @@ impl Session {
         Ok(UpConn { sender, id })
     }
 
-    /// Serves the client connection until it closes, its CA is retired or it sits idle.
+    /// Serves the client connection until it closes, its CA is retired, it sits idle or its
+    /// engine is replaced.
     pub async fn serve<S>(self: &Arc<Self>, io: S, h2: bool, retired: Option<CancellationToken>)
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -419,16 +421,19 @@ impl Session {
                 None => std::future::pending().await,
             }
         };
+        let ends = async {
+            tokio::select! {
+                () = idle => {}
+                () = gone => {}
+            }
+        };
+        let replaced = &self.core.replaced;
         if h2 {
             let conn = server2::Builder::new(self.tasks.clone())
                 .timer(TokioTimer::new())
                 .serve_connection(TokioIo::new(io), service);
             tokio::pin!(conn);
-            tokio::select! {
-                result = &mut conn => log_end(result),
-                () = idle => {}
-                () = gone => {}
-            }
+            drive(conn, |conn| conn.graceful_shutdown(), ends, replaced).await;
         } else {
             let conn = server1::Builder::new()
                 .timer(TokioTimer::new())
@@ -437,11 +442,7 @@ impl Session {
                 .serve_connection(TokioIo::new(io), service)
                 .with_upgrades();
             tokio::pin!(conn);
-            tokio::select! {
-                result = &mut conn => log_end(result),
-                () = idle => {}
-                () = gone => {}
-            }
+            drive(conn, |conn| conn.graceful_shutdown(), ends, replaced).await;
         }
         self.finish(retired.as_ref()).await;
     }
@@ -466,6 +467,28 @@ impl Session {
         self.ended.cancel();
         lock(&self.pool).clear();
         self.release();
+    }
+}
+
+/// Serves a client connection until it closes or `ends`. Once its engine is replaced, the
+/// requests under way finish (an h2 client is sent GOAWAY) and the connection closes.
+async fn drive<C>(
+    mut conn: Pin<&mut C>,
+    shutdown: impl FnOnce(Pin<&mut C>),
+    ends: impl Future<Output = ()>,
+    replaced: &CancellationToken,
+) where
+    C: Future<Output = Result<(), hyper::Error>>,
+{
+    tokio::pin!(ends);
+    tokio::select! {
+        result = conn.as_mut() => return log_end(result),
+        () = &mut ends => return,
+        () = replaced.cancelled() => shutdown(conn.as_mut()),
+    }
+    tokio::select! {
+        result = conn => log_end(result),
+        () = ends => {}
     }
 }
 

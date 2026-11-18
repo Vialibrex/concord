@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use concord_config::mitm::{IssueKind, LineError};
 use fancy_regex::{Captures, Regex};
 
@@ -13,9 +15,12 @@ impl From<PatternError> for LineError {
     }
 }
 
+/// Built on first use: a module can list thousands of patterns that most traffic never
+/// reaches, and every built regex keeps a match cache for each thread that ran it.
 #[derive(Clone, Debug)]
 pub struct Pattern {
-    regex: Regex,
+    source: String,
+    regex: OnceLock<Option<Regex>>,
 }
 
 impl Pattern {
@@ -33,29 +38,44 @@ impl Pattern {
         } else {
             pattern.to_string()
         };
-        Regex::new(&source)
-            .map(|regex| Pattern { regex })
-            .map_err(|err| PatternError(err.to_string()))
+        Regex::new(&source).map_err(|err| PatternError(err.to_string()))?;
+        Ok(Pattern {
+            source,
+            regex: OnceLock::new(),
+        })
     }
 
     /// The regex as compiled, `(?m)` included for a multiline one.
     pub(crate) fn source(&self) -> &str {
-        self.regex.as_str()
+        &self.source
+    }
+
+    fn regex(&self) -> Option<&Regex> {
+        self.regex
+            .get_or_init(|| Regex::new(&self.source).ok())
+            .as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_built(&self) -> bool {
+        self.regex.get().is_some()
     }
 
     pub fn is_match(&self, text: &str) -> bool {
-        self.regex.is_match(text).unwrap_or(false)
+        self.regex()
+            .is_some_and(|regex| regex.is_match(text).unwrap_or(false))
     }
 
     /// `None` when the pattern fails to run, which leaves the text as it was.
     pub fn replace(&self, text: &str, template: &str, all: bool) -> Option<String> {
+        let regex = self.regex()?;
         let mut out = String::with_capacity(text.len());
         let mut last = 0;
-        for caps in self.regex.captures_iter(text) {
+        for caps in regex.captures_iter(text) {
             let caps = caps.ok()?;
             let whole = caps.get(0)?;
             out.push_str(text.get(last..whole.start())?);
-            self.expand(&caps, template, text, &mut out);
+            Self::expand(regex, &caps, template, text, &mut out);
             last = whole.end();
             if !all {
                 break;
@@ -66,7 +86,13 @@ impl Pattern {
     }
 
     /// .NET replacement syntax: `$1`, `${name}`, `$&`, `` $` ``, `$'`, `$_`, `$$`.
-    fn expand(&self, caps: &Captures<'_, str>, template: &str, input: &str, out: &mut String) {
+    fn expand(
+        regex: &Regex,
+        caps: &Captures<'_, str>,
+        template: &str,
+        input: &str,
+        out: &mut String,
+    ) {
         let bytes = template.as_bytes();
         let mut i = 0;
         while let Some(&c) = bytes.get(i) {
@@ -111,7 +137,7 @@ impl Pattern {
                     match close {
                         Some(len) => {
                             let name = template.get(i + 2..i + 2 + len).unwrap_or_default();
-                            if !self.push_named(caps, name, out) {
+                            if !Self::push_named(regex, caps, name, out) {
                                 out.push_str(template.get(i..i + 3 + len).unwrap_or_default());
                             }
                             i += 3 + len;
@@ -156,7 +182,7 @@ impl Pattern {
         }
     }
 
-    fn push_named(&self, caps: &Captures<'_, str>, name: &str, out: &mut String) -> bool {
+    fn push_named(regex: &Regex, caps: &Captures<'_, str>, name: &str, out: &mut String) -> bool {
         if let Ok(n) = name.parse::<usize>() {
             if n >= caps.len() {
                 return false;
@@ -169,11 +195,7 @@ impl Pattern {
                 out.push_str(group.as_str());
                 true
             }
-            None => self
-                .regex
-                .capture_names()
-                .flatten()
-                .any(|known| known == name),
+            None => regex.capture_names().flatten().any(|known| known == name),
         }
     }
 }
