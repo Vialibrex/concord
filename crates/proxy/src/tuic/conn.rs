@@ -6,12 +6,12 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use concord_common::{Address, DialCx, Tasks};
+use concord_quic::{QuicConn, io_error};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::Shared;
 use super::wire::{self, Command, Defrag, Incoming, Version};
-use crate::quic::{QuicConn, io_error};
 use crate::util::lock;
 
 const QUEUE: usize = 64;

@@ -29,7 +29,7 @@ struct Slot {
 /// Hysteria's fixed-rate sender: the rate is the one the server granted, scaled
 /// up by the recent loss so that the goodput stays at it.
 #[derive(Clone)]
-pub(crate) struct Brutal {
+pub struct Brutal {
     bytes_per_sec: u64,
     profile: BrutalProfile,
     mtu: u64,
@@ -40,7 +40,7 @@ pub(crate) struct Brutal {
 }
 
 impl Brutal {
-    pub(crate) fn new(bytes_per_sec: u64, mtu: u16, now: Instant) -> Self {
+    pub fn new(bytes_per_sec: u64, mtu: u16, now: Instant) -> Self {
         Self::with_profile(
             bytes_per_sec,
             BrutalProfile::Legacy,
@@ -50,7 +50,7 @@ impl Brutal {
         )
     }
 
-    pub(crate) fn hysteria2(bytes_per_sec: u64, rtt: Duration, now: Instant) -> Self {
+    pub fn hysteria2(bytes_per_sec: u64, rtt: Duration, now: Instant) -> Self {
         Self::with_profile(bytes_per_sec, BrutalProfile::Hysteria2, 1252, rtt, now)
     }
 
@@ -235,7 +235,7 @@ impl Controller for Brutal {
 /// A controller that can be replaced while the connection runs: Hysteria2
 /// learns which one to use only from the server's reply to the auth request.
 #[derive(Clone)]
-pub(crate) struct Switch(Arc<Mutex<SwitchState>>);
+pub struct Switch(Arc<Mutex<SwitchState>>);
 
 struct SwitchState {
     controller: Box<dyn Controller>,
@@ -243,11 +243,11 @@ struct SwitchState {
 }
 
 impl Switch {
-    pub(crate) fn replace(&self, controller: Box<dyn Controller>) {
+    pub fn replace(&self, controller: Box<dyn Controller>) {
         lock(&self.0).controller = controller;
     }
 
-    pub(crate) fn replace_brutal(&self, mut controller: Brutal) {
+    pub fn replace_brutal(&self, mut controller: Brutal) {
         let mut state = lock(&self.0);
         controller.on_mtu_update(state.mtu);
         state.controller = Box::new(controller);
@@ -330,20 +330,20 @@ impl Controller for Switch {
 }
 
 /// Builds the starting controller and keeps the handle that replaces it.
-pub(crate) struct SwitchFactory {
+pub struct SwitchFactory {
     initial: Arc<dyn ControllerFactory + Send + Sync>,
     handle: Mutex<Option<Switch>>,
 }
 
 impl SwitchFactory {
-    pub(crate) fn new(initial: Arc<dyn ControllerFactory + Send + Sync>) -> Arc<Self> {
+    pub fn new(initial: Arc<dyn ControllerFactory + Send + Sync>) -> Arc<Self> {
         Arc::new(SwitchFactory {
             initial,
             handle: Mutex::new(None),
         })
     }
 
-    pub(crate) fn handle(&self) -> Option<Switch> {
+    pub fn handle(&self) -> Option<Switch> {
         lock(&self.handle).clone()
     }
 }

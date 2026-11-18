@@ -51,6 +51,7 @@ const LAYERS: &[(&str, Opt, &[&str])] = &[
         Opt::Speed,
         &["concord-common", "concord-tls"],
     ),
+    ("concord-quic", Opt::Speed, &["concord-common"]),
     (
         "concord-proxy",
         Opt::Speed,
@@ -60,6 +61,7 @@ const LAYERS: &[(&str, Opt, &[&str])] = &[
             "concord-net",
             "concord-tls",
             "concord-transport",
+            "concord-quic",
             "concord-platform",
             "concord-netstack",
         ],
@@ -468,12 +470,12 @@ mod tests {
         assert!(opt_level_problems(&levels).is_empty());
 
         levels.remove("concord-tunnel");
-        levels.insert("concord-quic".to_string(), Some("3".to_string()));
+        levels.insert("concord-new".to_string(), Some("3".to_string()));
         assert_eq!(
             opt_level_problems(&levels),
             [
                 "concord-tunnel is built with opt-level inherited in release, the layer table says Speed",
-                "concord-quic has a release profile but no entry in the layer table",
+                "concord-new has a release profile but no entry in the layer table",
             ]
         );
     }

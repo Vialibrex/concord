@@ -27,7 +27,7 @@ The exact edges are in `xtask/src/layers.rs`. From the bottom up:
 | Pure | `config`, `rules` | Profile parsing and validation; the rule compiler and route program. No tokio |
 | OS | `platform` | The `Platform` trait a host implements (`protect`, process lookup, default interface) and native system calls (sockopts, splice, tproxy, rlimits, owned mmap buffers) |
 | Sockets and crypto | `net`, `tls`, `netstack` | Socket factory, dialing, loopback guard, the relay; rustls and BoringSSL backends, fingerprints, REALITY, ECH; the user-space TCP/IP stack shared by TUN and WireGuard |
-| Links | `transport`, `proxy` | ws, gRPC, h2, xhttp, obfs, ShadowTLS, sing-mux, QUIC over a `PacketSession` (proxy and DNS); the outbound protocols and how a node's link is composed |
+| Links | `transport`, `quic`, `proxy` | ws, gRPC, h2, xhttp, obfs, ShadowTLS, sing-mux, QUIC over a `PacketSession` (proxy and DNS); the QUIC outbounds' socket obfuscation and port hopping, congestion controllers, shared connections and streams; the outbound protocols and how a node's link is composed |
 | Services | `dns`, `group` | Resolver, upstreams, fake-ip, cache; groups, providers, health checks |
 | Pipeline | `tunnel` | Pre-handle, sniff, route, dial, track, relay; UDP NAT; connection table |
 | Edges | `inbound`, `tun`, `mitm` | mixed/http/socks/redir/tproxy listeners; TUN device, routes and stack driver; MITM, scripts, capture |
@@ -79,8 +79,10 @@ spurious readiness (Windows AFD) would otherwise hold a worker indefinitely.
 `Outbound` is the one trait a leaf implements; groups are not outbounds. `proxy/src/build.rs` maps each
 `ProxyKind` to its builder, wrapped in sing-mux when configured. A node's `Link` composes dial, TLS and a
 `TransportStack` of closed `Layer` variants; QUIC protocols (hysteria, hysteria2, tuic, shadowquic) use quinn through
-`proxy/src/quic`. Dependencies arrive through `DialEnv` (`SocketFactory`, `HostResolver`, `NodeDialer`,
-`EventSink`). Datagram-over-stream protocols share `dgram::{Encoder, Decoder}`.
+`proxy/src/quic.rs`, which resolves the node, opens its socket and runs the handshake, and `concord-quic`, which holds
+what needs no node: socket obfuscation and port hopping, the congestion controllers, shared connections and the
+stream type. `concord-quic` depends on `concord-common` alone. Dependencies arrive through `DialEnv`
+(`SocketFactory`, `HostResolver`, `NodeDialer`, `EventSink`). Datagram-over-stream protocols share `dgram::{Encoder, Decoder}`.
 
 TLS has two backends: rustls with aws-lc-rs by default, BoringSSL where a `client-fingerprint` needs a browser
 ClientHello; REALITY and ECH are implemented in `concord-tls`.
@@ -110,8 +112,8 @@ connection table get one the stop leaves alone, because closing every connection
 the TUN stack and MITM outlive a shutdown, so they take the config's `Tasks` each time they start or apply, not once:
 the stop is replaced at shutdown, and what they leave running (accepted connections, DNS answers, sessions) ends with
 it. The engine's own work runs on its `Tasks` too. xtask's `task_owner` test keeps `tokio::spawn`, runtime handles,
-`JoinSet` and `TokioExecutor` out of `proxy`, `transport`, `net`, `tls`, `dns`, `group`, `tunnel`, `inbound`, `tun`,
-`mitm`, `engine` and `api`.
+`JoinSet` and `TokioExecutor` out of `proxy`, `quic`, `transport`, `net`, `tls`, `dns`, `group`, `tunnel`, `inbound`,
+`tun`, `mitm`, `engine` and `api`.
 
 The control plane is layered: `proto` (types, errors, the method registry with execution class `inline`, `serial` or
 `concurrent`, stream policies `latest`, `drop_oldest` or `resync`) → `api` (one async function per method) → `rpc`
@@ -123,11 +125,9 @@ delivery.
 
 Still open:
 
-- Proxy and transport owners: move the QUIC infrastructure in `proxy/src/quic` into its own crate, preserving
-  the transport and DNS users' dependency direction.
 - Proxy owners: fold `udprelay::UdpCodec` into `dgram`.
 
-`proxy/src/quic/congestion.rs` and `proxy/src/quic/socket.rs` already use `concord_common::sync::lock`.
+`quic/src/congestion.rs` and `quic/src/socket.rs` already use `concord_common::sync::lock`.
 mieru's and AmneziaWG's `invalid` add a protocol prefix and stay local.
 
 Settled, not pending: `ss::crypto::CryptoIo` and `SsKey` stay in `ss`, because Trojan's `ss` option is the Shadowsocks

@@ -4,11 +4,12 @@ use std::time::Duration;
 
 use concord_config::proxy::MasqueOpts;
 use concord_netstack::Congestion;
+use concord_quic::ObfsSpec;
 use ipnetwork::IpNetwork;
 
 use crate::ctx::{BuildCtx, BuildError};
 use crate::node::Egress;
-use crate::quic::{Crypto, ObfsSpec, QuicLink};
+use crate::quic::{Crypto, QuicLink};
 use crate::wireguard::config::{DnsServer, dns_server};
 
 pub(super) struct Config {
@@ -170,14 +171,14 @@ fn remote_dns(opts: &MasqueOpts, l4: bool) -> Result<Vec<DnsServer>, BuildError>
 }
 
 fn transport(opts: &MasqueOpts) -> quinn::TransportConfig {
-    let mut transport = crate::quic::transport_config();
+    let mut transport = concord_quic::transport_config();
     let mut cubic = quinn::congestion::CubicConfig::default();
     cubic.initial_window(32 * 1242);
     transport.congestion_controller_factory(Arc::new(cubic));
     transport
         .initial_mtu(1242)
         .keep_alive_interval(Some(Duration::from_secs(30)))
-        .datagram_receive_buffer_size(Some(crate::quic::datagram_buffer(16_383)));
+        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(16_383)));
     let cwnd = u64::from(if opts.cwnd == 0 { 32 } else { opts.cwnd });
     match opts.congestion_controller.as_str() {
         "new_reno" => {
@@ -186,10 +187,10 @@ fn transport(opts: &MasqueOpts) -> quinn::TransportConfig {
             transport.congestion_controller_factory(Arc::new(reno));
         }
         "bbr" | "bbr_meta_v1" | "bbr_meta_v2" => {
-            transport.congestion_controller_factory(crate::quic::bbr_factory(
-                crate::quic::BbrProfile::parse(&opts.bbr_profile),
+            transport.congestion_controller_factory(concord_quic::bbr_factory(
+                concord_quic::BbrProfile::parse(&opts.bbr_profile),
                 cwnd * if opts.congestion_controller == "bbr_meta_v1" {
-                    crate::quic::INITIAL_PACKET_SIZE
+                    concord_quic::INITIAL_PACKET_SIZE
                 } else {
                     1242
                 },

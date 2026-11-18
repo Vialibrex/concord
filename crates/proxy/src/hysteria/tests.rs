@@ -14,6 +14,7 @@ use bytes::Bytes;
 use concord_common::{Address, DialCx, Initiator, Outbound, PacketBuf, recv_packet, send_packet};
 use concord_config::proxy::ProxyKind;
 use concord_config::{Capabilities, ProxyParse, parse_proxy};
+use concord_quic::{ObfsSpec, wrap_socket};
 use concord_tls::TrustStore;
 use quinn::Endpoint;
 use serde_json::{Value, json};
@@ -22,7 +23,6 @@ use tokio::net::{TcpListener, UdpSocket};
 
 use super::wire::{Defrag, UdpHeader, parse_udp, put_udp_header, udp_header_len};
 use crate::ctx::BuildCtx;
-use crate::quic::{ObfsSpec, obfuscated_socket};
 use crate::testing::{HeldLookup, quic_server, test_env};
 
 #[derive(Clone)]
@@ -46,7 +46,7 @@ impl Default for Behavior {
 
 fn server_endpoint(behavior: &Behavior) -> (Endpoint, u16) {
     quic_server(b"hysteria", |socket| match &behavior.obfs {
-        Some(obfs) => obfuscated_socket(socket, obfs),
+        Some(obfs) => wrap_socket(socket, obfs, None, &Default::default()),
         None => socket,
     })
 }

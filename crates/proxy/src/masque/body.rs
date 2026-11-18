@@ -5,11 +5,11 @@ use std::task::{Context, Poll, ready};
 
 use bytes::{Buf, Bytes};
 use concord_common::{BoxRead, BoxWrite, Stream};
+use concord_quic::io_error;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::ReusableBoxFuture;
 
 use super::h3;
-use crate::quic::io_error;
 
 pub(super) type Sent = (h3::Send, io::Result<()>);
 

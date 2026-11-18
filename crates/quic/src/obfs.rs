@@ -26,6 +26,10 @@ const MAX_PER_SOURCE: usize = 8;
 pub(crate) const GECKO_DEFAULT_MIN: usize = 512;
 pub(crate) const GECKO_DEFAULT_MAX: usize = 1200;
 
+#[derive(Debug, thiserror::Error)]
+#[error("gecko: invalid packet size range")]
+pub struct GeckoRange;
+
 #[derive(Clone)]
 pub(crate) struct Salamander {
     password: Vec<u8>,
@@ -232,11 +236,11 @@ pub(crate) struct Gecko {
 }
 
 impl Gecko {
-    pub(crate) fn new(password: &[u8], min: usize, max: usize) -> Result<Self, String> {
+    pub(crate) fn new(password: &[u8], min: usize, max: usize) -> Result<Self, GeckoRange> {
         let min = if min == 0 { GECKO_DEFAULT_MIN } else { min };
         let max = if max == 0 { GECKO_DEFAULT_MAX } else { max };
         if min > max || max > GECKO_MAX_ON_WIRE {
-            return Err("gecko: invalid packet size range".to_string());
+            return Err(GeckoRange);
         }
         Ok(Gecko {
             salamander: Salamander::new(password),

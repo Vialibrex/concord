@@ -8,6 +8,7 @@ members = [
     "crates/net",
     "crates/tls",
     "crates/transport",
+    "crates/quic",
     "crates/proxy",
     "crates/dns",
     "crates/group",
@@ -48,6 +49,7 @@ concord-platform = { path = "crates/platform" }
 concord-net = { path = "crates/net" }
 concord-tls = { path = "crates/tls" }
 concord-transport = { path = "crates/transport" }
+concord-quic = { path = "crates/quic" }
 concord-proxy = { path = "crates/proxy" }
 concord-dns = { path = "crates/dns" }
 concord-group = { path = "crates/group" }
@@ -243,6 +245,9 @@ opt-level = 3
 opt-level = 3
 
 [profile.release.package.concord-proxy]
+opt-level = 3
+
+[profile.release.package.concord-quic]
 opt-level = 3
 
 [profile.release.package.concord-transport]

@@ -16,6 +16,7 @@ use concord_common::sync::lock;
 use concord_common::{Address, DialCx, Initiator, Outbound, PacketBuf, recv_packet, send_packet};
 use concord_config::proxy::ProxyKind;
 use concord_config::{Capabilities, ProxyParse, parse_proxy};
+use concord_quic::{BbrProfile, DatagramHub, ObfsSpec, SwitchFactory};
 use concord_tls::{TlsOptions, TrustStore};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,7 +27,7 @@ use super::{Settings, ShadowQuic, Shared, controller};
 use crate::addr_codec::SOCKS;
 use crate::ctx::BuildCtx;
 use crate::node::Egress;
-use crate::quic::{BbrProfile, Crypto, DatagramHub, ObfsSpec, QuicLink, SwitchFactory};
+use crate::quic::{Crypto, QuicLink};
 use crate::testing::{HeldLookup, quic_server, test_env};
 
 type Routes = Arc<Mutex<HashMap<u16, (Arc<UdpSocket>, SocketAddr)>>>;

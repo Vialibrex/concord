@@ -16,6 +16,9 @@ use concord_common::{
     Address, BoxStream, DialCx, Outbound, OutboundInfo, OutboundKind, PacketSession,
 };
 use concord_config::proxy::{HysteriaOpts, ProxyDef};
+use concord_quic::{
+    Brutal, Hop, ObfsSpec, QuicConn, QuicStream, SharedConn, SwitchFactory, io_error,
+};
 use quinn::congestion::ControllerFactory;
 use quinn::{IdleTimeout, SendStream, TransportConfig, VarInt};
 use tokio::io::AsyncWriteExt;
@@ -25,10 +28,7 @@ use self::udp::{Hub, Hy1Packets};
 use self::wire::{client_hello, client_request, read_server_hello, read_server_response};
 use crate::ctx::{BuildCtx, BuildError};
 use crate::node::{Egress, info_for};
-use crate::quic::{
-    Brutal, Hop, ObfsSpec, QuicConn, QuicLink, QuicStream, SharedConn, SwitchFactory, io_error,
-    node_crypto,
-};
+use crate::quic::{QuicLink, node_crypto};
 use crate::session_slot::SessionSlot;
 use crate::util::{parse_bps, parse_ports};
 
@@ -232,14 +232,14 @@ fn transport(opts: &HysteriaOpts, controllers: Arc<SwitchFactory>) -> Arc<Transp
             u64::from(opts.recv_window),
         )
     };
-    let mut config = crate::quic::transport_config();
+    let mut config = concord_quic::transport_config();
     config
         .max_idle_timeout(IdleTimeout::try_from(MAX_IDLE).ok())
         .keep_alive_interval(Some(KEEP_ALIVE))
         .stream_receive_window(VarInt::from_u64(stream).unwrap_or(VarInt::MAX))
         .receive_window(VarInt::from_u64(conn).unwrap_or(VarInt::MAX))
         .send_window(conn.saturating_mul(2))
-        .datagram_receive_buffer_size(Some(crate::quic::datagram_buffer(DATAGRAM_FRAME)))
+        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(DATAGRAM_FRAME)))
         .congestion_controller_factory(controllers);
     if opts.disable_mtu_discovery {
         config.mtu_discovery_config(None);
@@ -331,7 +331,7 @@ pub(crate) fn build(
         }
     });
     let (server_name, tls) = node_crypto(&opts.tls, &opts.server, "hysteria", ctx)?;
-    let initial: Arc<dyn ControllerFactory + Send + Sync> = Arc::new(crate::quic::cubic());
+    let initial: Arc<dyn ControllerFactory + Send + Sync> = Arc::new(concord_quic::cubic());
     let controllers = SwitchFactory::new(initial);
     let port = if opts.port == 0 {
         ports.first().copied().unwrap_or(0)

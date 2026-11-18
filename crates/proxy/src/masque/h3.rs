@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use concord_common::{DialCx, Tasks};
+use concord_quic::{QuicConn, io_error};
 use http::{Method, Request};
 use tokio::task::JoinHandle;
 
 use super::config::Config;
-use crate::quic::{QuicConn, io_error};
 
 pub(super) type Requests = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 pub(super) type Driver = h3::client::Connection<h3_quinn::Connection, Bytes>;

@@ -3,12 +3,13 @@ use std::time::Duration;
 
 use concord_common::{Address, DialCx, Initiator};
 use concord_config::proxy::TlsOpts;
+use concord_quic::{ObfsSpec, transport_config};
 use concord_transport::QuicDialFn;
 
 use super::{EnvSlot, POOL_DIALS, pool_chain};
 use crate::ctx::{BuildCtx, BuildError};
 use crate::node::Egress;
-use crate::quic::{ObfsSpec, QuicLink, quic_crypto, transport_config};
+use crate::quic::{QuicLink, quic_crypto};
 use crate::tlsmap::{TlsSpec, tls_options};
 
 pub(super) fn dial(

@@ -6,10 +6,10 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use concord_common::{Address, PacketBuf, PacketSession};
+use concord_quic::DatagramHub;
 use tokio::sync::mpsc;
 
 use super::wire::{Defrag, MAX_UDP, UdpHeader, parse_udp, put_udp_header, udp_header_len};
-use crate::quic::DatagramHub;
 use crate::util::lock;
 
 const QUEUE: usize = 64;

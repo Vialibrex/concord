@@ -13,6 +13,9 @@ use concord_common::{
     PacketSession, Tasks,
 };
 use concord_config::proxy::{Hysteria2Opts, ProxyDef};
+use concord_quic::{
+    BbrProfile, Brutal, Hop, ObfsSpec, QuicStream, SharedConn, SwitchFactory, bbr_factory, io_error,
+};
 use quinn::congestion::ControllerFactory;
 use quinn::{IdleTimeout, TransportConfig, VarInt};
 use tokio::sync::watch;
@@ -23,10 +26,7 @@ use self::udp::{Hub, Hy2Packets};
 use crate::ctx::{BuildCtx, BuildError};
 use crate::lazy::{HeadFirst, Kick};
 use crate::node::{Egress, info_for};
-use crate::quic::{
-    BbrProfile, Brutal, Hop, ObfsSpec, QuicLink, QuicStream, SharedConn, SwitchFactory,
-    bbr_factory, io_error, node_crypto,
-};
+use crate::quic::{QuicLink, node_crypto};
 use crate::session_slot::{SessionSlot, Ticket};
 use crate::util::{lock, parse_bps, parse_ports};
 
@@ -330,7 +330,7 @@ fn window(value: u64, fallback: u64) -> VarInt {
 }
 
 fn transport(opts: &Hysteria2Opts, controllers: Arc<SwitchFactory>) -> Arc<TransportConfig> {
-    let mut config = crate::quic::transport_config();
+    let mut config = concord_quic::transport_config();
     let stream_window = window(opts.max_stream_receive_window, DEFAULT_STREAM_WINDOW);
     let conn_window = window(opts.max_connection_receive_window, DEFAULT_CONN_WINDOW);
     config
@@ -339,7 +339,7 @@ fn transport(opts: &Hysteria2Opts, controllers: Arc<SwitchFactory>) -> Arc<Trans
         .stream_receive_window(stream_window)
         .receive_window(conn_window)
         .send_window(conn_window.into_inner().saturating_mul(2))
-        .datagram_receive_buffer_size(Some(crate::quic::datagram_buffer(DATAGRAM_FRAME)))
+        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(DATAGRAM_FRAME)))
         .congestion_controller_factory(controllers);
     Arc::new(config)
 }
@@ -351,7 +351,7 @@ fn initial_controller(opts: &Hysteria2Opts) -> Arc<dyn ControllerFactory + Send 
             DEFAULT_CWND
         } else {
             opts.cwnd
-        }) * crate::quic::INITIAL_PACKET_SIZE,
+        }) * concord_quic::INITIAL_PACKET_SIZE,
     )
 }
 
@@ -372,7 +372,8 @@ fn obfs_spec(opts: &Hysteria2Opts) -> Result<ObfsSpec, BuildError> {
         },
         other => return Err(BuildError::invalid(format!("unknown obfs type: {other}"))),
     };
-    spec.check().map_err(BuildError::invalid)?;
+    spec.check()
+        .map_err(|err| BuildError::invalid(err.to_string()))?;
     Ok(spec)
 }
 

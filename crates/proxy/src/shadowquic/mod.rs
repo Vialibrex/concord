@@ -14,6 +14,9 @@ use concord_common::{
     Address, BoxStream, DialCx, Outbound, OutboundInfo, OutboundKind, PacketSession,
 };
 use concord_config::proxy::{ProxyDef, ShadowQuicOpts};
+use concord_quic::{
+    BbrProfile, Brutal, ObfsSpec, QuicStream, SharedConn, SwitchFactory, bbr_factory, io_error,
+};
 use quinn::congestion::ControllerFactory;
 use quinn::{IdleTimeout, TransportConfig, VarInt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,10 +30,7 @@ use self::wire::{
 };
 use crate::ctx::{BuildCtx, BuildError};
 use crate::node::{Egress, info_for};
-use crate::quic::{
-    BbrProfile, Brutal, Crypto, ObfsSpec, QuicLink, QuicStream, SharedConn, SwitchFactory,
-    bbr_factory, io_error,
-};
+use crate::quic::{Crypto, QuicLink};
 use crate::session_slot::SessionSlot;
 use crate::util::parse_bps;
 
@@ -126,7 +126,7 @@ async fn negotiate(
         switch.replace(
             bbr_factory(
                 settings.profile,
-                settings.cwnd * crate::quic::INITIAL_PACKET_SIZE,
+                settings.cwnd * concord_quic::INITIAL_PACKET_SIZE,
             )
             .build(Instant::now(), BRUTAL_MTU),
         );
@@ -251,11 +251,11 @@ fn controller(
     profile: BbrProfile,
 ) -> Arc<dyn ControllerFactory + Send + Sync> {
     match name {
-        "new_reno" => Arc::new(crate::quic::new_reno()),
+        "new_reno" => Arc::new(concord_quic::new_reno()),
         "bbr" | "bbr_meta_v1" | "bbr_meta_v2" => {
-            bbr_factory(profile, cwnd * crate::quic::INITIAL_PACKET_SIZE)
+            bbr_factory(profile, cwnd * concord_quic::INITIAL_PACKET_SIZE)
         }
-        _ => Arc::new(crate::quic::cubic()),
+        _ => Arc::new(concord_quic::cubic()),
     }
 }
 
@@ -281,7 +281,7 @@ fn transport(opts: &ShadowQuicOpts, controllers: Arc<SwitchFactory>) -> Arc<Tran
         count => count,
     });
     let conn_window = window(opts.recv_window, DEFAULT_CONN_WINDOW);
-    let mut config = crate::quic::transport_config();
+    let mut config = concord_quic::transport_config();
     config
         .max_idle_timeout(IdleTimeout::try_from(MAX_IDLE).ok())
         .stream_receive_window(window(opts.recv_window_conn, DEFAULT_STREAM_WINDOW))
@@ -289,7 +289,7 @@ fn transport(opts: &ShadowQuicOpts, controllers: Arc<SwitchFactory>) -> Arc<Tran
         .send_window(conn_window.into_inner().saturating_mul(2))
         .max_concurrent_bidi_streams(streams)
         .max_concurrent_uni_streams(streams)
-        .datagram_receive_buffer_size(Some(crate::quic::datagram_buffer(datagram_frame(opts))))
+        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(datagram_frame(opts))))
         .congestion_controller_factory(controllers);
     if opts.keep_alive_interval > 0 {
         config.keep_alive_interval(Some(Duration::from_millis(u64::from(

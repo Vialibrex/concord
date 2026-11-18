@@ -14,6 +14,7 @@ use crate::stream_policy::rust_files;
 
 const OWNED: &[&str] = &[
     "crates/proxy/src",
+    "crates/quic/src",
     "crates/transport/src",
     "crates/net/src",
     "crates/tls/src",

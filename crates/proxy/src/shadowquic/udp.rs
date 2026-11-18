@@ -7,12 +7,12 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use concord_common::{Address, PacketBuf, PacketSession, Stream, Tasks};
+use concord_quic::{DatagramHub, QuicStream};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use super::wire::{control_entry, datagram, read_control_entry, split_datagram};
-use crate::quic::{DatagramHub, QuicStream};
 use crate::util::lock;
 
 const MAX_PENDING_PER_ID: usize = 32;

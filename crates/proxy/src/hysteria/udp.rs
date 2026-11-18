@@ -6,13 +6,13 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use concord_common::{Address, PacketBuf, PacketSession, Tasks};
+use concord_quic::{DatagramHub, QuicStream};
 use rand::Rng;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::wire::{Defrag, UdpHeader, parse_udp, put_udp_header, udp_header_len};
-use crate::quic::{DatagramHub, QuicStream};
 use crate::util::lock;
 
 const QUEUE: usize = 64;

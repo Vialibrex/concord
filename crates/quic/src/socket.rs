@@ -14,7 +14,7 @@ use quinn::{AsyncUdpSocket, UdpPoller};
 use rand::Rng;
 use tokio::task::JoinHandle;
 
-use super::obfs::{Gecko, Opened, Seal};
+use crate::obfs::{Gecko, Opened, Seal};
 
 pub(crate) enum Obfs {
     None,
@@ -25,10 +25,10 @@ pub(crate) enum Obfs {
 /// The port-hopping schedule. The connection keeps its first server address
 /// while datagrams leave for whichever port the schedule picked last.
 #[derive(Clone)]
-pub(crate) struct Hop {
-    pub(crate) ports: Vec<u16>,
-    pub(crate) min: Duration,
-    pub(crate) max: Duration,
+pub struct Hop {
+    pub ports: Vec<u16>,
+    pub min: Duration,
+    pub max: Duration,
 }
 
 struct HopState {
@@ -218,7 +218,7 @@ impl WrappedSocket {
 /// so each `WSARecvMsg` would be handed about 94 KB for a single packet.
 #[cfg(windows)]
 #[derive(Debug)]
-pub(super) struct SingleReceive(pub(super) Arc<dyn AsyncUdpSocket>);
+pub(crate) struct SingleReceive(pub(crate) Arc<dyn AsyncUdpSocket>);
 
 #[cfg(windows)]
 impl AsyncUdpSocket for SingleReceive {
@@ -356,8 +356,8 @@ impl AsyncUdpSocket for WrappedSocket {
 mod tests {
     use quinn::{Runtime, TokioRuntime};
 
-    use super::super::obfs::Salamander;
     use super::*;
+    use crate::obfs::Salamander;
 
     fn wrap(
         socket: tokio::net::UdpSocket,

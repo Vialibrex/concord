@@ -55,13 +55,13 @@ fn cap_frame(raw: &[u8], frame: u64) -> Option<Vec<u8>> {
 /// quinn derives the `max_datagram_frame_size` it advertises from the size of
 /// its datagram receive buffer, so the two cannot differ. This advertises
 /// `frame` while the buffer stays large.
-pub(crate) struct CappedFrame {
+pub struct CappedFrame {
     inner: Arc<dyn ClientConfig>,
     frame: u64,
 }
 
 impl CappedFrame {
-    pub(crate) fn new(inner: Arc<dyn ClientConfig>, frame: u64) -> Self {
+    pub fn new(inner: Arc<dyn ClientConfig>, frame: u64) -> Self {
         CappedFrame { inner, frame }
     }
 }

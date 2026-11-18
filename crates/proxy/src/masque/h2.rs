@@ -2,11 +2,11 @@ use std::io;
 use std::time::Duration;
 
 use concord_common::{BoxStream, DialCx};
+use concord_quic::io_error;
 use concord_transport::h2io::{Activity, H2Body, Incoming, client_builder, spawn_connection};
 use http::{Method, Request, Uri};
 
 use super::config::Config;
-use crate::quic::io_error;
 
 pub(super) async fn connect(config: &Config, cx: &DialCx<'_>) -> io::Result<BoxStream> {
     let io = config.link.egress.dial(cx, &config.link.server).await?;

@@ -12,6 +12,7 @@ use concord_common::{
     Address, BoxStream, DialCx, Outbound, OutboundInfo, OutboundKind, PacketSession,
 };
 use concord_config::proxy::{ProxyDef, TuicOpts};
+use concord_quic::{BbrProfile, ObfsSpec, QuicStream, bbr_factory, io_error};
 use quinn::congestion::ControllerFactory;
 use quinn::{IdleTimeout, TransportConfig, VarInt};
 
@@ -22,7 +23,7 @@ use self::wire::Version;
 use crate::ctx::{BuildCtx, BuildError};
 use crate::lazy::{HeadFirst, Kick};
 use crate::node::{Egress, info_for};
-use crate::quic::{BbrProfile, ObfsSpec, QuicLink, QuicStream, bbr_factory, io_error, node_crypto};
+use crate::quic::{QuicLink, node_crypto};
 use crate::uot;
 
 const DEFAULT_STREAM_WINDOW: u64 = 15_728_640;
@@ -139,11 +140,11 @@ fn controller(
         u64::from(opts.cwnd)
     };
     Ok(match opts.congestion_controller.as_str() {
-        "cubic" => Some(Arc::new(crate::quic::cubic())),
-        "new_reno" => Some(Arc::new(crate::quic::new_reno())),
+        "cubic" => Some(Arc::new(concord_quic::cubic())),
+        "new_reno" => Some(Arc::new(concord_quic::new_reno())),
         "bbr" | "bbr_meta_v1" | "bbr_meta_v2" => Some(bbr_factory(
             BbrProfile::parse(&opts.bbr_profile),
-            cwnd * crate::quic::INITIAL_PACKET_SIZE,
+            cwnd * concord_quic::INITIAL_PACKET_SIZE,
         )),
         _ => None,
     })
@@ -164,7 +165,7 @@ fn transport(
     max_open: u32,
     frame: usize,
 ) -> Result<Arc<TransportConfig>, BuildError> {
-    let mut config = crate::quic::transport_config();
+    let mut config = concord_quic::transport_config();
     let streams = u64::from(max_open + max_open.div_ceil(10));
     config
         .max_idle_timeout(IdleTimeout::try_from(MAX_IDLE).ok())
@@ -173,7 +174,7 @@ fn transport(
         .receive_window(window(opts.recv_window, DEFAULT_CONN_WINDOW))
         .max_concurrent_bidi_streams(VarInt::from_u64(streams).unwrap_or(VarInt::MAX))
         .max_concurrent_uni_streams(VarInt::from_u64(streams).unwrap_or(VarInt::MAX))
-        .datagram_receive_buffer_size(Some(crate::quic::datagram_buffer(
+        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(
             u64::try_from(frame).unwrap_or(u64::MAX),
         )));
     if opts.disable_mtu_discovery {

@@ -44,7 +44,7 @@ const AGGRESSIVE: Profile = Profile {
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BbrProfile {
+pub enum BbrProfile {
     Standard,
     Conservative,
     Aggressive,
@@ -52,7 +52,7 @@ pub(crate) enum BbrProfile {
 
 impl BbrProfile {
     /// Any name mihomo does not know is `standard`.
-    pub(crate) fn parse(name: &str) -> Self {
+    pub fn parse(name: &str) -> Self {
         match name {
             "conservative" => BbrProfile::Conservative,
             "aggressive" => BbrProfile::Aggressive,
@@ -65,7 +65,7 @@ impl BbrProfile {
 /// two keep quinn's loss handling and take only the gains, startup length and
 /// drain rule of the profile: overshoot detection and overestimate avoidance
 /// are not modelled.
-pub(crate) fn factory(
+pub fn factory(
     profile: BbrProfile,
     initial_window: u64,
 ) -> Arc<dyn ControllerFactory + Send + Sync> {
