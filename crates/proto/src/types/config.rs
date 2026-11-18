@@ -112,6 +112,24 @@ dto! {
         pub selection: BTreeMap<String, String>,
         #[serde(default)]
         pub options: Options,
+        /// Applied with the profile, so a core a host started without patching it holds them
+        /// from its first connection on. Absent keeps what is in force, as a patch does.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub host: Option<HostSettings>,
+    }
+
+    /// The settings only a host gives a core it drives; each means what the field of the
+    /// same name in `ConfigPatchParams` means, and an absent one keeps the value in force.
+    #[derive(Default)]
+    pub struct HostSettings {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub external_controller: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub secret: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub external_controller_cors: Option<ControllerCorsPatch>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub host_credential: Option<String>,
     }
 
     /// One rule of the main list in force, in match order.

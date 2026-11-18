@@ -1303,6 +1303,17 @@
             "delayTestTimeout": 0,
             "mitmCapture": false
           }
+        },
+        "host": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HostSettings"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Applied with the profile, so a core a host started without patching it holds them\nfrom its first connection on. Absent keeps what is in force, as a patch does."
         }
       }
     },
@@ -1341,6 +1352,61 @@
           "default": false
         }
       }
+    },
+    "HostSettings": {
+      "type": "object",
+      "properties": {
+        "externalController": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "secret": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "externalControllerCors": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ControllerCorsPatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hostCredential": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "description": "The settings only a host gives a core it drives; each means what the field of the\nsame name in `ConfigPatchParams` means, and an absent one keeps the value in force."
+    },
+    "ControllerCorsPatch": {
+      "type": "object",
+      "properties": {
+        "allowOrigins": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowPrivateNetwork": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "description": "Which browser origins may call the external controller. An absent field takes mihomo's\ndefault: every origin, and private-network preflights allowed. No origin refuses them all."
     },
     "ConfigApplyResult": {
       "type": "object",
@@ -1561,27 +1627,6 @@
         "error",
         "silent"
       ]
-    },
-    "ControllerCorsPatch": {
-      "type": "object",
-      "properties": {
-        "allowOrigins": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "type": "string"
-          }
-        },
-        "allowPrivateNetwork": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "description": "Which browser origins may call the external controller. An absent field takes mihomo's\ndefault: every origin, and private-network preflights allowed. No origin refuses them all."
     },
     "ChangeSeq": {
       "type": "object",

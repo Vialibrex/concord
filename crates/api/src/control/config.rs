@@ -124,6 +124,10 @@ impl Control {
     ) -> Result<ConfigApplyResult, ApiError> {
         self.require_initialized()?;
         let _answering = self.engine.hold_first_loads();
+        let host = params.host.unwrap_or_default();
+        if let Some(line) = &host.host_credential {
+            self.engine.set_host_credential(line);
+        }
         let base = match (params.profile, params.overlay) {
             (Some(profile), overlay) => Some((
                 profile.path,
@@ -153,7 +157,7 @@ impl Control {
         if let Some(level) = self.engine.log_level().await {
             self.bus.gate().set_level(level);
         }
-        match applied {
+        let applied = match applied {
             Ok(()) => {
                 self.configured.store(true, Ordering::SeqCst);
                 self.clear_failure();
@@ -178,7 +182,15 @@ impl Control {
                 }
                 Err(error)
             }
+        };
+        if self.configured.load(Ordering::SeqCst) {
+            self.adopt_host_controller(
+                host.external_controller,
+                host.secret,
+                host.external_controller_cors,
+            );
         }
+        applied
     }
 
     pub async fn config_patch_as(
@@ -240,21 +252,30 @@ impl Control {
         let (address, secret) = (params.external_controller.clone(), params.secret.clone());
         let cors = params.external_controller_cors.clone();
         let patched = self.config_patch_as(Origin::Host, params).await?;
-        if self.host_owned() && (address.is_some() || secret.is_some() || cors.is_some()) {
-            let mut next = self.controller.borrow().clone();
-            if let Some(address) = address {
-                next.address = address;
-            }
-            if let Some(secret) = secret {
-                next.secret = secret;
-            }
-            if let Some(cors) = cors {
-                next.cors =
-                    ControllerCors::or_defaults(cors.allow_origins, cors.allow_private_network);
-            }
-            self.set_external_controller(next);
-        }
+        self.adopt_host_controller(address, secret, cors);
         Ok(patched)
+    }
+
+    fn adopt_host_controller(
+        &self,
+        address: Option<String>,
+        secret: Option<String>,
+        cors: Option<ControllerCorsPatch>,
+    ) {
+        if !self.host_owned() || (address.is_none() && secret.is_none() && cors.is_none()) {
+            return;
+        }
+        let mut next = self.controller.borrow().clone();
+        if let Some(address) = address {
+            next.address = address;
+        }
+        if let Some(secret) = secret {
+            next.secret = secret;
+        }
+        if let Some(cors) = cors {
+            next.cors = ControllerCors::or_defaults(cors.allow_origins, cors.allow_private_network);
+        }
+        self.set_external_controller(next);
     }
 
     pub(super) async fn config_general(&self, _params: Empty) -> Result<GeneralState, ApiError> {

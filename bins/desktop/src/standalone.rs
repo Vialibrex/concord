@@ -134,6 +134,7 @@ async fn load(control: &Control, config: Option<&Path>, home: &Path) -> Result<(
             overlay: None,
             selection: control.selections(),
             options: Default::default(),
+            host: None,
         })
         .await
         .map_err(|err| err.to_string())?;

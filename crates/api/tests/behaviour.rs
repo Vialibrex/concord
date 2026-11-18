@@ -916,6 +916,81 @@ async fn a_pick_moves_the_route_and_the_watchers_hear_about_it_only_while_they_w
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_apply_hands_the_host_settings_to_a_core_nobody_patched() {
+    let rig = Rig::new().await;
+    let mixed = free_port();
+    let target = hanging_server().await;
+    rig.write_config(&format!(
+        "mixed-port: {mixed}\nauthentication:\n  - user:pass\nrules:\n  - MATCH,DIRECT\n"
+    ));
+    let controller = format!("127.0.0.1:{}", free_port());
+    rig.apply_with(ConfigApplyParams {
+        host: Some(HostSettings {
+            external_controller: Some(controller.clone()),
+            secret: Some("s3cret".into()),
+            host_credential: Some("host:key".into()),
+            ..HostSettings::default()
+        }),
+        ..ConfigApplyParams::default()
+    })
+    .await
+    .unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+
+    let settings = rig.control.external_controller().borrow().clone();
+    assert_eq!(
+        (settings.address.as_str(), settings.secret.as_str()),
+        (controller.as_str(), "s3cret")
+    );
+    let (own, guess) = ("Basic aG9zdDprZXk=", "Basic aG9zdDpndWVzcw==");
+    assert!(
+        connect_as(mixed, target, own)
+            .await
+            .starts_with("HTTP/1.1 200")
+    );
+
+    rig.apply().await.unwrap();
+    assert_eq!(
+        rig.control.external_controller().borrow().address,
+        controller,
+        "an apply without host settings keeps them"
+    );
+    assert!(
+        connect_as(mixed, target, own)
+            .await
+            .starts_with("HTTP/1.1 200")
+    );
+    assert!(
+        !connect_as(mixed, target, guess)
+            .await
+            .starts_with("HTTP/1.1 200")
+    );
+    rig.finish().await;
+}
+
+async fn connect_as(proxy: u16, target: u16, authorization: &str) -> String {
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            format!(
+                "CONNECT 127.0.0.1:{target} HTTP/1.1\r\nHost: 127.0.0.1:{target}\r\n\
+                 Proxy-Authorization: {authorization}\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).await.is_ok() {
+        head.push(byte[0]);
+    }
+    String::from_utf8_lossy(&head).into_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_patch_that_moves_the_mode_moves_the_route_stamp() {
     let rig = Rig::new().await;
     rig.write_config("rules:\n  - MATCH,DIRECT\n");

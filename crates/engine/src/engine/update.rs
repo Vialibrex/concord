@@ -151,8 +151,13 @@ impl Engine {
                 .collect();
         }
         if let Some(line) = host_credential {
-            *lock(&self.host_credential) = concord_inbound::parse_credential(&line);
+            self.set_host_credential(&line);
         }
+    }
+
+    /// Takes effect on the listeners at the next reconcile, which every apply and patch runs.
+    pub fn set_host_credential(&self, line: &str) {
+        *lock(&self.host_credential) = concord_inbound::parse_credential(line);
     }
 }
 
