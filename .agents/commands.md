@@ -74,9 +74,10 @@ release `libconcord.so` of the other two Android ABIs against their budgets).
   `concord-group`'s `public_suffix` tests compare every rule against it. One commit, apart from code changes.
 - A change to config parsing that changes output: `CONCORD_BLESS=1 cargo test -p concord-config --test golden`
   rewrites the golden files, and the diff is reviewed like code.
-- Clippy for Android (`--target aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android`) runs with `-A clippy::missing_const_for_thread_local`. On
-  that target the lint fires on two `thread_local!` statics whose initializer is already `const { … }`
-  (`crates/common/src/packet.rs:13`, `crates/common/src/stream_buffer.rs:15`); other targets do not report them.
+- Clippy for Android (`--target aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android`) runs with
+  `-A clippy::missing_const_for_thread_local`. On those targets the lint fires on every `thread_local!` whose
+  initializer is already `const { … }`; macOS and Linux do not report it. Seen with toolchain 1.100.0: when the
+  toolchain moves, recheck whether the flag can go.
 - `#[ignore]`d tests need an external peer named by an environment variable. An interop test run without its peer
   fails rather than passing silently. mihomo's Snell listener can lose a frame when its peek deadline falls between
   the two reads of that frame, so the Snell interop cases retry TCP once. Run the ones a change touches, for example
