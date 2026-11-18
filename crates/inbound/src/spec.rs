@@ -81,7 +81,7 @@ pub struct ListenSpec {
     pub authentication: Vec<(String, String)>,
     /// Sources that connect without credentials, as mihomo's `skip-auth-prefixes`.
     pub skip_auth: Vec<Cidr>,
-    /// The `user:pass` the host's own requests carry; see [`Policy::host`].
+    /// The `user:pass` the host's own requests carry, accepted from loopback clients only.
     pub host_credential: Option<(String, String)>,
     pub lan_allowed_ips: Vec<Cidr>,
     pub lan_disallowed_ips: Vec<Cidr>,
