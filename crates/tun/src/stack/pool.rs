@@ -167,13 +167,13 @@ impl TxPool {
         self.driver.wake();
     }
 
-    /// Moves up to `most` free slots into `into`, leaving `keep` free, under one lock.
-    pub fn take_up_to(&self, into: &mut Vec<Slot>, most: usize, keep: usize) -> usize {
+    /// Moves up to `most` free slots into `into` under one lock.
+    pub fn take_up_to(&self, into: &mut Vec<Slot>, most: usize) -> usize {
         let mut state = self.lock();
         if state.closed {
             return 0;
         }
-        let count = state.free.len().saturating_sub(keep).min(most);
+        let count = state.free.len().min(most);
         let at = state.free.len() - count;
         into.extend(state.free.drain(at..));
         count

@@ -16,7 +16,6 @@ use concord_netstack::wire::{
     L4Checksum, UDP_HEADER, build_udp, fragment_count, ip_header_len, write_fragment,
 };
 
-use super::driver::MIN_FREE_SLOTS;
 use super::pool::{Slot, TxPool};
 use super::stats::StackStats;
 
@@ -131,7 +130,7 @@ impl ReplySources {
             let Some(Some(entry)) = self.sources.get(index) else {
                 continue;
             };
-            if pool.take_up_to(&mut self.slots, RECV_MAX, MIN_FREE_SLOTS) == 0 {
+            if pool.take_up_to(&mut self.slots, RECV_MAX) == 0 {
                 self.order.push_front(index);
                 break;
             }
@@ -446,11 +445,7 @@ mod tests {
         let fakes = adopt(&replies, 6);
         for _ in 0..12 {
             assert!(replies.drain());
-            assert_eq!(
-                written(&pool),
-                38,
-                "a batch of 32, then the 6 left above the 2 kept free"
-            );
+            assert_eq!(written(&pool), 40, "a batch of 32, then the 8 left");
         }
         assert_eq!(polls(&fakes), [4; 6]);
     }
@@ -460,7 +455,7 @@ mod tests {
         let (mut replies, pool) = sources(16);
         let fakes = adopt(&replies, 3);
         let mut held = Vec::new();
-        pool.take_up_to(&mut held, usize::MAX, 0);
+        pool.take_up_to(&mut held, usize::MAX);
         for _ in 0..100 {
             assert!(!replies.drain());
         }

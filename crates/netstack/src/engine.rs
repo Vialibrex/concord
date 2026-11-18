@@ -2,7 +2,7 @@ use std::cmp::Reverse;
 use std::collections::hash_map::RandomState;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::hash::BuildHasher;
-use std::io;
+use std::io::{self, IoSlice};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::task::Waker;
@@ -18,8 +18,56 @@ use crate::seq::Seq;
 use crate::stream::{ConnId, NetStream, Notifier, Shared};
 use crate::tcp::{Egress, Event, Tcb, TcpConfig, Wakes};
 use crate::wire::{
-    DropReason, FLAG_ACK, FLAG_RST, TcpHeader, TcpOptions, TcpSegment, emit_tcp, parse_tcp,
+    DropReason, FLAG_ACK, FLAG_RST, L4Checksum, TcpHeader, TcpOptions, TcpSegment, emit_tcp,
+    parse_tcp,
 };
+
+/// Notes whether an egress took any packet. A connection whose turn found no room keeps its
+/// place in the queue: moved back, every pass with an empty pool would turn the queue by one,
+/// and when such passes alternate with passes that have room, half the queue never reaches the
+/// front with room.
+struct Counted<'e> {
+    inner: &'e mut dyn Egress,
+    took: bool,
+}
+
+impl<'e> Counted<'e> {
+    fn new(inner: &'e mut dyn Egress) -> Self {
+        Counted { inner, took: false }
+    }
+}
+
+impl Egress for Counted<'_> {
+    fn send(&mut self, build: &mut dyn FnMut(&mut [u8]) -> Option<usize>) -> bool {
+        let sent = self.inner.send(build);
+        self.took |= sent;
+        sent
+    }
+
+    fn checksum(&self) -> L4Checksum {
+        self.inner.checksum()
+    }
+
+    fn segment_limit(&self) -> usize {
+        self.inner.segment_limit()
+    }
+
+    fn send_segmented(
+        &mut self,
+        segment: u16,
+        build: &mut dyn FnMut(&mut [u8]) -> Option<usize>,
+    ) -> bool {
+        let sent = self.inner.send_segmented(segment, build);
+        self.took |= sent;
+        sent
+    }
+
+    fn send_in_place(&mut self, segment: u16, head: &[u8], payload: &[IoSlice<'_>]) -> bool {
+        let sent = self.inner.send_in_place(segment, head, payload);
+        self.took |= sent;
+        sent
+    }
+}
 
 /// What the host decides for a new connection's SYN.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -583,6 +631,7 @@ impl TcpStack {
         // Connections waiting for room send first, in the order they began to wait, and the one
         // that used the room up goes behind them. Served after those that became ready since, a
         // waiting connection would send nothing for as long as a busy one keeps taking the room.
+        // One that found no room at all keeps its place (see `Counted`).
         let mut order = std::mem::take(&mut self.touched);
         let waiting = self.blocked.len();
         order.splice(0..0, self.blocked.drain(..));
@@ -600,9 +649,10 @@ impl TcpStack {
             if out_of_room {
                 self.blocked.push(id);
             } else {
+                let mut counted = Counted::new(egress);
                 let sent = {
                     let mut state = conn.shared.lock();
-                    let sent = conn.tcb.output(now, &mut state, egress);
+                    let sent = conn.tcb.output(now, &mut state, &mut counted);
                     if state.send_room() > 0 {
                         self.wakes.add(state.wake_writer());
                         if conn.socket.as_ref().is_some_and(|socket| socket.limited()) {
@@ -613,7 +663,11 @@ impl TcpStack {
                 };
                 if !sent {
                     out_of_room = true;
-                    spent = Some(id);
+                    if counted.took {
+                        spent = Some(id);
+                    } else {
+                        self.blocked.push(id);
+                    }
                 }
             }
             if let Some((local, remote, seq, ack)) = conn.tcb.take_reset() {

@@ -71,7 +71,6 @@ rules::runs::KEYWORD_AUTOMATON_FROM 16  # Either drop is possible (always automa
 tun::device::linux::TunDevice::try_send_parts::MAX_PARTS 10  # Bound on iovecs (vnet header + parts) for one vectored TUN write; no reference found.
 tun::stack::driver::DNS_CONCURRENCY 256  # In-flight hijacked DNS queries. Concord's own value with no reference or measurement behind it; sing-tun has no DNS in-flight cap.
 tun::stack::driver::MAX_ROUNDS 8  # Driver rounds per wake. Concord's own value with no reference or measurement behind it; sing-tun bounds a burst by goEngineBurstBytes 1 MiB (`stack_go_engine.go:642`).
-tun::stack::driver::MIN_FREE_SLOTS 2  # Free TX slots required before a round. Concord's own value with no reference or measurement behind it.
 tun::stack::driver::RX_BUFFER 65552  # sing-tun slot is virtioNetHdrLen(10) + gsoMaxSize + headroom (stack_go_io_linux.go:275); Concord 64 KiB + 16
 tun::stack::driver::SEGMENTED_SLOTS 64  # TX slots that grow to a GSO frame. Concord's own value with no reference or measurement behind it.
 tun::stack::driver::SWEEP_INTERVAL 15000000  # Driver sweep period, 15 s. Concord's own value with no reference or measurement behind it; sing-tun drives timers from a wheel.

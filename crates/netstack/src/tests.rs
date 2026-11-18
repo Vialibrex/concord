@@ -97,6 +97,83 @@ async fn receive_lifetimes_retire_on_unestablished_cancel_and_shutdown() {
     }
 }
 
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn segments_taken_without_transmit_room_are_acked_once_room_returns() {
+    let mut link = Link::new(0, 0);
+    let (client_addr, server_addr) = addrs();
+    let _client = link
+        .client
+        .connect(client_addr, server_addr, Congestion::Cubic)
+        .unwrap();
+    drive(&mut link, |l| l.accepted.len() == 1, 10).await;
+    let mut server = link.accepted.pop().unwrap();
+    server.write_all(&[7; 4000]).await.unwrap();
+    link.server.poll(&mut link.to_client);
+    let data = std::mem::take(&mut link.to_client.packets);
+    assert!(!data.is_empty());
+
+    link.to_server.limit = Some(0);
+    for packet in &data {
+        link.deliver(false, packet);
+    }
+    link.client.poll(&mut link.to_server);
+    assert!(link.to_server.packets.is_empty(), "no room, so no ACK yet");
+    link.to_server.limit = None;
+    tokio::time::advance(Duration::from_millis(250)).await;
+    link.client.poll(&mut link.to_server);
+    let acks = std::mem::take(&mut link.to_server.packets);
+    assert!(!acks.is_empty(), "the owed ACK goes out with the next turn");
+
+    link.to_client.limit = Some(0);
+    for packet in &acks {
+        link.deliver(true, packet);
+    }
+    link.to_client.limit = None;
+    tokio::time::advance(Duration::from_secs(3)).await;
+    link.server.poll(&mut link.to_client);
+    assert!(
+        link.to_client.packets.is_empty(),
+        "an ACK read without room still released the data, so nothing is retransmitted"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn waiting_connections_all_send_when_passes_without_room_alternate_with_passes_with_room() {
+    let mut link = Link::new(0, 0);
+    let (first, server_addr) = addrs();
+    let mut clients = Vec::new();
+    for port in 0..4 {
+        let local = SocketAddr::new(first.ip(), first.port() + port);
+        clients.push(
+            link.client
+                .connect(local, server_addr, Congestion::Cubic)
+                .unwrap(),
+        );
+    }
+    drive(&mut link, |l| l.accepted.len() == 4, 10).await;
+    for stream in &mut link.accepted {
+        stream.write_all(&[7; 20_000]).await.unwrap();
+    }
+    for pass in 0..16 {
+        let queued = link.to_client.packets.len();
+        link.to_client.limit = Some(queued + if pass % 2 == 0 { 2 } else { 0 });
+        link.server.poll(&mut link.to_client);
+    }
+    let mut data_to = std::collections::HashMap::<u16, usize>::new();
+    for packet in &link.to_client.packets {
+        let Ok(Parsed::Packet(view)) = parse_packet(packet) else {
+            panic!("bad packet");
+        };
+        let seg = parse_tcp(view.l4).unwrap();
+        if !seg.payload.is_empty() {
+            *data_to.entry(seg.dst_port).or_default() += 1;
+        }
+    }
+    let mut counts: Vec<_> = data_to.into_iter().collect();
+    counts.sort_unstable();
+    assert_eq!(counts.len(), 4, "packets per client port: {counts:?}");
+}
+
 #[derive(Default)]
 struct Wire {
     packets: Vec<Vec<u8>>,

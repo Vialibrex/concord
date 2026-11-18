@@ -77,9 +77,27 @@ fn fingerprints(kind: &ProxyKind) -> Vec<(&'static str, &str)> {
     found
 }
 
+/// The `ip-stack` congestion control a node asks for when the stack runs CUBIC in its place.
+fn unavailable_congestion(kind: &ProxyKind) -> Option<&str> {
+    let name = match kind {
+        ProxyKind::WireGuard(o) => &o.ip_stack_congestion_controller,
+        ProxyKind::Masque(o) => &o.ip_stack_congestion_controller,
+        _ => return None,
+    };
+    ["bbr", "bbr3"]
+        .iter()
+        .any(|bbr| name.eq_ignore_ascii_case(bbr))
+        .then_some(name.as_str())
+}
+
 /// What the node's options say that the app should show, beyond what makes it unsupported.
 pub fn proxy_warnings(def: &ProxyDef) -> Vec<String> {
     let mut out = def.ignored.clone();
+    if let Some(name) = unavailable_congestion(&def.kind) {
+        out.push(format!(
+            "ip-stack.congestion-controller {name} is not available, so cubic runs instead"
+        ));
+    }
     for (key, value) in fingerprints(&def.kind) {
         if let Some(modern) = deprecated_fingerprint(value) {
             out.push(format!(
@@ -246,6 +264,31 @@ mod tests {
                  not to transport messages",
             ]
         );
+    }
+
+    #[test]
+    fn an_ip_stack_bbr_that_runs_as_cubic_is_named() {
+        let node = |kind: &str, congestion: &str| {
+            warnings(json!({
+                "name": "n", "type": kind, "server": "h.test", "port": 443,
+                "private-key": "AAAA", "public-key": "BBBB", "ip": "10.0.0.2",
+                "ip-stack": {"congestion-controller": congestion},
+            }))
+        };
+        for kind in ["wireguard", "masque"] {
+            for name in ["bbr", "BBR3"] {
+                assert_eq!(
+                    node(kind, name),
+                    [format!(
+                        "ip-stack.congestion-controller {name} is not available, so cubic runs instead"
+                    )],
+                    "{kind}"
+                );
+            }
+            for name in ["", "cubic", "reno"] {
+                assert!(node(kind, name).is_empty(), "{kind} {name}");
+            }
+        }
     }
 
     #[test]

@@ -34,7 +34,6 @@ use crate::dns;
 const RX_BATCH: usize = 64;
 const RX_BATCH_START: usize = 8;
 const MAX_ROUNDS: usize = 8;
-pub(super) const MIN_FREE_SLOTS: usize = 2;
 const SWEEP_INTERVAL: u64 = 15_000_000;
 const RX_BUFFER: usize = 65_536 + 16;
 const DNS_CONCURRENCY: usize = 256;
@@ -405,7 +404,7 @@ impl<D: Device> Driver<D> {
         while busy && rounds < MAX_ROUNDS {
             rounds += 1;
             self.udp.set_now(self.tcp.now());
-            busy = self.flush(cx);
+            busy = false;
             let sink = Arc::clone(&self.sink);
             let mut drained = Ok(false);
             sink.udp_round(&mut || {
@@ -564,12 +563,7 @@ impl<D: Device> Driver<D> {
         let capacity = buf.len();
         let mut free: &'a mut [u8] = buf;
         while *read < RX_BATCH {
-            let room = self.pool.free_count().saturating_sub(MIN_FREE_SLOTS - 1);
-            let want = self
-                .rx_batch
-                .min(RX_BATCH - *read)
-                .min(room)
-                .min(free.len() / stride);
+            let want = self.rx_batch.min(RX_BATCH - *read).min(free.len() / stride);
             if want == 0 {
                 return false;
             }
@@ -951,6 +945,106 @@ mod owner_tests {
                 if exhaust { 2 } else { 1 }
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_full_transmit_pool_does_not_stop_reading_the_device() {
+        struct Queued(std::sync::atomic::AtomicUsize);
+        impl Device for Queued {
+            fn poll_recv(&self, _: &mut Context<'_>, _: &mut [u8]) -> Poll<io::Result<usize>> {
+                match self
+                    .0
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                        left.checked_sub(1)
+                    }) {
+                    Ok(_) => Poll::Ready(Ok(1)),
+                    Err(_) => Poll::Pending,
+                }
+            }
+            fn poll_send(&self, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> {
+                Poll::Pending
+            }
+        }
+        let device = Queued(std::sync::atomic::AtomicUsize::new(5));
+        let mut driver = Driver::new(StackOptions::default(), device, Arc::new(Idle));
+        let mut held = Vec::new();
+        driver.pool.take_up_to(&mut held, usize::MAX);
+        assert_eq!(driver.pool.free_count(), 0);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(driver.drain_rx(&mut cx).unwrap());
+        assert_eq!(
+            driver.dev.0.load(Ordering::Relaxed),
+            0,
+            "the peer's ACKs are read while every transmit slot is taken"
+        );
+        driver.pool.give_back(&mut held, 0);
+    }
+
+    #[tokio::test]
+    async fn reading_without_transmit_room_is_bounded_and_returns() {
+        struct Flood(std::sync::atomic::AtomicUsize);
+        impl Device for Flood {
+            fn poll_recv(&self, _: &mut Context<'_>, _: &mut [u8]) -> Poll<io::Result<usize>> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                Poll::Ready(Ok(1))
+            }
+            fn poll_send(&self, _: &mut Context<'_>, _: &[u8]) -> Poll<io::Result<usize>> {
+                Poll::Pending
+            }
+        }
+        let device = Flood(std::sync::atomic::AtomicUsize::new(0));
+        let mut driver = Driver::new(StackOptions::default(), device, Arc::new(Idle));
+        let mut held = Vec::new();
+        driver.pool.take_up_to(&mut held, usize::MAX);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(driver.poll_run(&mut cx).is_pending());
+        let reads = driver.dev.0.load(Ordering::Relaxed);
+        assert!(
+            (1..=RX_BATCH * MAX_ROUNDS).contains(&reads),
+            "{reads} reads in one pass"
+        );
+        driver.pool.give_back(&mut held, 0);
+    }
+
+    #[tokio::test]
+    async fn queued_writes_leave_the_cooperative_budget_room_for_reads() {
+        #[derive(Default)]
+        struct Busy {
+            reads: std::sync::atomic::AtomicUsize,
+            writes: std::sync::atomic::AtomicUsize,
+        }
+        impl Device for Busy {
+            fn poll_recv(&self, cx: &mut Context<'_>, _: &mut [u8]) -> Poll<io::Result<usize>> {
+                let budget = std::task::ready!(tokio::task::coop::poll_proceed(cx));
+                budget.made_progress();
+                self.reads.fetch_add(1, Ordering::Relaxed);
+                Poll::Ready(Ok(1))
+            }
+            fn poll_send(&self, cx: &mut Context<'_>, packet: &[u8]) -> Poll<io::Result<usize>> {
+                let budget = std::task::ready!(tokio::task::coop::poll_proceed(cx));
+                budget.made_progress();
+                self.writes.fetch_add(1, Ordering::Relaxed);
+                Poll::Ready(Ok(packet.len()))
+            }
+        }
+        let mut driver = Driver::new(StackOptions::default(), Busy::default(), Arc::new(Idle));
+        let mut queued = Vec::new();
+        driver.pool.take_up_to(&mut queued, usize::MAX);
+        for mut slot in queued {
+            slot.len = 20;
+            driver.pool.push_filled(slot);
+        }
+        std::future::poll_fn(|cx| {
+            let _ = driver.poll_run(cx);
+            Poll::Ready(())
+        })
+        .await;
+        let reads = driver.dev.reads.load(Ordering::Relaxed);
+        let writes = driver.dev.writes.load(Ordering::Relaxed);
+        assert!(
+            reads >= RX_BATCH && writes > 0,
+            "{reads} reads and {writes} writes in one pass"
+        );
     }
 
     #[tokio::test]
