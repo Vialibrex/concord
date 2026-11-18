@@ -13,9 +13,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::addr_codec::SOCKS;
 use crate::ctx::{BuildCtx, BuildError};
+use crate::dgram::{Encoder, Opener, UdpRelay, Watch};
 use crate::link::simple_link;
 use crate::node::{Link, info_for};
-use crate::udprelay::{UdpCodec, UdpRelay, Watch};
 
 const VERSION: u8 = 5;
 const CMD_CONNECT: u8 = 1;
@@ -156,12 +156,12 @@ impl Socks5 {
 
 struct Socks5Udp;
 
-impl UdpCodec for Socks5Udp {
+impl Encoder for Socks5Udp {
     fn headroom(&self) -> usize {
         3 + crate::addr_codec::MAX_ADDR_LEN
     }
 
-    fn seal(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
+    fn encode(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
         let len = 3 + SOCKS.len(dst);
         let head = pkt.prepend(len);
         head.get_mut(..3)
@@ -170,7 +170,9 @@ impl UdpCodec for Socks5Udp {
         SOCKS.write_into(dst, head.get_mut(3..).unwrap_or_default())?;
         Ok(())
     }
+}
 
+impl Opener for Socks5Udp {
     fn open(&self, pkt: &mut PacketBuf) -> io::Result<Address> {
         let data = pkt.as_slice();
         if data.len() < 5 {
@@ -303,7 +305,9 @@ mod tests {
         let codec = Socks5Udp;
         let mut pkt = PacketBuf::with_headroom(codec.headroom());
         pkt.extend_from_slice(b"data");
-        codec.seal(&mut pkt, &Address::new("1.2.3.4", 53)).unwrap();
+        codec
+            .encode(&mut pkt, &Address::new("1.2.3.4", 53))
+            .unwrap();
         assert_eq!(
             pkt.as_slice(),
             [0, 0, 0, 1, 1, 2, 3, 4, 0, 53, b'd', b'a', b't', b'a']
@@ -323,7 +327,7 @@ mod tests {
         let mut pkt = PacketBuf::take();
         pkt.extend_from_slice(&payload);
         let in_place = pkt.as_slice().as_ptr();
-        codec.seal(&mut pkt, &Address::new(&host, 53)).unwrap();
+        codec.encode(&mut pkt, &Address::new(&host, 53)).unwrap();
         let header = 3 + 1 + 1 + 255 + 2;
         assert_eq!(pkt.len(), header + payload.len());
         assert_eq!(pkt.as_slice()[header..].as_ptr(), in_place);

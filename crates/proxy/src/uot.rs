@@ -49,7 +49,7 @@ impl Encoder for UotFrames {
         MAX_ADDR_LEN + 2
     }
 
-    fn encode(&mut self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
+    fn encode(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
         let len = u16::try_from(pkt.len()).map_err(|_| io::Error::other("datagram too long"))?;
         pkt.prepend(2).copy_from_slice(&len.to_be_bytes());
         let addr_len = UOT.len(dst);

@@ -107,7 +107,7 @@ impl Encoder for PacketAddrFrames {
         2 + MAX_ADDR_LEN
     }
 
-    fn encode(&mut self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
+    fn encode(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
         let addr_len = PACKET_ADDR.len(dst);
         let total = u16::try_from(addr_len + pkt.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "datagram too long"))?;

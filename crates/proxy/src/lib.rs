@@ -33,7 +33,6 @@ mod stack;
 mod tlsmap;
 mod trojan;
 mod tuic;
-mod udprelay;
 mod uot;
 mod util;
 mod vless;

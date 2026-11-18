@@ -16,7 +16,7 @@ impl Encoder for Frames {
         MAX_ADDR_LEN + 6
     }
 
-    fn encode(&mut self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
+    fn encode(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
         let addr_len = SOCKS.len(dst);
         SOCKS.write_into(dst, pkt.prepend(addr_len))?;
         pkt.prepend(3).fill(0);

@@ -110,7 +110,7 @@ impl Encoder for Frames {
         2
     }
 
-    fn encode(&mut self, packet: &mut PacketBuf, target: &Address) -> io::Result<()> {
+    fn encode(&self, packet: &mut PacketBuf, target: &Address) -> io::Result<()> {
         if target != &self.0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,

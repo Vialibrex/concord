@@ -17,7 +17,7 @@ use shadowsocks::crypto::v1::Cipher;
 use super::window::SlidingWindow;
 use crate::addr_codec::{MAX_ADDR_LEN, SOCKS};
 use crate::ctx::Clock;
-use crate::udprelay::UdpCodec;
+use crate::dgram::{Encoder, Opener};
 use crate::util::invalid_data;
 
 const MAX_SALT: usize = 32;
@@ -476,12 +476,12 @@ fn ecb(key: &[u8], header: &mut [u8], encrypt: bool) -> io::Result<()> {
     Ok(())
 }
 
-impl UdpCodec for SsUdp {
+impl Encoder for SsUdp {
     fn headroom(&self) -> usize {
         NONCE_2022 + 16 * (1 + self.identity.len()) + 11 + MAX_ADDR_LEN + MAX_SALT
     }
 
-    fn seal(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
+    fn encode(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
         match (&self.session, self.scheme) {
             (_, Scheme::Plain) => Self::seal_addr(pkt, dst),
             (Some(session), Scheme::Aes2022 | Scheme::Chacha2022) => {
@@ -490,7 +490,9 @@ impl UdpCodec for SsUdp {
             _ => self.seal_v1(pkt, dst),
         }
     }
+}
 
+impl Opener for SsUdp {
     fn open(&self, pkt: &mut PacketBuf) -> io::Result<Address> {
         match (&self.session, self.scheme) {
             (_, Scheme::Plain) => Self::open_addr(pkt),
@@ -608,7 +610,7 @@ mod tests {
         let dst = Address::new("203.0.113.5", 53);
         let mut pkt = PacketBuf::with_headroom(client.headroom());
         pkt.extend_from_slice(b"query");
-        client.seal(&mut pkt, &dst).unwrap();
+        client.encode(&mut pkt, &dst).unwrap();
         if !kind.is_none() {
             assert_ne!(pkt.as_slice().get(pkt.len() - 5..), Some(&b"query"[..]));
         }
@@ -636,7 +638,9 @@ mod tests {
         let codec = SsUdp::new(kind, &key_for(kind), clock());
         let mut pkt = PacketBuf::with_headroom(codec.headroom());
         pkt.extend_from_slice(b"query");
-        codec.seal(&mut pkt, &Address::new("1.1.1.1", 53)).unwrap();
+        codec
+            .encode(&mut pkt, &Address::new("1.1.1.1", 53))
+            .unwrap();
         let last = pkt.len() - 1;
         pkt.as_mut_slice()[last] ^= 1;
         assert!(codec.open(&mut pkt).is_err());

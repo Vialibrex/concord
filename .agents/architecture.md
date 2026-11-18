@@ -82,7 +82,10 @@ spurious readiness (Windows AFD) would otherwise hold a worker indefinitely.
 `proxy/src/quic.rs`, which resolves the node, opens its socket and runs the handshake, and `concord-quic`, which holds
 what needs no node: socket obfuscation and port hopping, the congestion controllers, shared connections and the
 stream type. `concord-quic` depends on `concord-common` alone. Dependencies arrive through `DialEnv`
-(`SocketFactory`, `HostResolver`, `NodeDialer`, `EventSink`). Datagram-over-stream protocols share `dgram::{Encoder, Decoder}`.
+(`SocketFactory`, `HostResolver`, `NodeDialer`, `EventSink`). Datagram protocols share `dgram`: an `Encoder` frames a
+datagram in front of its payload for either carrier. Over a byte stream (trojan, VLESS, VMess, UDP-over-TCP, mieru,
+gost relay) `StreamSession` pairs it with a `Decoder` that reassembles frames; over UDP to a relay (SOCKS5,
+Shadowsocks, ShadowsocksR) `UdpRelay` pairs it with an `Opener` that unframes each whole datagram in place.
 
 TLS has two backends: rustls with aws-lc-rs by default, BoringSSL where a `client-fingerprint` needs a browser
 ClientHello; REALITY and ECH are implemented in `concord-tls`.
@@ -123,9 +126,7 @@ delivery.
 
 ## Pending Restructure
 
-Still open:
-
-- Proxy owners: fold `udprelay::UdpCodec` into `dgram`.
+Nothing is open.
 
 `quic/src/congestion.rs` and `quic/src/socket.rs` already use `concord_common::sync::lock`.
 mieru's and AmneziaWG's `invalid` add a protocol prefix and stay local.

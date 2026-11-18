@@ -22,11 +22,11 @@ use shadowsocks::crypto::CipherKind;
 use self::crypto::{ClientStream, SsKey, new_context, parse_method};
 use self::udp::SsUdp;
 use crate::ctx::{BuildCtx, BuildError, Clock};
+use crate::dgram::UdpRelay;
 use crate::lazy::Kick;
 use crate::link::{EnvSlot, shadow_tls_layer};
 use crate::node::{Link, info_for};
 use crate::tlsmap::{TlsSpec, connector, looks_up_ech};
-use crate::udprelay::UdpRelay;
 use crate::uot;
 
 struct Shadowsocks {

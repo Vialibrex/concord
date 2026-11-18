@@ -9,15 +9,8 @@ use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 
+use super::{Encoder, Opener};
 use crate::node::Egress;
-
-/// Frames and unframes one datagram in place.
-pub(crate) trait UdpCodec: Send + Sync + 'static {
-    fn headroom(&self) -> usize;
-    fn seal(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()>;
-    /// Strips the framing and returns where the packet came from.
-    fn open(&self, pkt: &mut PacketBuf) -> io::Result<Address>;
-}
 
 pub(crate) struct Watch {
     pub(crate) closed: Arc<AtomicBool>,
@@ -53,7 +46,7 @@ pub(crate) struct UdpRelay<C> {
     _watch: Option<Watch>,
 }
 
-impl<C: UdpCodec> UdpRelay<C> {
+impl<C: Encoder + Opener> UdpRelay<C> {
     /// Fails when the `dialer-proxy` cannot carry UDP, rather than sending from this host.
     pub(crate) async fn open(
         egress: &Egress,
@@ -96,7 +89,7 @@ impl<C: UdpCodec> UdpRelay<C> {
     }
 }
 
-impl<C: UdpCodec> PacketSession for UdpRelay<C> {
+impl<C: Encoder + Opener> PacketSession for UdpRelay<C> {
     fn poll_send(
         &self,
         cx: &mut Context<'_>,
@@ -108,7 +101,7 @@ impl<C: UdpCodec> PacketSession for UdpRelay<C> {
         }
         let queued = self.inflight.load(Ordering::Relaxed);
         if queued == 0 || queued != pkt.len() {
-            self.codec.seal(pkt, dst)?;
+            self.codec.encode(pkt, dst)?;
         }
         let sent = match &self.carrier {
             Carrier::Socket(socket) => socket

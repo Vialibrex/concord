@@ -24,8 +24,8 @@ use self::protocol::{PacketProtocol, ProtocolFactory};
 use self::stream::CodecStream;
 use crate::addr_codec::{MAX_ADDR_LEN, SOCKS};
 use crate::ctx::{BuildCtx, BuildError};
+use crate::dgram::{Encoder, Opener, UdpRelay};
 use crate::node::{Link, info_for};
-use crate::udprelay::{UdpCodec, UdpRelay};
 
 struct ShadowsocksR {
     info: OutboundInfo,
@@ -88,18 +88,20 @@ pub(crate) fn stream_udp(cipher: SsrCipher) -> SsrUdp {
     }
 }
 
-impl UdpCodec for SsrUdp {
+impl Encoder for SsrUdp {
     fn headroom(&self) -> usize {
         MAX_ADDR_LEN + self.cipher.headroom()
     }
 
-    fn seal(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
+    fn encode(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
         let len = SOCKS.len(dst);
         SOCKS.write_into(dst, pkt.prepend(len))?;
         self.protocol.seal(pkt);
         self.cipher.seal_packet(pkt)
     }
+}
 
+impl Opener for SsrUdp {
     fn open(&self, pkt: &mut PacketBuf) -> io::Result<Address> {
         self.cipher.open_packet(pkt)?;
         self.protocol.open(pkt)?;

@@ -1,6 +1,5 @@
 use std::future::poll_fn;
 use std::io;
-use std::ops::Range;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -9,43 +8,11 @@ use std::task::{Context, Poll, Waker, ready};
 use concord_common::{Address, BoxRead, BoxStream, BoxWrite, PacketBuf, PacketSession, Tasks};
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 
+use super::{Decoded, Decoder, Encoder};
 use crate::util::lock;
 
 const INITIAL_READ_BUFFER: usize = 16 * 1024;
 const MAX_READ_BUFFER: usize = 2 * 65_536;
-
-pub(crate) enum Decoded {
-    NeedMore,
-    Skip(usize),
-    Packet {
-        /// `None` is the session's fixed remote.
-        addr: Option<Address>,
-        payload: Range<usize>,
-        consumed: usize,
-    },
-}
-
-/// Frames one datagram in front of its payload, in place.
-pub(crate) trait Encoder: Send + 'static {
-    fn headroom(&self) -> usize;
-    fn encode(&mut self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()>;
-
-    /// Appends the framed datagram to `out`; a protocol that splits one overrides this.
-    fn encode_into(
-        &mut self,
-        pkt: &mut PacketBuf,
-        dst: &Address,
-        out: &mut Vec<u8>,
-    ) -> io::Result<()> {
-        self.encode(pkt, dst)?;
-        out.extend_from_slice(pkt.as_slice());
-        Ok(())
-    }
-}
-
-pub(crate) trait Decoder: Send + 'static {
-    fn decode(&mut self, input: &mut [u8]) -> io::Result<Decoded>;
-}
 
 /// Frames a send handed over that the writer task has not taken yet.
 struct Outbox<E> {
@@ -298,7 +265,7 @@ mod tests {
             2
         }
 
-        fn encode(&mut self, pkt: &mut PacketBuf, _dst: &Address) -> io::Result<()> {
+        fn encode(&self, pkt: &mut PacketBuf, _dst: &Address) -> io::Result<()> {
             let len = u16::try_from(pkt.len()).map_err(|_| io::Error::other("too long"))?;
             pkt.prepend(2).copy_from_slice(&len.to_be_bytes());
             Ok(())

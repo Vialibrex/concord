@@ -1,6 +1,7 @@
 pub(crate) mod crypto;
 mod stream;
 
+use std::cell::Cell;
 use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::net::SocketAddr;
@@ -227,14 +228,14 @@ impl PacketSession for VmessPackets {
 /// XUDP: v2ray mux frames carrying one datagram each, on a connection opened
 /// with the mux command.
 pub(crate) struct XudpFrames {
-    first: bool,
+    first: Cell<bool>,
     global_id: [u8; 8],
 }
 
 impl XudpFrames {
     pub(crate) fn new(source: Option<SocketAddr>) -> Self {
         XudpFrames {
-            first: true,
+            first: Cell::new(true),
             global_id: source.map(global_id).unwrap_or_default(),
         }
     }
@@ -257,10 +258,11 @@ impl Encoder for XudpFrames {
         2 + 5 + MAX_ADDR_LEN + 8 + 2
     }
 
-    fn encode(&mut self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
+    fn encode(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
         let data_len = u16::try_from(pkt.len()).map_err(|_| invalid_data("datagram too long"))?;
         let addr_len = VMESS.len(dst);
-        let id_len = if self.first && self.global_id != [0; 8] {
+        let first = self.first.get();
+        let id_len = if first && self.global_id != [0; 8] {
             self.global_id.len()
         } else {
             0
@@ -276,7 +278,7 @@ impl Encoder for XudpFrames {
             .ok_or_else(|| invalid_data("buffer"))?
             .fill(0);
         let (status, option, network) = (
-            if self.first { STATUS_NEW } else { STATUS_KEEP },
+            if first { STATUS_NEW } else { STATUS_KEEP },
             1u8,
             NETWORK_UDP,
         );
@@ -288,7 +290,7 @@ impl Encoder for XudpFrames {
         let (id, len) = tail.split_at_mut(id_len);
         id.copy_from_slice(self.global_id.get(..id_len).unwrap_or_default());
         len.copy_from_slice(&data_len.to_be_bytes());
-        self.first = false;
+        self.first.set(false);
         Ok(())
     }
 }
@@ -407,7 +409,7 @@ mod tests {
     #[test]
     fn xudp_frames_round_trip() {
         let dst = Address::new("1.2.3.4", 53);
-        let mut enc = XudpFrames::new(Some("10.0.0.2:5353".parse().unwrap()));
+        let enc = XudpFrames::new(Some("10.0.0.2:5353".parse().unwrap()));
         let mut dec = XudpFrames::new(None);
         let mut pkt = PacketBuf::with_headroom(enc.headroom());
         pkt.extend_from_slice(b"hi");

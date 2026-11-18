@@ -110,7 +110,7 @@ impl Encoder for TrojanFrames {
         MAX_ADDR_LEN + 4
     }
 
-    fn encode(&mut self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
+    fn encode(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
         if pkt.len() > MAX_PACKET {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -130,12 +130,7 @@ impl Encoder for TrojanFrames {
 
     /// mihomo sends a longer datagram as packets of up to 8192 bytes to the same address
     /// (`transport/trojan/trojan.go:69-94`).
-    fn encode_into(
-        &mut self,
-        pkt: &mut PacketBuf,
-        dst: &Address,
-        out: &mut Vec<u8>,
-    ) -> io::Result<()> {
+    fn encode_into(&self, pkt: &mut PacketBuf, dst: &Address, out: &mut Vec<u8>) -> io::Result<()> {
         if pkt.len() <= MAX_PACKET {
             self.encode(pkt, dst)?;
             out.extend_from_slice(pkt.as_slice());
