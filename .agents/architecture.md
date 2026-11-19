@@ -141,10 +141,11 @@ eight (`tls/src/reality/schedule.rs`); each follows its protocol, so one helper 
 read inside the same `Half::poll` loop, and `RecordIo::tcp` (`tls/src/record.rs`) follows record alignment, so a
 snapshot would hold back the switch to splice or direct I/O by a turn.
 
-Found in the structure survey and left to their owners:
-
-- `proxy/src/lazy.rs` spreads the deferred-header state across `HeadFirst`'s stage and `Kick`'s four states. Low
-  priority: one state machine when the file next changes.
+`proxy/src/lazy.rs` keeps two state machines on purpose. `HeadFirst` holds one enum for its own header (held,
+staged, open). `Kick` watches any inner stream that sends its header on a zero-length write, vmess, smux, shadowsocks
+and VLESS streams as well as `HeadFirst`, and records whether a read or a write started it, which only the layer
+above the inner stream can see once the halves split. Merging them needs a `Stream` method that reports the header
+phase, a decision in every `stream_policy!`.
 
 The tunnel first-byte window and sniff waits, h2io ping timeout and xhttp keepalive period are registered in
 `reference-choices.md`. `tunnel::tcp::MeteredStream` forwards both owned reads and writes and meters their bytes.

@@ -15,8 +15,13 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 /// `write`. A zero-length write sends the header alone.
 pub(crate) struct HeadFirst<S> {
     inner: S,
-    head: Vec<u8>,
-    stage: Option<Stage>,
+    head: Head,
+}
+
+enum Head {
+    Held(Vec<u8>),
+    Staged(Stage),
+    Open,
 }
 
 struct Stage {
@@ -29,8 +34,11 @@ impl<S> HeadFirst<S> {
     pub(crate) fn new(inner: S, head: Vec<u8>) -> Self {
         HeadFirst {
             inner,
-            head,
-            stage: None,
+            head: if head.is_empty() {
+                Head::Open
+            } else {
+                Head::Held(head)
+            },
         }
     }
 
@@ -57,37 +65,39 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for HeadFirst<S> {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         loop {
-            if let Some(stage) = this.stage.as_mut() {
-                while let Some(rest) = stage.out.get(stage.pos..).filter(|r| !r.is_empty()) {
-                    match Pin::new(&mut this.inner).poll_write(cx, rest) {
-                        Poll::Ready(Ok(0)) => {
-                            return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+            match &mut this.head {
+                Head::Staged(stage) => {
+                    while let Some(rest) = stage.out.get(stage.pos..).filter(|r| !r.is_empty()) {
+                        match Pin::new(&mut this.inner).poll_write(cx, rest) {
+                            Poll::Ready(Ok(0)) => {
+                                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                            }
+                            Poll::Ready(Ok(n)) => stage.pos += n,
+                            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                            Poll::Pending => return Poll::Pending,
                         }
-                        Poll::Ready(Ok(n)) => stage.pos += n,
-                        Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                        Poll::Pending => return Poll::Pending,
                     }
+                    let accepted = stage.data_len;
+                    this.head = Head::Open;
+                    return Poll::Ready(Ok(accepted));
                 }
-                let accepted = stage.data_len;
-                this.stage = None;
-                return Poll::Ready(Ok(accepted));
+                Head::Open => return Pin::new(&mut this.inner).poll_write(cx, data),
+                Head::Held(head) => {
+                    let mut out = std::mem::take(head);
+                    out.extend_from_slice(data);
+                    this.head = Head::Staged(Stage {
+                        out,
+                        pos: 0,
+                        data_len: data.len(),
+                    });
+                }
             }
-            if this.head.is_empty() {
-                return Pin::new(&mut this.inner).poll_write(cx, data);
-            }
-            let mut out = std::mem::take(&mut this.head);
-            out.extend_from_slice(data);
-            this.stage = Some(Stage {
-                out,
-                pos: 0,
-                data_len: data.len(),
-            });
         }
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if !this.head.is_empty() && this.stage.is_none() {
+        if matches!(this.head, Head::Held(_)) {
             std::task::ready!(Pin::new(&mut *this).poll_write(cx, &[]))?;
         }
         Pin::new(&mut this.inner).poll_flush(cx)
@@ -106,7 +116,10 @@ impl<S: Stream> Stream for HeadFirst<S> {
 
     fn write_requirements(&self) -> BufferRequirements {
         BufferRequirements {
-            front: self.head.len(),
+            front: match &self.head {
+                Head::Held(head) => head.len(),
+                Head::Staged(_) | Head::Open => 0,
+            },
             ..Default::default()
         }
         .compose_writer(self.inner.write_requirements())
@@ -117,7 +130,7 @@ impl<S: Stream> Stream for HeadFirst<S> {
         cx: &mut Context<'_>,
         buffer: &mut StreamBuffer,
     ) -> Poll<io::Result<usize>> {
-        if self.head.is_empty() && self.stage.is_none() {
+        if matches!(self.head, Head::Open) {
             self.inner.poll_write_buffer(cx, buffer)
         } else {
             poll_write_buffer(self, cx, buffer)
@@ -125,13 +138,9 @@ impl<S: Stream> Stream for HeadFirst<S> {
     }
 
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
-        let HeadFirst { inner, head, stage } = *self;
+        let HeadFirst { inner, head } = *self;
         let (read, write) = Box::new(inner).into_split();
-        let write = HeadFirst {
-            inner: write,
-            head,
-            stage,
-        };
+        let write = HeadFirst { inner: write, head };
         (read, Box::new(write))
     }
 }
@@ -445,6 +454,129 @@ mod tests {
         ) -> Poll<io::Result<StreamBuffer>> {
             Poll::Ready(Ok(self.reply.take().unwrap_or_default()))
         }
+    }
+
+    fn bytes(options: ReadBufferOptions, data: &[u8]) -> StreamBuffer {
+        let mut buffer = options.take();
+        buffer.spare_mut()[..data.len()].copy_from_slice(data);
+        buffer.advance(data.len()).unwrap();
+        buffer
+    }
+
+    async fn bounded<T>(future: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(10), future)
+            .await
+            .expect("the test hung")
+    }
+
+    fn options() -> ReadBufferOptions {
+        ReadBufferOptions::for_copy(Default::default(), Default::default()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn data_written_over_a_pending_kick_is_sent_after_the_header() {
+        let (near, mut far) = duplex(2);
+        let mut stream = Kick::new(HeadFirst::new(near, b"HEAD".to_vec()));
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut buf = [0u8; 1];
+        assert!(
+            Pin::new(&mut stream)
+                .poll_read(&mut cx, &mut ReadBuf::new(&mut buf))
+                .is_pending()
+        );
+        assert!(stream.needs_handshake());
+        let mut seen = [0u8; 8];
+        let (written, read) =
+            bounded(async { tokio::join!(stream.write_all(b"data"), far.read_exact(&mut seen)) })
+                .await;
+        written.unwrap();
+        read.unwrap();
+        assert_eq!(&seen, b"HEADdata");
+        assert!(!stream.needs_handshake());
+    }
+
+    #[tokio::test]
+    async fn a_write_buffer_carries_the_header_then_goes_straight_through() {
+        let (near, mut far) = duplex(1024);
+        let mut stream = Kick::new(HeadFirst::new(near, b"HEAD".to_vec()));
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut first = bytes(options(), b"data");
+        assert!(matches!(
+            stream.poll_write_buffer(&mut cx, &mut first),
+            Poll::Ready(Ok(4))
+        ));
+        assert!(first.is_empty());
+        assert!(!stream.needs_handshake());
+        let mut second = bytes(options(), b"more");
+        assert!(matches!(
+            stream.poll_write_buffer(&mut cx, &mut second),
+            Poll::Ready(Ok(4))
+        ));
+        let mut seen = [0u8; 12];
+        far.read_exact(&mut seen).await.unwrap();
+        assert_eq!(&seen, b"HEADdatamore");
+    }
+
+    #[tokio::test]
+    async fn a_pending_write_buffer_keeps_its_bytes_and_the_header_pending() {
+        let (near, mut far) = duplex(2);
+        let mut stream = Kick::new(HeadFirst::new(near, b"HEAD".to_vec()));
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut buffer = bytes(options(), b"data");
+        assert!(stream.poll_write_buffer(&mut cx, &mut buffer).is_pending());
+        assert_eq!(buffer.as_slice(), b"data");
+        assert!(stream.needs_handshake());
+        let mut seen = [0u8; 8];
+        let (written, read) = bounded(async {
+            tokio::join!(
+                poll_fn(|cx| stream.poll_write_buffer(cx, &mut buffer)),
+                far.read_exact(&mut seen)
+            )
+        })
+        .await;
+        assert_eq!(written.unwrap(), 4);
+        read.unwrap();
+        assert_eq!(&seen, b"HEADdata");
+        assert!(buffer.is_empty());
+        assert!(!stream.needs_handshake());
+    }
+
+    #[tokio::test]
+    async fn a_split_write_half_finishes_the_header_staged_before_the_split() {
+        let (inner, mut far) = duplex(2);
+        let mut stream = HeadFirst::new(OwnedReply { inner, reply: None }, b"HEAD".to_vec());
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            Pin::new(&mut stream)
+                .poll_write(&mut cx, b"data")
+                .is_pending()
+        );
+        let (_read, mut write) = Box::new(stream).into_split();
+        let mut seen = [0u8; 8];
+        let (written, read) = bounded(async {
+            tokio::join!(
+                poll_fn(|cx| Pin::new(&mut write).poll_write(cx, b"data")),
+                far.read_exact(&mut seen)
+            )
+        })
+        .await;
+        assert_eq!(written.unwrap(), 4);
+        read.unwrap();
+        assert_eq!(&seen, b"HEADdata");
+        bounded(write.shutdown()).await.unwrap();
+        let mut extra = Vec::new();
+        bounded(far.read_to_end(&mut extra)).await.unwrap();
+        assert!(extra.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_before_any_write_does_not_send_the_header() {
+        let (near, mut far) = duplex(1024);
+        let mut stream = HeadFirst::new(near, b"HEAD".to_vec());
+        bounded(stream.shutdown()).await.unwrap();
+        let mut seen = Vec::new();
+        bounded(far.read_to_end(&mut seen)).await.unwrap();
+        assert!(seen.is_empty());
     }
 
     #[tokio::test]
