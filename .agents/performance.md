@@ -46,10 +46,18 @@ held to and what goes wrong when measuring.
     unexplained regression, the change lands before the full tier, marked as such: the mark names the change, what it
     reaches, the runs, and the side effects it could still have.
 - **Each change measures its own reach, the same way on every platform.** Reach is the cases and
-  workloads its code paths execute, on each platform those paths run on, and nothing beyond it. A path the change
+  workloads its code paths execute, on each platform those paths run on, and nothing beyond it; a branch behind a
+  condition reaches only the cases that can meet it (next rule). A path the change
   touches (TUN, a BoringSSL fingerprint, a mux, UDP over a stream, WireGuard) is part of its reach and measured by
   the change itself. The review entry lists the reach as platform × case × workload; a Global change lists the
   representative set.
+- **A gated branch is measured where it can fire.** When a change adds behaviour behind a condition (a size, a
+  count, a mode) and a case's workload provably never meets it, that case is outside the new behaviour's reach: a
+  test, or a counter from a diagnostic run, shows the branch is not taken there, and the review entry names the
+  condition and that evidence in place of a bench run. The check itself still runs in that case; when it is a
+  constant-time comparison with no allocation, lock, copy or dynamic dispatch, it needs no bench either. Cases
+  where the branch can fire are measured as usual, and so is any case where the evidence is missing or the check
+  costs more.
 - **The representative set** is the quick tier (`direct`, `ss-aes128`, `trojan-tls`, `vmess-grpc-tls`, `hysteria2`
   through SOCKS) plus `direct` over TUN. Windows adds `hysteria2-brutal` and `mieru-tcp`: their Windows cells lag on
   their own (Brutal's loss and tail latency, mieru's download and multi-flow), which the five do not show. The set is
