@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
 use concord_common::sync::lock;
+use concord_quic::TrackedRuntime;
 use concord_tls::TlsOptions;
-use concord_transport::TrackedRuntime;
 use hickory_proto::op::Message;
 use quinn::crypto::rustls::QuicClientConfig;
 

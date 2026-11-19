@@ -7,8 +7,6 @@ pub mod h2io;
 mod http1;
 mod http_obfs;
 mod outgoing;
-mod quic_tasks;
-mod session_socket;
 mod shadowtls;
 mod simple_obfs;
 mod singmux;
@@ -26,8 +24,6 @@ use futures_util::future::BoxFuture;
 pub use gun::{GrpcOptions, GunClient};
 pub use h2_transport::H2Options;
 pub use http_obfs::HttpOptions;
-pub use quic_tasks::{TrackedRuntime, close_on_stop};
-pub use session_socket::SessionSocket;
 pub use shadowtls::{DEFAULT_ALPN, ShadowTlsClient, ShadowTlsOptions, WS_ALPN};
 pub use simple_obfs::{ObfsMode, ObfsOptions};
 pub use singmux::{

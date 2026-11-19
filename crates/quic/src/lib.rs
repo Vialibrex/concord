@@ -4,8 +4,10 @@ mod bbr;
 mod congestion;
 mod datagram;
 mod obfs;
+mod session_socket;
 mod shared;
 mod socket;
+mod tasks;
 
 use std::io;
 use std::pin::Pin;
@@ -23,9 +25,11 @@ pub use self::congestion::{Brutal, Switch, SwitchFactory};
 pub use self::datagram::CappedFrame;
 pub use self::obfs::GeckoRange;
 use self::obfs::{Gecko, Salamander, WeChat, XPlus};
+pub use self::session_socket::SessionSocket;
 pub use self::shared::{DatagramHub, SharedConn};
 pub use self::socket::Hop;
 use self::socket::{Obfs, WrappedSocket};
+pub use self::tasks::{TrackedRuntime, close_on_stop};
 
 /// quic-go's starting point, which mihomo's QUIC clients share: a 100 ms initial RTT
 /// (`DefaultInitialRTT`) and Cubic with a 32-packet initial window

@@ -9,7 +9,7 @@ use concord_common::{
     Address, BoxStream, CoreError, Initiator, PacketSession, SockOpts, SocketFactory, Tasks,
     recv_packet, send_packet,
 };
-use concord_transport::SessionSocket;
+use concord_quic::SessionSocket;
 use quinn::{AsyncUdpSocket, Runtime, TokioRuntime};
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;

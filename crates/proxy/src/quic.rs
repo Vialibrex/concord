@@ -10,9 +10,11 @@ use quinn::{AsyncUdpSocket, Endpoint, EndpointConfig, Runtime, TokioRuntime};
 use rand::Rng;
 
 use concord_config::proxy::TlsOpts;
-use concord_quic::{CappedFrame, Hop, ObfsSpec, QuicConn, io_error, wrap_socket};
+use concord_quic::{
+    CappedFrame, Hop, ObfsSpec, QuicConn, SessionSocket, TrackedRuntime, close_on_stop, io_error,
+    wrap_socket,
+};
 use concord_tls::{QuicTls, TlsOptions, TrustStore};
-use concord_transport::{SessionSocket, TrackedRuntime, close_on_stop};
 
 use crate::ctx::{BuildCtx, BuildError};
 use crate::link::EnvSlot;

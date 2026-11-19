@@ -27,7 +27,7 @@ The exact edges are in `xtask/src/layers.rs`. From the bottom up:
 | Pure | `config`, `rules` | Profile parsing and validation; the rule compiler and route program. No tokio |
 | OS | `platform` | The `Platform` trait a host implements (`protect`, process lookup, default interface) and native system calls (sockopts, splice, tproxy, rlimits, owned mmap buffers) |
 | Sockets and crypto | `net`, `tls`, `netstack` | Socket factory, dialing, loopback guard, the relay; rustls and BoringSSL backends, fingerprints, REALITY, ECH; the user-space TCP/IP stack shared by TUN and WireGuard |
-| Links | `transport`, `quic`, `proxy` | ws, gRPC, h2, xhttp, obfs, ShadowTLS, sing-mux, QUIC over a `PacketSession` (proxy and DNS); the QUIC outbounds' socket obfuscation and port hopping, congestion controllers, shared connections and streams; the outbound protocols and how a node's link is composed |
+| Links | `transport`, `quic`, `proxy` | ws, gRPC, h2, xhttp, obfs, ShadowTLS, sing-mux; QUIC for the outbounds and DNS: the quinn runtime on the engine's tasks, QUIC over a `PacketSession`, socket obfuscation and port hopping, congestion controllers, shared connections and streams; the outbound protocols and how a node's link is composed |
 | Services | `dns`, `group` | Resolver, upstreams, fake-ip, cache; groups, providers, health checks |
 | Pipeline | `tunnel` | Pre-handle, sniff, route, dial, track, relay; UDP NAT; connection table |
 | Edges | `inbound`, `tun`, `mitm` | mixed/http/socks/redir/tproxy listeners; TUN device, routes and stack driver; MITM, scripts, capture |
@@ -80,8 +80,10 @@ spurious readiness (Windows AFD) would otherwise hold a worker indefinitely.
 `ProxyKind` to its builder, wrapped in sing-mux when configured. A node's `Link` composes dial, TLS and a
 `TransportStack` of closed `Layer` variants; QUIC protocols (hysteria, hysteria2, tuic, shadowquic) use quinn through
 `proxy/src/quic.rs`, which resolves the node, opens its socket and runs the handshake, and `concord-quic`, which holds
-what needs no node: socket obfuscation and port hopping, the congestion controllers, shared connections and the
-stream type. `concord-quic` depends on `concord-common` alone. Dependencies arrive through `DialEnv`
+what needs no node: socket obfuscation and port hopping, the congestion controllers, shared connections, the
+stream type, the quinn runtime whose drivers run on the engine's tasks and the socket over a `PacketSession` that
+carries a `dialer-proxy`. DoQ and DoH3 take the runtime and that socket from it too. `concord-quic` depends on
+`concord-common` alone. Dependencies arrive through `DialEnv`
 (`SocketFactory`, `HostResolver`, `NodeDialer`, `EventSink`). Datagram protocols share `dgram`: an `Encoder` frames a
 datagram in front of its payload for either carrier. Over a byte stream (trojan, VLESS, VMess, UDP-over-TCP, mieru,
 gost relay) `StreamSession` pairs it with a `Decoder` that reassembles frames; over UDP to a relay (SOCKS5,

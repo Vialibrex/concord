@@ -2,8 +2,8 @@ use std::io;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use concord_quic::TrackedRuntime;
 use concord_tls::TlsOptions;
-use concord_transport::TrackedRuntime;
 use hickory_proto::op::Message;
 use quinn::crypto::rustls::QuicClientConfig;
 
