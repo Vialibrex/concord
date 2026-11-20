@@ -172,15 +172,18 @@ macOS has no CPU affinity, so every process competes for the same CPUs. There, c
 throughput ceilings, and check `wait_share` and the `*_cores` columns. The harness warns when you are on battery or the
 load average is high.
 
-`--keep-awake` (Linux and Windows) runs an idle-priority busy loop on every CPU the harness may use, for the whole
-run. On Linux it is one `SCHED_IDLE` process per CPU that calls `sched_yield` in a loop, which gives way to anything
-runnable and only keeps the CPU from sleeping; on Windows it is one process per CPU in the idle priority class that
-spins without a system call. It is a control for a lightly loaded run on a VM (a rate cap, a paced server). There a CPU
-that sleeps between short bursts charges the processes several times more for the same work, and the arm whose timing
-lets it sleep more looks the more expensive one, down to the origin and the client. On the Linux VM, `direct` over TUN at
-1 Gbit/s read Concord 47% above sing-box in core CPU per GB without the loops; with them both arms fell about fourfold
-and Concord read 2% below downstream and 13% below upstream; downstream the origin's and the client's CPU, about twice
-apart between the arms without, came within 10% (loops started by hand). Run both and report both.
+`--keep-awake` (Linux, macOS and Windows) runs a lowest-priority busy loop on every CPU the harness may use, for the
+whole run. On Linux it is one `SCHED_IDLE` process per CPU that calls `sched_yield` in a loop, which gives way to
+anything runnable and only keeps the CPU from sleeping; on Windows it is one process per CPU in the idle priority class
+that spins without a system call; on macOS it is one process per CPU at nice 20 that enters the kernel with a
+zero-timeout `select` on every pass. macOS has no idle class, so its loops still take CPU from a run that wants all of
+it: use them there only for a rate-capped cell. It is a control for a lightly loaded run on a VM (a rate cap, a paced
+server). There a CPU that sleeps between short bursts charges the processes several times more for the same work, and
+the arm whose timing lets it sleep more looks the more expensive one, down to the origin and the client. On the Linux
+VM, `direct` over TUN at 1 Gbit/s read Concord 47% above sing-box in core CPU per GB without the loops; with them both
+arms fell about fourfold and Concord read 2% below downstream and 13% below upstream; downstream the origin's and the
+client's CPU, about twice apart between the arms without, came within 10% (loops started by hand). Run both and report
+both.
 
 On Linux a loop that never enters the kernel is not a control. The VM's kernel (7.0, `PREEMPT_LAZY`, HZ 1000) lets a woken task
 preempt it only at the next tick, so the run is batched to the tick instead of kept awake: the core's context switches
@@ -195,9 +198,9 @@ much as the core's. Over `--link lossy` and `--link wan` on the Linux VM the loo
 fourfold in both arms, and Concord's excess over Go on TUIC and ShadowQUIC Brutal from 10-12% to 2-6%; they also raised
 both arms' packets to the server per MB by about half, so by the rule above that pass does not judge, and the VM cannot
 settle such a gap within 5%. On the macOS VM at `--origin-rate 1000`, one lowest-priority loop cut both arms' server
-CPU per GB by 70% and moved ss-aes128 from 9% above Go to 2% below. macOS has no affinity and no idle class, so the
-loop there is `nice -n 20 perl -e 'while (1) { select(undef, undef, undef, 0) }'`, which enters the kernel on every
-pass. For Windows see Windows.
+CPU per GB by 70% and moved ss-aes128 from 9% above Go to 2% below. That loop, started by hand as
+`nice -n 20 perl -e 'while (1) { select(undef, undef, undef, 0) }'`, is what `--keep-awake` runs on macOS, one per
+CPU. For Windows see Windows.
 
 The loops are not a control everywhere. They leave connection-rate and request-response gaps standing: TUN
 single-queue `tcp-rr` cost 47% more CPU per transaction than sing-box without them and 56% with them, while both arms'

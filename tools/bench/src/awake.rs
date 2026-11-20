@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 
 const READY: &str = "spinning";
-const UNSUPPORTED: &str = "--keep-awake needs Linux or Windows";
+const UNSUPPORTED: &str = "--keep-awake needs Linux, macOS or Windows";
 
 pub struct Awake {
     loops: Vec<Loop>,
@@ -19,7 +19,7 @@ struct Loop {
 
 impl Awake {
     pub fn start(cpus: &[usize]) -> Result<Awake, String> {
-        if !cfg!(any(target_os = "linux", windows)) {
+        if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
             return Err(UNSUPPORTED.into());
         }
         let exe = std::env::current_exe().map_err(|e| format!("--keep-awake: {e}"))?;
@@ -28,10 +28,10 @@ impl Awake {
             let mut child = Command::new(&exe)
                 .args(["spin", "--cpu", &cpu.to_string()])
                 .args(["--parent", &std::process::id().to_string()])
-                .stdin(if cfg!(windows) {
-                    Stdio::piped()
-                } else {
+                .stdin(if cfg!(target_os = "linux") {
                     Stdio::null()
+                } else {
+                    Stdio::piped()
                 })
                 .stdout(Stdio::piped())
                 .spawn()
@@ -145,7 +145,47 @@ pub fn spin(cpu: usize, _parent: u32) -> Result<(), String> {
     }
 }
 
-#[cfg(not(any(target_os = "linux", windows)))]
+#[cfg(target_os = "macos")]
+#[allow(
+    unsafe_code,
+    reason = "setpriority and select act on the calling process and take plain values"
+)]
+pub fn spin(_cpu: usize, _parent: u32) -> Result<(), String> {
+    use std::io::{Read, Write};
+
+    // No affinity and no idle class: `--cpu` only counts the loops, and 20 is the lowest nice.
+    if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 20) } != 0 {
+        return Err(format!("setpriority: {}", std::io::Error::last_os_error()));
+    }
+    // As on Windows, the harness holds the other end of stdin.
+    std::thread::spawn(|| {
+        let _ = std::io::stdin().read(&mut [0]);
+        std::process::exit(0);
+    });
+    let mut stdout = std::io::stdout();
+    writeln!(stdout, "{READY}")
+        .and_then(|()| stdout.flush())
+        .map_err(|e| e.to_string())?;
+    // The loop measured on the macOS VM; sched_yield here is swtch_pri, which also depresses the
+    // caller's priority, a mechanism that measurement did not cover.
+    loop {
+        let mut timeout = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        unsafe {
+            libc::select(
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut timeout,
+            )
+        };
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 pub fn spin(_: usize, _: u32) -> Result<(), String> {
     Err(UNSUPPORTED.into())
 }
