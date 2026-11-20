@@ -1,3 +1,4 @@
+mod cfb;
 pub(crate) mod crypto;
 mod stream;
 

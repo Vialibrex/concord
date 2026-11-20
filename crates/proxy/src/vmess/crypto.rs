@@ -2,10 +2,8 @@ use std::io;
 use std::ops::Range;
 
 use aes::cipher::{BlockEncrypt, KeyInit};
-use aes_cfb::Aes128;
 use aws_lc_rs::aead::{AES_128_GCM, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use aws_lc_rs::digest::{Context as DigestContext, SHA256};
-use cfb_mode::cipher::KeyIvInit;
 use concord_common::Address;
 use concord_common::stream_buffer::{BufferRequirements, StreamBuffer};
 use hmac::{Hmac, Mac};
@@ -14,6 +12,7 @@ use rand::Rng;
 use sha3::Shake128;
 use sha3::digest::{ExtendableOutput, XofReader};
 
+use super::cfb::{CfbDecryptor, CfbEncryptor};
 use crate::addr_codec::VMESS;
 use crate::util::invalid_data;
 
@@ -368,12 +367,12 @@ impl Request {
         let id_hash = mac.finalize().into_bytes();
         let stamp = now.to_be_bytes();
         let iv = md5_parts(&[&stamp, &stamp, &stamp, &stamp]);
-        cfb_mode::BufEncryptor::<Aes128>::new_from_slices(user, &iv)
-            .map_err(|_| invalid_data("bad header key"))?
-            .encrypt(&mut header);
         let mut out = Vec::with_capacity(16 + header.len());
         out.extend_from_slice(&id_hash);
-        out.extend_from_slice(&header);
+        CfbEncryptor::new(user, &iv)?.seal(&mut out, |plain| {
+            plain.append(&mut header);
+            Ok(())
+        })?;
         Ok(out)
     }
 
@@ -533,7 +532,7 @@ pub(crate) struct BodyEncoder {
     data: Option<DataAead>,
     length: Option<LengthAead>,
     shake: Option<Shake>,
-    cfb: Option<cfb_mode::BufEncryptor<Aes128>>,
+    cfb: Option<CfbEncryptor>,
 }
 
 impl BodyEncoder {
@@ -556,11 +555,8 @@ impl BodyEncoder {
                 None
             },
             cfb: (security == Security::Legacy)
-                .then(|| {
-                    cfb_mode::BufEncryptor::<Aes128>::new_from_slices(&request.key, &request.nonce)
-                })
-                .transpose()
-                .map_err(|_| invalid_data("bad legacy key"))?,
+                .then(|| CfbEncryptor::new(&request.key, &request.nonce))
+                .transpose()?,
         })
     }
 
@@ -620,6 +616,15 @@ impl BodyEncoder {
 
     /// Appends the frame for one chunk to `out`.
     pub(crate) fn seal(&mut self, payload: &[u8], out: &mut Vec<u8>) -> io::Result<()> {
+        let Some(mut cfb) = self.cfb.take() else {
+            return self.frame(payload, out);
+        };
+        let sealed = cfb.seal(out, |plain| self.frame(payload, plain));
+        self.cfb = Some(cfb);
+        sealed
+    }
+
+    fn frame(&mut self, payload: &[u8], out: &mut Vec<u8>) -> io::Result<()> {
         let start = out.len();
         let authenticated = self.length.is_some();
         let (padding, mask) = match self.shake.as_mut() {
@@ -672,9 +677,6 @@ impl BodyEncoder {
                 .get_mut(start..body_start)
                 .ok_or_else(|| invalid_data("buffer"))?;
             field.copy_from_slice(&value.to_be_bytes());
-        }
-        if let Some(cfb) = self.cfb.as_mut() {
-            cfb.encrypt(out.get_mut(start..).ok_or_else(|| invalid_data("buffer"))?);
         }
         Ok(())
     }
@@ -799,12 +801,8 @@ impl BodyDecoder {
     }
 }
 
-pub(crate) fn legacy_response_decryptor(
-    key: &[u8; 16],
-    iv: &[u8; 16],
-) -> io::Result<cfb_mode::BufDecryptor<Aes128>> {
-    cfb_mode::BufDecryptor::<Aes128>::new_from_slices(key, iv)
-        .map_err(|_| invalid_data("bad response key"))
+pub(crate) fn legacy_response_decryptor(key: &[u8; 16], iv: &[u8; 16]) -> io::Result<CfbDecryptor> {
+    CfbDecryptor::new(key, iv)
 }
 
 #[cfg(test)]
@@ -841,11 +839,7 @@ mod tests {
         }
     }
 
-    type Pair = (
-        BodyEncoder,
-        BodyDecoder,
-        Option<cfb_mode::BufDecryptor<Aes128>>,
-    );
+    type Pair = (BodyEncoder, BodyDecoder, Option<CfbDecryptor>);
 
     fn pair(security: Security, command: u8, padding: bool, authenticated: bool) -> Pair {
         let request = Request::new(security, command, padding, authenticated);
@@ -858,11 +852,11 @@ mod tests {
 
     fn read_back(
         decoder: &mut BodyDecoder,
-        cfb: &mut Option<cfb_mode::BufDecryptor<Aes128>>,
+        cfb: &mut Option<CfbDecryptor>,
         wire: &mut [u8],
     ) -> Option<Vec<u8>> {
         if let Some(cfb) = cfb.as_mut() {
-            cfb.decrypt(wire);
+            cfb.decrypt(wire).unwrap();
         }
         let head = decoder.length_bytes();
         let (field, rest) = wire.split_at_mut(head);

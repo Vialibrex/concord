@@ -793,15 +793,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cfb-mode"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac64b0984be8510caae81455ea2c8c23e5af6be61c36129df62f3380d5d64e1f"
-dependencies = [
- "cipher 0.5.2",
-]
-
-[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1382,7 +1373,6 @@ name = "concord-proxy"
 version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
- "aes 0.9.3",
  "aes-gcm 0.10.3",
  "arc-swap",
  "argon2 0.5.3",
@@ -1392,7 +1382,6 @@ dependencies = [
  "blake2 0.10.6",
  "blake3",
  "bytes",
- "cfb-mode",
  "chacha20 0.9.1",
  "chacha20poly1305 0.10.1",
  "concord-common",

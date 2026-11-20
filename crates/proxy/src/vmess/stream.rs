@@ -4,11 +4,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 
-use aes_cfb::Aes128;
 use concord_common::stream_buffer::{self, BufferRequirements, OwnedDrain, StreamBuffer};
 use concord_common::{Address, BoxRead, BoxStream, BoxWrite, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use super::cfb::CfbDecryptor;
 use super::crypto::{
     BodyDecoder, BodyEncoder, CHUNK, Chunk, Frame, Request, ResponseOpener, Security, alter_key,
     command_key, legacy_response_decryptor, user_id,
@@ -80,7 +80,7 @@ struct Reader {
     start: usize,
     end: usize,
     deciphered: usize,
-    cfb: Option<cfb_mode::BufDecryptor<Aes128>>,
+    cfb: Option<CfbDecryptor>,
     decoder: Option<BodyDecoder>,
     pending: usize,
     serve: Option<Range<usize>>,
@@ -149,7 +149,7 @@ impl Reader {
             && self.deciphered < upto
             && let Some(region) = self.buf.get_mut(self.deciphered..upto)
         {
-            cfb.decrypt(region);
+            cfb.decrypt(region)?;
             self.deciphered = upto;
         }
         Poll::Ready(Ok(true))
