@@ -17,7 +17,8 @@ pub fn decode_base64_std(text: &str) -> Option<Vec<u8>> {
 }
 
 pub fn decode_base64_url(text: &str) -> Option<Vec<u8>> {
-    URL_SAFE.decode(text.as_bytes()).ok()
+    let cleaned: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+    URL_SAFE.decode(cleaned.as_bytes()).ok()
 }
 
 pub fn try_decode_base64(text: &str) -> Option<Vec<u8>> {

@@ -38,7 +38,8 @@ fn valid_ss_method(cipher: &str) -> bool {
 }
 
 pub fn decode_subscription_text(text: &str) -> Result<Vec<Map>> {
-    let data = match decode_base64_std(text.trim_matches(['\r', '\n', ' '])) {
+    let trimmed = text.trim_matches(['\r', '\n', ' ']);
+    let data = match decode_base64_std(trimmed).or_else(|| decode_base64_url(trimmed)) {
         Some(bytes) if !text.contains("://") => {
             String::from_utf8(bytes).unwrap_or_else(|_| text.to_string())
         }

@@ -371,6 +371,28 @@ fn subscriptions_dedupe_names_and_accept_base64() {
 }
 
 #[test]
+fn subscriptions_accept_url_safe_base64() {
+    use base64::Engine as _;
+    let text = "trojan://a@x.example:443#\u{9999}\u{6e2f}>>\ntrojan://b@y.example:443#\u{65e5}\u{672c}??\n";
+    let std = base64::engine::general_purpose::STANDARD.encode(text);
+    let url = base64::engine::general_purpose::URL_SAFE.encode(text);
+    assert!(std.contains(['+', '/']) && url.contains(['-', '_']));
+    for encoded in [url.clone(), url.trim_end_matches('=').to_string()] {
+        let proxies = decode_subscription(&encoded).unwrap();
+        assert_eq!(proxies.len(), 2);
+        assert_eq!(proxies[0]["server"], "x.example");
+        assert_eq!(proxies[1]["server"], "y.example");
+    }
+    let wrapped = url
+        .as_bytes()
+        .chunks(16)
+        .map(|c| std::str::from_utf8(c).unwrap())
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    assert_eq!(decode_subscription(&wrapped).unwrap().len(), 2);
+}
+
+#[test]
 fn hysteria2_port_hopping_links() {
     let proxies =
         decode_subscription("hysteria2://pw@h.example:443,20000-30000/?sni=s#hop").unwrap();
