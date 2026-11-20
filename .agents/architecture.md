@@ -49,8 +49,11 @@ flows through `common::intercept`, and the engine's default-on `mitm` feature li
 3. Sniff: a bounded peek (TLS SNI, HTTP Host); the bytes are kept and replayed with `PeekedStream`.
 4. MITM offer, when an interceptor is installed: it takes the flow or hands it back.
 5. Route and dial, overlapped with reading the client's first bytes: the route program resolves IP and process
-   lazily, groups resolve to a leaf, the leaf's `Outbound::connect` dials through `Sockets`. A retry happens only
-   when another IP or route could succeed, at most twice.
+   lazily, groups resolve to a leaf, the leaf's `Outbound::connect` dials through `Sockets`. The flow is dialed once
+   under a 5 s deadline. Within it, `net/src/dial.rs` tries each resolved address of the target or server (in order,
+   all at once with `tcp-concurrent`; with both families the preferred one has 300 ms to win) and stops at a
+   `no_retry` error or descriptor exhaustion. A failed dial is not retried; it is reported to the url-test, fallback
+   and load-balance groups on the chain.
 6. Track: the connection is registered in `ConnTable`, which owns metering and cancellation; dropping the
    registration removes it.
 7. Relay: `net/src/relay.rs` drives both directions in one task. Each ordinary read borrows a pooled buffer with a
