@@ -131,9 +131,21 @@ impl Outbox {
         buffer
             .prepend(HEADER)?
             .copy_from_slice(&header(CMD_PSH, closer.sid, length));
-        self.sink
-            .send_item(Out::Owned(buffer.take_owned()))
-            .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        let mut frame = buffer.take_owned();
+        match closer.session.try_write_owned(cx, &mut frame) {
+            Ok(true) => {
+                self.sink.abort_send();
+            }
+            Ok(false) => self
+                .sink
+                .send_item(Out::Owned(frame))
+                .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?,
+            Err(err) => {
+                closer.session.close();
+                self.sink.abort_send();
+                return Poll::Ready(Err(err));
+            }
+        }
         Poll::Ready(Ok(length))
     }
 }

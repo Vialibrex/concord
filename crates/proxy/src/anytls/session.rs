@@ -1,13 +1,15 @@
 use std::collections::HashMap;
+use std::future::poll_fn;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use concord_common::stream_buffer::StreamBuffer;
-use concord_common::{BoxRead, BoxStream, BoxWrite, Tasks};
+use concord_common::{BoxRead, BoxStream, Tasks};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -19,6 +21,7 @@ use super::frame::{
 };
 use super::padding::{Padding, parse_map};
 use super::pool::Pool;
+use super::writer::FrameWriter;
 use crate::util::lock;
 
 const OUT_QUEUE: usize = 1;
@@ -48,6 +51,7 @@ struct Entry {
 pub(super) struct Session {
     pub(super) seq: u64,
     out: mpsc::Sender<Out>,
+    writer: Mutex<Option<FrameWriter>>,
     streams: Mutex<HashMap<u32, Entry>>,
     next_sid: AtomicU32,
     die: CancellationToken,
@@ -68,9 +72,18 @@ impl Session {
         client_metadata: &str,
     ) -> Arc<Session> {
         let (out, queue) = mpsc::channel(OUT_QUEUE);
+        let (source, sink) = conn.into_split();
+        let framer = Framer {
+            buffering: true,
+            buffer: Vec::new(),
+            padding_on: true,
+            counter: 0,
+            padding: padding.clone(),
+        };
         let session = Arc::new(Session {
             seq,
             out,
+            writer: Mutex::new(Some(FrameWriter { sink, framer })),
             streams: Mutex::new(HashMap::new()),
             next_sid: AtomicU32::new(0),
             die: pool.tasks.child_token(),
@@ -78,24 +91,15 @@ impl Session {
             idle_since: Mutex::new(Instant::now()),
             synack_watch: Mutex::new(None),
             pool: Arc::downgrade(pool),
-            padding: padding.clone(),
+            padding,
             tasks: pool.tasks.clone(),
         });
         let settings = format!(
             "v=2\nclient={client_metadata}\npadding-md5={}",
-            padding.load().md5
+            session.padding.load().md5
         );
         session.queue(Out::Data(frame(CMD_SETTINGS, 0, settings.as_bytes())));
-        let (source, sink) = conn.into_split();
-        let framer = Framer {
-            buffering: true,
-            buffer: Vec::new(),
-            padding_on: true,
-            counter: 0,
-            padding,
-        };
-        pool.tasks
-            .spawn(write_loop(session.clone(), sink, queue, framer));
+        pool.tasks.spawn(write_loop(session.clone(), queue));
         pool.tasks.spawn(read_loop(session.clone(), source));
         session
     }
@@ -126,6 +130,23 @@ impl Session {
             self.tasks.spawn_detached(async move {
                 let _ = sender.send(out).await;
             });
+        }
+    }
+
+    pub(super) fn try_write_owned(
+        &self,
+        cx: &mut Context<'_>,
+        frame: &mut StreamBuffer,
+    ) -> io::Result<bool> {
+        if self.is_closed() {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        let Ok(mut slot) = self.writer.try_lock() else {
+            return Ok(false);
+        };
+        match slot.as_mut() {
+            Some(writer) => writer.try_owned(cx, frame),
+            None => Ok(false),
         }
     }
 
@@ -285,48 +306,30 @@ async fn read_loop(session: Arc<Session>, mut source: BoxRead) {
     session.close();
 }
 
-async fn write_loop(
-    session: Arc<Session>,
-    mut sink: BoxWrite,
-    mut queue: mpsc::Receiver<Out>,
-    mut framer: Framer,
-) {
-    loop {
+async fn write_loop(session: Arc<Session>, mut queue: mpsc::Receiver<Out>) {
+    let stopped_writer = loop {
         let next = tokio::select! {
-            _ = session.die.cancelled() => break,
-            next = queue.recv() => next,
+            biased;
+            _ = session.die.cancelled() => None,
+            next = poll_fn(|cx| {
+                // Claim the writer as dequeue releases the one FIFO slot to the next producer.
+                let mut slot = lock(&session.writer);
+                let next = ready!(queue.poll_recv(cx));
+                Poll::Ready(next.and_then(|out| slot.take().map(|writer| (out, writer))))
+            }) => next,
         };
-        let Some(next) = next else {
-            break;
+        let Some((out, mut writer)) = next else {
+            break lock(&session.writer).take();
         };
-        let writes = match next {
-            Out::Owned(buffer) if framer.passes_through() => {
-                if sink.write_all(buffer.as_slice()).await.is_err() || sink.flush().await.is_err() {
-                    break;
-                }
-                continue;
-            }
-            Out::Owned(buffer) => framer.push(buffer.as_slice().to_vec()),
-            Out::Data(bytes) => framer.push(bytes),
-            Out::FrameSlot => continue,
-            Out::Unbuffer => {
-                framer.buffering = false;
-                None.into_iter().chain(Vec::new())
-            }
-        };
-        let mut failed = false;
-        for write in writes {
-            if sink.write_all(&write).await.is_err() {
-                failed = true;
-                break;
-            }
+        if writer.send(out).await.is_err() {
+            break Some(writer);
         }
-        if failed || (!framer.buffering && sink.flush().await.is_err()) {
-            break;
-        }
-    }
+        *lock(&session.writer) = Some(writer);
+    };
     session.close();
-    let _ = sink.shutdown().await;
+    if let Some(mut writer) = stopped_writer {
+        let _ = writer.sink.shutdown().await;
+    }
 }
 
 #[cfg(test)]
@@ -354,6 +357,7 @@ mod tests {
         let session = Arc::new(Session {
             seq: 1,
             out,
+            writer: Mutex::new(None),
             streams: Mutex::new(HashMap::new()),
             next_sid: AtomicU32::new(1),
             die: CancellationToken::new(),
@@ -527,6 +531,77 @@ mod tests {
         assert!(matches!(queue.recv().await, Some(Out::Data(_))));
         assert_eq!(write_buffer(&mut stream, &mut buffer).await.unwrap(), 100);
         assert_eq!(sender.capacity(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_idle_owned_write_uses_the_slot_and_queues_only_its_unwritten_tail() {
+        use concord_common::Stream;
+        use std::task::Waker;
+
+        let (near, mut far) = tokio::io::duplex(16);
+        let pool = Pool::new(false, 0, Tasks::default());
+        let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
+        let session = Session::start(Box::new(near), 1, &pool, padding, "");
+        let mut stream = session.open_stream().await.unwrap();
+        stream.write_all(b"start").await.unwrap();
+        assert_eq!(read_frame(&mut far).await.0, CMD_SETTINGS);
+        assert_eq!(read_frame(&mut far).await.0, CMD_SYN);
+        assert_eq!(read_frame(&mut far).await.2, b"start");
+
+        let mut short = relay_buffer(HEADER, b"a");
+        assert_eq!(write_buffer(&mut stream, &mut short).await.unwrap(), 1);
+        assert_eq!(session.out.capacity(), OUT_QUEUE);
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 1, b"a".to_vec()));
+
+        let payload = [0x3c; 42];
+        let mut long = relay_buffer(HEADER, &payload);
+        assert_eq!(
+            write_buffer(&mut stream, &mut long).await.unwrap(),
+            payload.len()
+        );
+        assert_eq!(session.out.capacity(), 0);
+        let mut next = relay_buffer(HEADER, b"next");
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(stream.poll_write_buffer(&mut cx, &mut next).is_pending());
+        assert_eq!(next.as_slice(), b"next");
+
+        let (sent, (first, second)) = tokio::join!(write_buffer(&mut stream, &mut next), async {
+            (read_frame(&mut far).await, read_frame(&mut far).await)
+        });
+        assert_eq!(sent.unwrap(), 4);
+        assert_eq!(first, (CMD_PSH, 1, payload.to_vec()));
+        assert_eq!(second, (CMD_PSH, 1, b"next".to_vec()));
+        session.close();
+    }
+
+    #[tokio::test]
+    async fn the_writer_finishes_an_accepted_frame_whose_flush_was_pending() {
+        use std::task::Waker;
+        use tokio::io::BufWriter;
+
+        let (near, mut far) = tokio::io::duplex(3);
+        let mut writer = FrameWriter {
+            sink: Box::new(BufWriter::with_capacity(64, near)),
+            framer: Framer {
+                buffering: false,
+                buffer: Vec::new(),
+                padding_on: false,
+                counter: 0,
+                padding: Arc::new(ArcSwap::from_pointee(Padding::default_scheme())),
+            },
+        };
+        let mut frame = relay_buffer(0, b"complete");
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(!writer.try_owned(&mut cx, &mut frame).unwrap());
+        assert!(frame.is_empty());
+        let mut received = [0; 8];
+        let (sent, read) = tokio::join!(
+            writer.send(Out::Owned(frame)),
+            far.read_exact(&mut received)
+        );
+        sent.unwrap();
+        read.unwrap();
+        assert_eq!(&received, b"complete");
     }
 
     async fn wire_frames(scheme: &str, writes: &[(bool, Vec<u8>)]) -> Vec<(u8, u32, Vec<u8>)> {
