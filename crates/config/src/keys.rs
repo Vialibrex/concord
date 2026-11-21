@@ -379,7 +379,7 @@ pub fn dns_defaults() -> Map {
         "enhanced-mode": "redir-host",
         "fake-ip-range": "198.18.0.1/16",
         "fake-ip-range6": "",
-        "fake-ip-filter": ["dns.msftnsci.com", "www.msftnsci.com", "www.msftconnecttest.com"],
+        "fake-ip-filter": ["dns.msftncsi.com", "www.msftncsi.com", "www.msftconnecttest.com"],
         "fake-ip-filter-mode": "blacklist",
         "fake-ip-ttl": 1,
         "default-nameserver": ["114.114.114.114", "223.5.5.5", "8.8.8.8", "1.0.0.1"],
