@@ -94,8 +94,8 @@ fn rust_texts(source: &str) -> Vec<(usize, &str)> {
             let end = rest.find('\n').map_or(source.len(), |n| i + n);
             texts.push((i, &source[i..end]));
             i = end;
-        } else if rest.starts_with("/*") {
-            let end = rest[2..].find("*/").map_or(source.len(), |n| i + 2 + n);
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            let end = body.find("*/").map_or(source.len(), |n| i + 2 + n);
             texts.push((i, &source[i..end]));
             i = end + 2;
         } else if let Some(hashes) = raw_string_hashes(source, i) {
