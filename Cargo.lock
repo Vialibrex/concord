@@ -2517,8 +2517,6 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 [[package]]
 name = "gotatun"
 version = "0.10.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e37c2134d46523ed5b3c4bbdb578225e2e7379d03aea65baef41584725b1991"
 dependencies = [
  "aead 0.5.2",
  "aws-lc-rs",

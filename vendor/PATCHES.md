@@ -31,6 +31,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | h3 | Bound frame and DATA read-ahead | hyperium/h3#344, `c916ed5a` (frame headers); #328 and #386 are related | Backport #344; propose the DATA-body extension to hyperium/h3 |
 | h3 | Opt-in draft-00 datagram SETTINGS for WARP | None | Propose the default-off client builder switch to hyperium/h3 |
 | h3 | Allow warnings in the manifest | None | None planned: it gives the path dependency a crates.io dependency's lint cap |
+| gotatun | Deliver already-ready encrypted IP packets to the bounded UDP queue together | None submitted | Propose the batch handoff to mullvad/gotatun |
 | h2 | Ignore DATA and HEADERS on forgotten client streams | None as of 0.4.20 | Issue and PR to hyperium/h2 with the delayed-DATA-after-reset transport test |
 | mio | High-resolution timed waits on Windows | None | PR to tokio-rs/mio, citing Go's default poller path |
 | quinn | `MAX_TRANSMIT_DATAGRAMS` 80 (`MAX_TRANSMIT_SEGMENTS` back to upstream's 10) | n0-computer/noq#636 (noq) | The segment cap is upstream's again; propose only the datagram limit to quinn-rs/quinn |
@@ -57,6 +58,18 @@ The package archive checksum is `7227623e47342428b893b9401d85cae09c4656aecaae524
   connection, when a finished BoringSSL handshake hands its keys and sequence numbers to the directional record layer
   (`crates/tls/src/boring_backend.rs` `record_state`). The release wraps none of them on `SslRef` (`get_shutdown` is
   on `SslStream` and takes `&mut self`), so tls otherwise needs `boring-sys` and `unsafe`. No upstream PR is planned.
+
+## gotatun 0.10.2
+
+The package archive checksum is `5e37c2134d46523ed5b3c4bbdb578225e2e7379d03aea65baef41584725b1991`.
+
+- `src/device/mod.rs`, `src/udp/buffer.rs`: the outgoing task encrypts the group its IP device already returned and
+  publishes each contiguous group of same-family packets to the existing UDP queue. Each group stops at the smaller of
+  the transport batch limit and the channel capacity. Reserving one channel slot per packet keeps backpressure in packet
+  units. The producer fills these slots without awaiting between sends. The UDP task can still drain concurrently.
+  An isolated IP packet, a transport that sends one packet at a time, and packets from timers or the receive task use
+  the usual single enqueue. This follows wireguard-go's batch handoff between the device reader, encryption and sender
+  (`device/send.go` in metacubex/wireguard-go `a6cecdd7`). Upstream gotatun queues each packet as it encrypts it.
 
 ## h2 0.4.20
 
