@@ -1,11 +1,10 @@
 //! Holds the published tree to what a reader outside the project can use. The docs state the current
 //! rule, choice or number: no commit hash of this repository, no date, and no pointer into the
-//! git-ignored `docs/private/` beyond one line in `AGENTS.md`. No tracked file outside `vendor/` and the
-//! third-party modules of the module corpus (whose `SOURCES.md` and `remote.json` are checked) names
+//! git-ignored `docs/private/` beyond one line in `AGENTS.md`. No tracked file outside `vendor/` names
 //! a home directory or the project's internal coordination (`internal_marks`), and no tracked file that
 //! is not Rust source names a public IPv4 host outside the documentation ranges and the public
-//! resolvers. When `docs/private/public-tree-deny.txt` exists, no tracked file outside `vendor/`, the
-//! corpus's modules included, uses the names it lists either.
+//! resolvers. When `docs/private/public-tree-deny.txt` exists, no tracked file outside `vendor/` uses
+//! the names it lists either.
 
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -29,10 +28,6 @@ const HISTORY_YEARS: std::ops::RangeInclusive<u16> = 2020..=2039;
 const HOMES: &[&str] = &["/Users/", "/home/"];
 /// The checks themselves, which spell out what they look for.
 const EXEMPT: &[&str] = &["xtask/src/public_tree.rs", "xtask/src/internal_marks.rs"];
-/// Modules as their authors wrote them, with the expectations read from them and their licences;
-/// the project's own files there are checked.
-const MODULE_CORPUS: &str = "crates/config/tests/data/modules/";
-const MODULE_CORPUS_OWN: &[&str] = &["SOURCES.md", "remote.json"];
 const PUBLIC_RESOLVERS: &[Ipv4Addr] = &[
     Ipv4Addr::new(1, 1, 1, 1),
     Ipv4Addr::new(1, 0, 0, 1),
@@ -89,22 +84,13 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
         let Ok(text) = std::fs::read_to_string(root.join(&path)) else {
             continue;
         };
-        if is_third_party_module(&path) {
-            problems.extend(denied(&path, &text, &deny));
-        } else {
-            problems.extend(file_problems(&path, &text, &deny));
-        }
+        problems.extend(file_problems(&path, &text, &deny));
     }
     if problems.is_empty() {
         Ok(())
     } else {
         Err(problems.join("\n"))
     }
-}
-
-fn is_third_party_module(path: &str) -> bool {
-    path.strip_prefix(MODULE_CORPUS)
-        .is_some_and(|name| !name.contains('/') && !MODULE_CORPUS_OWN.contains(&name))
 }
 
 /// A name the private deny list keeps out of the tree. A pattern ending in `_` or `-` matches a word

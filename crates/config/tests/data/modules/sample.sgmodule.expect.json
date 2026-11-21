@@ -1,0 +1,336 @@
+{
+  "format": "surge",
+  "meta": {
+    "name": "Sample rewrites",
+    "desc": "Rewrites a few sample hosts",
+    "author": "Sample Author[https://example.com/author]",
+    "icon": "https://cdn.example.com/icon.png",
+    "homepage": "https://example.com/sample",
+    "category": "Samples",
+    "system": "ios",
+    "requirement": null,
+    "argumentsDesc": "Region: the feed's region\nFeed: rewrite the feed"
+  },
+  "off": null,
+  "arguments": [
+    {
+      "name": "Region",
+      "kind": {
+        "type": "text"
+      },
+      "number": false,
+      "default": "US",
+      "line": 9
+    },
+    {
+      "name": "Feed",
+      "kind": {
+        "type": "switch"
+      },
+      "number": false,
+      "default": "true",
+      "line": 9
+    },
+    {
+      "name": "Schedule",
+      "kind": {
+        "type": "text"
+      },
+      "number": false,
+      "default": "0 8 * * *",
+      "line": 9
+    },
+    {
+      "name": "Label",
+      "kind": {
+        "type": "text"
+      },
+      "number": false,
+      "default": "#",
+      "line": 9
+    }
+  ],
+  "hostname": [
+    {
+      "line": 92,
+      "items": "api.a.test, *.cdn.a.test, -skip.a.test, a.test:8443"
+    },
+    {
+      "line": 93,
+      "items": "first.a.test",
+      "insert": true
+    }
+  ],
+  "force-http-hostname": [
+    {
+      "line": 15,
+      "items": "plain.a.test, *.plain.b.test"
+    }
+  ],
+  "skip-server-cert-verify": null,
+  "client-source-address": [
+    {
+      "line": 96,
+      "items": "-192.0.2.2/32, 192.0.2.0/24"
+    }
+  ],
+  "h2": 94,
+  "url-rewrite": {
+    "49": "UrlRewriteDef { pattern: \"^https:\\\\/\\\\/a\\\\.test\\\\/old\", head: None, replacement: \"https://a.test/new\", action: Redirect302 }",
+    "50": "UrlRewriteDef { pattern: \"^https:\\\\/\\\\/a\\\\.test\\\\/moved\", head: None, replacement: \"https://a.test/new\", action: Redirect307 }",
+    "51": "UrlRewriteDef { pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/promo\", head: None, replacement: \"\", action: Reject }",
+    "52": "UrlRewriteDef { pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/banner\", head: None, replacement: \"\", action: RejectDict }",
+    "53": "UrlRewriteDef { pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/splash\", head: None, replacement: \"\", action: RejectImg }",
+    "54": "UrlRewriteDef { pattern: \"^https:\\\\/\\\\/link\\\\.a\\\\.test\\\\/\\\\?target=(.*)\", head: None, replacement: \"$1\", action: Redirect302 }",
+    "55": "UrlRewriteDef { pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v2\", head: None, replacement: \"https://api.b.test/v2\", action: Header }"
+  },
+  "header-rewrite": {
+    "58": "HeaderRewriteDef { response: false, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/\", conditions: HeadConditionsDef { request: None, response: None }, edit: Add(\"x-sample\", \"1\") }",
+    "59": "HeaderRewriteDef { response: false, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/\", conditions: HeadConditionsDef { request: None, response: None }, edit: Del(\"cookie\") }",
+    "60": "HeaderRewriteDef { response: false, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/\", conditions: HeadConditionsDef { request: None, response: None }, edit: Replace(\"user-agent\", \"Sample/1.0\") }",
+    "61": "HeaderRewriteDef { response: true, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/\", conditions: HeadConditionsDef { request: None, response: None }, edit: ReplaceRegex(\"set-cookie\", \"(a)=1\", \"$1=2\") }",
+    "62": "error Unknown: unknown action \"url\""
+  },
+  "body-rewrite": {
+    "65": "BodyRewriteDef { response: true, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/feed\", conditions: HeadConditionsDef { request: None, response: None }, action: Replace([(\"\\\"promo\\\":true\", \"\\\"promo\\\":false\")]) }",
+    "66": "BodyRewriteDef { response: true, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/list\", conditions: HeadConditionsDef { request: None, response: None }, action: Replace([(\"\\\"items\\\":\\\\[.+\\\\]\", \"\\\"items\\\":[]\")]) }",
+    "67": "BodyRewriteDef { response: false, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/post\", conditions: HeadConditionsDef { request: None, response: None }, action: Replace([(\"\\\"debug\\\":true\", \"\\\"debug\\\":false\")]) }",
+    "68": "BodyRewriteDef { response: true, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/feed\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\"del(.data.promo)\") }",
+    "69": "BodyRewriteDef { response: true, pattern: \"^http:\\\\/\\\\/[^?]+\\\\/resolve\\\\?host=(?:api|cdn)\\\\.a\\\\.test\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\".dns[]? |= (.ips = [] | .ttl = 86400)\") }",
+    "70": "BodyRewriteDef { response: false, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/post\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\".client.debug = false\") }",
+    "71": "BodyRewriteDef { response: true, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/tabs\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\"jq-path=\\\"https://cdn.example.com/tabs.jq\\\"\") }"
+  },
+  "map-local": {
+    "74": "MapLocalDef { pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/empty\", conditions: HeadConditionsDef { request: None, response: None }, body: Text, data: \"{}\", status: 200, header: {\"content-type\": \"application/json\"}, content_type: \"text/plain; charset=utf-8\", request: false }",
+    "75": "MapLocalDef { pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/blank\", conditions: HeadConditionsDef { request: None, response: None }, body: File { base64: false }, data: \"https://cdn.example.com/blank.json\", status: 200, header: {}, content_type: \"application/json\", request: false }",
+    "76": "MapLocalDef { pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/pixel\", conditions: HeadConditionsDef { request: None, response: None }, body: Base64([71, 73, 70, 56, 57, 97, 1, 0, 1, 0, 0, 0, 0, 44]), data: \"R0lGODlhAQABAAAAACw=\", status: 200, header: {\"content-type\": \"image/gif\"}, content_type: \"application/octet-stream\", request: false }",
+    "77": "MapLocalDef { pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/gone\", conditions: HeadConditionsDef { request: None, response: None }, body: TinyGif, data: \"\", status: 404, header: {}, content_type: \"image/gif\", request: false }"
+  },
+  "request-body-mock": {},
+  "script": {
+    "81": "ScriptDef { name: \"sample.response\", path: \"https://cdn.example.com/response.js\", kind: HttpResponse, pattern: Some(\"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/(feed|list)\\\\?\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: true, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: Some(String(\"region=US&feed=true\")) }",
+    "82": "ScriptDef { name: \"sample.request\", path: \"https://cdn.example.com/request.js\", kind: HttpRequest, pattern: Some(\"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/post\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: true, binary_body: true, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: Some(10.0), argument: None }",
+    "83": "ScriptDef { name: \"sample.cron\", path: \"https://cdn.example.com/cron.js\", kind: Cron, pattern: None, conditions: HeadConditionsDef { request: None, response: None }, requires_body: false, binary_body: false, full_header: false, max_size: 0, cronexp: \"0 8 * * *\", event: \"\", timeout: Some(120.0), argument: None }",
+    "84": "ScriptDef { name: \"sample.event\", path: \"https://cdn.example.com/network.js\", kind: Event, pattern: None, conditions: HeadConditionsDef { request: None, response: None }, requires_body: false, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"network-changed\", timeout: None, argument: None }",
+    "85": "ScriptDef { name: \"sample.dns\", path: \"https://cdn.example.com/dns.js\", kind: Dns, pattern: None, conditions: HeadConditionsDef { request: None, response: None }, requires_body: false, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }",
+    "86": "ScriptDef { name: \"sample.generic\", path: \"https://cdn.example.com/generic.js\", kind: Generic, pattern: None, conditions: HeadConditionsDef { request: None, response: None }, requires_body: false, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }",
+    "87": "ScriptDef { name: \"sample.rule\", path: \"https://cdn.example.com/rule.js\", kind: Rule, pattern: None, conditions: HeadConditionsDef { request: None, response: None }, requires_body: false, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }"
+  },
+  "rules": {
+    "25": "DOMAIN,track.a.test => REJECT",
+    "26": "DOMAIN-SUFFIX,ads.a.test => REJECT-TINYGIF",
+    "27": "DOMAIN-KEYWORD,-promo- => REJECT-DROP",
+    "28": "RULE-SET,mitm-cb534755663c => REJECT",
+    "29": "RULE-SET,mitm-851b93cde0a3 => REJECT no-resolve",
+    "30": "RULE-SET,mitm-01fbcbb9e985 => <PROXY>",
+    "31": "AND,((DOMAIN-KEYWORD,-ad-),(DOMAIN-SUFFIX,img.a.test)) => REJECT",
+    "32": "OR,((DOMAIN-SUFFIX,stun.a.test),(DST-PORT,3478)) => REJECT-NO-DROP",
+    "33": "AND,((DOMAIN-SUFFIX,video.a.test),(NETWORK,UDP)) => REJECT",
+    "34": "IP-CIDR,198.51.100.0/24 => REJECT no-resolve",
+    "35": "IP-CIDR6,2001:db8::/32 => REJECT-DROP",
+    "36": "DST-PORT,4480 => REJECT-NO-DROP",
+    "37": "URL-REGEX,^https?:\\/\\/api\\.a\\.test\\/v1\\/promo => REJECT-DICT",
+    "38": "USER-AGENT,SampleAgent* => REJECT",
+    "39": "DOMAIN,US.region.a.test => DIRECT",
+    "40": "RULE-SET,mitm-2b3c50a37411 => REJECT"
+  },
+  "rule-sets": [
+    {
+      "name": "mitm-cb534755663c",
+      "domain": true,
+      "source": {
+        "type": "url",
+        "url": "https://rules.example.com/domains.txt",
+        "interval": null
+      }
+    },
+    {
+      "name": "mitm-851b93cde0a3",
+      "domain": false,
+      "source": {
+        "type": "url",
+        "url": "https://rules.example.com/apps.list",
+        "interval": null
+      }
+    },
+    {
+      "name": "mitm-01fbcbb9e985",
+      "domain": false,
+      "source": {
+        "type": "url",
+        "url": "https://rules.example.com/media.list",
+        "interval": null
+      }
+    },
+    {
+      "name": "mitm-2b3c50a37411",
+      "domain": false,
+      "source": {
+        "type": "inline",
+        "rules": [
+          {
+            "line": 45,
+            "rule": "DOMAIN,inline.a.test"
+          },
+          {
+            "line": 46,
+            "rule": "DOMAIN-SUFFIX,inline.b.test"
+          }
+        ]
+      }
+    }
+  ],
+  "resources": [
+    {
+      "url": "https://cdn.example.com/blank.json",
+      "kind": "map-local",
+      "lines": [
+        75
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/response.js",
+      "kind": "script",
+      "lines": [
+        81
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/request.js",
+      "kind": "script",
+      "lines": [
+        82
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/cron.js",
+      "kind": "script",
+      "lines": [
+        83
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/network.js",
+      "kind": "script",
+      "lines": [
+        84
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/dns.js",
+      "kind": "script",
+      "lines": [
+        85
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/generic.js",
+      "kind": "script",
+      "lines": [
+        86
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/rule.js",
+      "kind": "script",
+      "lines": [
+        87
+      ]
+    }
+  ],
+  "network": {
+    "nameserver": {
+      "replace": true,
+      "before": [
+        "192.0.2.53",
+        "system://"
+      ],
+      "after": []
+    },
+    "fakeIpFilter": {
+      "replace": false,
+      "before": [],
+      "after": [
+        "*.game.test"
+      ]
+    },
+    "nameserverPolicy": [
+      {
+        "domain": "*.alias.a.test",
+        "values": [
+          "192.0.2.53"
+        ]
+      }
+    ],
+    "hosts": [
+      {
+        "domain": "static.a.test",
+        "values": [
+          "192.0.2.10"
+        ]
+      }
+    ],
+    "routeExcludeAddress": {
+      "replace": true,
+      "before": [
+        "192.168.0.0/16"
+      ],
+      "after": []
+    },
+    "bypassDomain": {
+      "replace": false,
+      "before": [],
+      "after": [
+        "*.local",
+        "10.0.0.0/8"
+      ]
+    },
+    "lines": [
+      14,
+      16,
+      17,
+      18,
+      21,
+      22
+    ]
+  },
+  "declared-scripts": [
+    81,
+    82,
+    83,
+    84,
+    85,
+    86,
+    87,
+    88
+  ],
+  "ignored": [
+    {
+      "line": 41,
+      "reason": "requirement"
+    },
+    {
+      "line": 42,
+      "reason": "finalRule"
+    },
+    {
+      "line": 78,
+      "reason": "noAttachment",
+      "detail": "blank.json"
+    },
+    {
+      "line": 88,
+      "reason": "noAttachment",
+      "detail": "head.js"
+    },
+    {
+      "line": 89,
+      "reason": "requirement"
+    },
+    {
+      "line": 97,
+      "reason": "setting",
+      "detail": "tcp-connection"
+    }
+  ]
+}

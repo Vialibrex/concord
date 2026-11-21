@@ -74,6 +74,13 @@ release `libconcord.so` of the other two Android ABIs against their budgets).
   `concord-group`'s `public_suffix` tests compare every rule against it. One commit, apart from code changes.
 - A change to config parsing that changes output: `CONCORD_BLESS=1 cargo test -p concord-config --test golden`
   rewrites the golden files, and the diff is reviewed like code.
+- The MITM module tests read the samples in `crates/config/tests/data/modules`, written for the test on reserved
+  hosts. Published third-party modules stay out of the repository in a private corpus: a directory of modules, each
+  with its `<module>.expect.json`, and a `remote.json` of `{name, url, sha256}` for the ones fetched on demand.
+  `CONCORD_MODULE_CORPUS=<dir> cargo test -p concord-config --test module_corpus` reads it as well (without the variable
+  the test reads the samples alone and says so), `cargo xtask module-corpus` fetches its `remote.json` entries into it,
+  `corpus_lookups` (`concord-mitm`, ignored) measures it, and the bench's `mitm-modules` case embeds it when it is set
+  at build time. `CONCORD_BLESS=1` rewrites the expectations of both.
 - Clippy for Android (`--target aarch64-linux-android`, `armv7-linux-androideabi`, `x86_64-linux-android`) runs with
   `-A clippy::missing_const_for_thread_local`. On those targets the lint fires on every `thread_local!` whose
   initializer is already `const { … }`; macOS and Linux do not report it. Seen with toolchain 1.100.0: when the

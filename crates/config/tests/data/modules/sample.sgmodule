@@ -1,0 +1,97 @@
+#!name=Sample rewrites
+#!desc=Rewrites a few sample hosts
+#!author=Sample Author[https://example.com/author]
+#!homepage=https://example.com/sample
+#!icon=https://cdn.example.com/icon.png
+#!category=Samples
+#!date=2000-01-01 00:00:00
+#!system=ios
+#!arguments=Region:"US",Feed:true,Schedule:"0 8 * * *",Label:"#"
+#!arguments-desc=Region: the feed's region\nFeed: rewrite the feed
+#!unknown-key=kept as is
+
+[General]
+skip-proxy = %APPEND% *.local, 10.0.0.0/8
+force-http-engine-hosts = %APPEND% plain.a.test, *.plain.b.test
+dns-server = 192.0.2.53, system
+always-real-ip = %APPEND% *.game.test
+tun-excluded-routes = 192.168.0.0/16
+
+[Host]
+static.a.test = 192.0.2.10
+*.alias.a.test = server:192.0.2.53
+
+[Rule]
+DOMAIN,track.a.test,REJECT
+DOMAIN-SUFFIX,ads.a.test,REJECT-TINYGIF
+DOMAIN-KEYWORD,-promo-,REJECT-DROP
+DOMAIN-SET,https://rules.example.com/domains.txt,REJECT
+RULE-SET,https://rules.example.com/apps.list,REJECT,no-resolve
+RULE-SET,https://rules.example.com/media.list,PROXY,extended-matching
+AND,((DOMAIN-KEYWORD,-ad-),(DOMAIN-SUFFIX,img.a.test)),REJECT
+OR,((DOMAIN-SUFFIX,stun.a.test),(DEST-PORT,3478)),REJECT-NO-DROP
+AND,((DOMAIN-SUFFIX,video.a.test),(PROTOCOL,UDP)),REJECT
+IP-CIDR,198.51.100.0/24,REJECT,no-resolve
+IP-CIDR6,2001:db8::/32,REJECT-DROP
+DEST-PORT,4480,REJECT-NO-DROP
+URL-REGEX,^https?:\/\/api\.a\.test\/v1\/promo,REJECT-DICT
+USER-AGENT,SampleAgent*,REJECT
+DOMAIN,{{{Region}}}.region.a.test,DIRECT
+RULE-SET,Samples,REJECT
+DOMAIN,never.a.test,REJECT //!REQUIREMENT CORE_VERSION<0
+FINAL,DIRECT
+
+[Ruleset Samples]
+DOMAIN,inline.a.test
+DOMAIN-SUFFIX,inline.b.test
+
+[URL Rewrite]
+^https:\/\/a\.test\/old https://a.test/new 302
+^https:\/\/a\.test\/moved https://a.test/new 307
+^https:\/\/api\.a\.test\/v1\/promo - reject
+^https:\/\/api\.a\.test\/v1\/banner - reject-dict
+^https:\/\/api\.a\.test\/v1\/splash - reject-img
+^https:\/\/link\.a\.test\/\?target=(.*) $1 302
+^https:\/\/api\.a\.test\/v2 https://api.b.test/v2 header
+
+[Header Rewrite]
+http-request ^https:\/\/api\.a\.test\/ header-add X-Sample 1
+http-request ^https:\/\/api\.a\.test\/ header-del Cookie
+http-request ^https:\/\/api\.a\.test\/ header-replace User-Agent Sample/1.0
+http-response ^https:\/\/api\.a\.test\/ header-replace-regex Set-Cookie (a)=1 $1=2
+^https?:\/\/(docs|wiki)\.a\.test\/ url request-header (\r\n)Accept-Language:.+(\r\n) request-header $1Accept-Language: en-us$2
+
+[Body Rewrite]
+http-response ^https:\/\/api\.a\.test\/v1\/feed "promo":true "promo":false
+http-response ^https:\/\/api\.a\.test\/v1\/list "items":\[.+\] "items":[]
+http-request ^https:\/\/api\.a\.test\/v1\/post "debug":true "debug":false
+http-response-jq ^https:\/\/api\.a\.test\/v1\/feed 'del(.data.promo)'
+http-response-jq ^http:\/\/[^?]+\/resolve\?host=(?:api|cdn)\.a\.test '.dns[]? |= (.ips = [] | .ttl = 86400)'
+http-request-jq ^https:\/\/api\.a\.test\/v1\/post '.client.debug = false'
+http-response-jq ^https:\/\/api\.a\.test\/v1\/tabs jq-path="https://cdn.example.com/tabs.jq"
+
+[Map Local]
+^https:\/\/api\.a\.test\/v1\/empty data-type=text data="{}" status-code=200 header="Content-Type:application/json"
+^https:\/\/api\.a\.test\/v1\/blank data="https://cdn.example.com/blank.json"
+^https:\/\/api\.a\.test\/v1\/pixel data-type=base64 data="R0lGODlhAQABAAAAACw=" header="Content-Type:image/gif"
+^https:\/\/api\.a\.test\/v1\/gone data-type=tiny-gif status-code=404
+^https:\/\/api\.a\.test\/v1\/local data-type=file data="blank.json"
+
+[Script]
+sample.response = type=http-response,pattern=^https:\/\/api\.a\.test\/v1\/(feed|list)\?,requires-body=1,max-size=0,script-path=https://cdn.example.com/response.js,argument="region={{{Region}}}&feed={{{Feed}}}"
+sample.request = type=http-request,pattern=^https:\/\/api\.a\.test\/v1\/post,requires-body=true,binary-body-mode=1,timeout=10,script-path=https://cdn.example.com/request.js
+sample.cron = type=cron,cronexp="{{{Schedule}}}",wake-system=1,timeout=120,script-path=https://cdn.example.com/cron.js
+sample.event = type=event,event-name=network-changed,script-path=https://cdn.example.com/network.js
+sample.dns = type=dns,script-path=https://cdn.example.com/dns.js
+sample.generic = type=generic,script-path=https://cdn.example.com/generic.js
+sample.rule = type=rule,script-path=https://cdn.example.com/rule.js
+api.a.test = type=http-response,pattern=^https:\/\/api\.a\.test\/v1\/head,requires-body=0,script-path=head.js
+sample.ios = type=http-request,pattern=^https:\/\/a\.test\/ios,script-path=https://cdn.example.com/ios.js #!REQUIREMENT SYSTEM=='iOS'
+
+[MITM]
+hostname = %APPEND% api.a.test, *.cdn.a.test, -skip.a.test, a.test:8443
+hostname = %INSERT% first.a.test
+h2 = true
+skip-server-cert-verify = %APPEND% self-signed.a.test
+client-source-address = %APPEND% -192.0.2.2, 192.0.2.0/24
+tcp-connection = true

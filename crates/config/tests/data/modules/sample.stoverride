@@ -1,0 +1,78 @@
+name: Sample rewrites
+desc: Rewrites a few sample hosts
+author: Sample Author
+homepage: https://example.com/sample
+icon: https://cdn.example.com/icon.png
+category: Samples
+
+http:
+  mitm:
+    - 'api.a.test'
+    - '*.cdn.a.test'
+    - '-skip.a.test'
+  force-http-engine:
+    - 'plain.a.test:80'
+  url-rewrite:
+    - ^https:\/\/a\.test\/old https://a.test/new 302
+    - ^https:\/\/api\.a\.test\/v1\/promo - reject
+    - ^https:\/\/api\.a\.test\/v1\/banner - reject-dict
+  header-rewrite:
+    - ^https:\/\/api\.a\.test\/ request-add X-Sample 1
+    - ^https:\/\/api\.a\.test\/ request-del Cookie
+    - ^https:\/\/api\.a\.test\/ response-replace Cache-Control no-store
+  body-rewrite:
+    - ^https:\/\/api\.a\.test\/v1\/feed response-jq 'del(.data.promo)'
+    - '^https://api\.a\.test/v1/questions/\d+/feeds\? response-json-del promo_info'
+    - ^https:\/\/api\.a\.test\/v1\/list response-json-replace data.items []
+    - ^https://api\.a\.test/v1/meta response-json-add meta.source "proxy" meta.version 1
+    - ^https:\/\/api\.a\.test\/v1\/flag response false true
+  map-local:
+    - match: ^https:\/\/api\.a\.test\/v1\/empty
+      text: '{}'
+      status-code: 200
+      headers:
+        Content-Type: application/json
+  script:
+    - match: ^https:\/\/api\.a\.test\/v1\/(feed|list)\?
+      name: sample_json
+      type: response
+      require-body: true
+      timeout: 10
+      argument: 'region=US'
+    - match: ^https:\/\/api\.a\.test\/v1\/proto$
+      name: sample_proto
+      type: response
+      require-body: true
+      binary-mode: true
+    - match: ^https:\/\/api\.a\.test\/v1\/post
+      name: sample_request
+      type: request
+      require-body: true
+
+cron:
+  script:
+    - name: sample_cron
+      cron: '0 8 * * *'
+      timeout: 120
+
+script-providers:
+  sample_json:
+    url: https://cdn.example.com/json.js
+    interval: 86400
+  sample_proto:
+    url: https://cdn.example.com/proto.js
+    interval: 86400
+  sample_request:
+    url: https://cdn.example.com/request.js
+  sample_cron:
+    url: https://cdn.example.com/cron.js
+
+rules:
+  - DOMAIN-SUFFIX,ads.a.test,REJECT
+  - RULE-SET,sample_list,REJECT
+
+rule-providers:
+  sample_list:
+    behavior: domain
+    url: https://rules.example.com/sample.yaml
+    interval: 86400

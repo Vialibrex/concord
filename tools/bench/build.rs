@@ -1,14 +1,19 @@
-//! Embeds the config crate's module corpus, so `mitm-modules` runs from a harness copied to
-//! another machine, with the remote files each module reads as its `.expect.json` lists them.
+//! Embeds a corpus of modules, so `mitm-modules` runs from a harness copied to another machine,
+//! with the remote files each module reads as its `.expect.json` lists them: the private corpus
+//! `CONCORD_MODULE_CORPUS` names at build time, or the config crate's samples without one.
 
 use std::error::Error;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?)
-        .join("../../crates/config/tests/data/modules")
-        .canonicalize()?;
+    println!("cargo::rerun-if-env-changed=CONCORD_MODULE_CORPUS");
+    let dir = match std::env::var_os("CONCORD_MODULE_CORPUS") {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?)
+            .join("../../crates/config/tests/data/modules"),
+    }
+    .canonicalize()?;
     println!("cargo::rerun-if-changed={}", dir.display());
     let mut paths = Vec::new();
     for entry in std::fs::read_dir(&dir)? {

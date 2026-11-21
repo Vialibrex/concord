@@ -1,0 +1,26 @@
+# Sample rewrites
+# A Quantumult X rewrite snippet on reserved hosts.
+
+hostname = api.a.test, *.cdn.a.test, -skip.a.test
+
+^https?:\/\/api\.a\.test\/v1\/promo url reject
+^https?:\/\/api\.a\.test\/v1\/empty url reject-200
+^https?:\/\/api\.a\.test\/v1\/banner url reject-dict
+^https?:\/\/api\.a\.test\/v1\/list url reject-array
+^https?:\/\/api\.a\.test\/v1\/splash url reject-img
+^https?:\/\/a\.test\/old url 302 https://a.test/new
+^https?:\/\/a\.test\/moved url 307 https://a.test/new
+^https?:\/\/api\.a\.test\/v1\/flag url response-body false response-body true
+^https?:\/\/api\.a\.test\/v1\/count url response-body offset_ms":\d+ response-body offset_ms":0
+^https?:\/\/api\.a\.test\/v1\/feed url jsonjq-response-body 'del(.data.promo)'
+^https?:\/\/api\.a\.test\/v1\/items url jsonjq-response-body 'if (.items | type) == "array" then .items |= map(select(.ad | not)) else . end'
+^https?:\/\/api\.a\.test\/v1\/post url jsonjq-request-body '.client.debug = false'
+^https?:\/\/(docs|wiki)\.a\.test\/ url request-header (\r\n)Accept-Language:.+(\r\n) request-header $1Accept-Language: en-us$2
+^https?:\/\/api\.a\.test\/v1\/script url script-response-body https://cdn.example.com/response.js
+^https?:\/\/api\.a\.test\/v1\/head url script-response-header https://cdn.example.com/head.js
+^https?:\/\/api\.a\.test\/v1\/request url script-request-body https://cdn.example.com/request.js
+^https?:\/\/api\.a\.test\/v1\/unread url script-request-header https://cdn.example.com/unread.js
+^https?:\/\/api\.a\.test\/v1\/echo url echo-response application/json echo-response https://cdn.example.com/blank.json
+^https?:\/\/(.+\.)?box\.a\.test url script-analyze-echo-response https://cdn.example.com/box.js
+^https?:\/\/api\.a\.test\/v1\/agent SampleAgent url-and-header reject-dict
+^https?:\/\/api\.a\.test\/v1\/post ^POST url-and-header script-response-body https://cdn.example.com/post.js

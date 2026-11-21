@@ -1,9 +1,10 @@
-//! What the module corpus asks of every decrypted request: how many rules each list tries
-//! for a URL no module names, and how long one request's lookups take. Run by hand:
+//! What a corpus of modules asks of every decrypted request: how many rules each list tries
+//! for a URL no module names, and how long one request's lookups take. It reads the private
+//! corpus `CONCORD_MODULE_CORPUS` names, or the config crate's samples without one. Run by hand:
 //! `cargo test -p concord-mitm --release --lib corpus_lookups -- --ignored --nocapture`.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -25,7 +26,10 @@ fn stored_name(url: &str) -> String {
 }
 
 fn corpus_rules(resources: &Path) -> Rules {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../config/tests/data/modules");
+    let dir = std::env::var_os("CONCORD_MODULE_CORPUS").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../config/tests/data/modules"),
+        PathBuf::from,
+    );
     let empty = BTreeMap::new();
     let environment = Environment::current(String::new());
     let input = ModuleInput {

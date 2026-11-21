@@ -1,0 +1,131 @@
+{
+  "format": "stash",
+  "meta": {
+    "name": "Sample rewrites",
+    "desc": "Rewrites a few sample hosts",
+    "author": "Sample Author",
+    "icon": "https://cdn.example.com/icon.png",
+    "homepage": "https://example.com/sample",
+    "category": "Samples",
+    "system": null,
+    "requirement": null,
+    "argumentsDesc": null
+  },
+  "off": null,
+  "arguments": [],
+  "hostname": [
+    {
+      "line": 10,
+      "items": "api.a.test:443"
+    },
+    {
+      "line": 11,
+      "items": "*.cdn.a.test:443"
+    },
+    {
+      "line": 12,
+      "items": "-skip.a.test:443"
+    }
+  ],
+  "force-http-hostname": [
+    {
+      "line": 14,
+      "items": "plain.a.test:80"
+    }
+  ],
+  "skip-server-cert-verify": null,
+  "client-source-address": [],
+  "h2": null,
+  "url-rewrite": {
+    "16": "UrlRewriteDef { pattern: \"^https:\\\\/\\\\/a\\\\.test\\\\/old\", head: None, replacement: \"https://a.test/new\", action: Redirect302 }",
+    "17": "UrlRewriteDef { pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/promo\", head: None, replacement: \"\", action: Reject }",
+    "18": "UrlRewriteDef { pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/banner\", head: None, replacement: \"\", action: RejectDict }"
+  },
+  "header-rewrite": {
+    "20": "HeaderRewriteDef { response: false, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/\", conditions: HeadConditionsDef { request: None, response: None }, edit: Add(\"x-sample\", \"1\") }",
+    "21": "HeaderRewriteDef { response: false, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/\", conditions: HeadConditionsDef { request: None, response: None }, edit: Del(\"cookie\") }",
+    "22": "HeaderRewriteDef { response: true, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/\", conditions: HeadConditionsDef { request: None, response: None }, edit: Replace(\"cache-control\", \"no-store\") }"
+  },
+  "body-rewrite": {
+    "24": "BodyRewriteDef { response: true, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/feed\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\"'del(.data.promo)'\") }",
+    "25": "BodyRewriteDef { response: true, pattern: \"^https://api\\\\.a\\\\.test/v1/questions/\\\\d+/feeds\\\\?\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\"if (.promo_info | . != null and . != false) then del(.promo_info) else . end\") }",
+    "26": "BodyRewriteDef { response: true, pattern: \"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/list\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\"if (.data.items | . != null and . != false) then .data.items = [] else . end\") }",
+    "27": "BodyRewriteDef { response: true, pattern: \"^https://api\\\\.a\\\\.test/v1/meta\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\"if .meta.source == null then .meta.source = \\\"proxy\\\" else . end | if .meta.version == null then .meta.version = 1 else . end\") }"
+  },
+  "map-local": {},
+  "request-body-mock": {},
+  "script": {
+    "36": "ScriptDef { name: \"sample_json\", path: \"https://cdn.example.com/json.js\", kind: HttpResponse, pattern: Some(\"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/(feed|list)\\\\?\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: true, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: Some(10.0), argument: Some(String(\"region=US\")) }",
+    "42": "ScriptDef { name: \"sample_proto\", path: \"https://cdn.example.com/proto.js\", kind: HttpResponse, pattern: Some(\"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/proto$\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: true, binary_body: true, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }",
+    "47": "ScriptDef { name: \"sample_request\", path: \"https://cdn.example.com/request.js\", kind: HttpRequest, pattern: Some(\"^https:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/post\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: true, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }",
+    "54": "ScriptDef { name: \"sample_cron\", path: \"https://cdn.example.com/cron.js\", kind: Cron, pattern: None, conditions: HeadConditionsDef { request: None, response: None }, requires_body: false, binary_body: false, full_header: false, max_size: 0, cronexp: \"0 8 * * *\", event: \"\", timeout: Some(120.0), argument: None }"
+  },
+  "rules": {
+    "71": "DOMAIN-SUFFIX,ads.a.test => REJECT",
+    "72": "RULE-SET,mitm-0c93785bfc65 => REJECT"
+  },
+  "rule-sets": [
+    {
+      "name": "mitm-0c93785bfc65",
+      "domain": false,
+      "source": {
+        "type": "url",
+        "url": "https://rules.example.com/sample.yaml",
+        "interval": 86400
+      },
+      "provider": {
+        "behavior": "domain",
+        "format": "yaml"
+      }
+    }
+  ],
+  "resources": [
+    {
+      "url": "https://cdn.example.com/json.js",
+      "kind": "script",
+      "lines": [
+        36
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/proto.js",
+      "kind": "script",
+      "lines": [
+        42
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/request.js",
+      "kind": "script",
+      "lines": [
+        47
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/cron.js",
+      "kind": "script",
+      "lines": [
+        54
+      ]
+    }
+  ],
+  "network": {},
+  "declared-scripts": [
+    36,
+    42,
+    47,
+    54
+  ],
+  "ignored": [
+    {
+      "line": 28,
+      "reason": "unreadable",
+      "detail": "unknown action response"
+    },
+    {
+      "line": 30,
+      "reason": "setting",
+      "detail": "http.map-local"
+    }
+  ]
+}

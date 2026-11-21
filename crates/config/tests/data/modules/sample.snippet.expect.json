@@ -1,0 +1,121 @@
+{
+  "format": "quantumult-x",
+  "meta": {
+    "name": null,
+    "desc": null,
+    "author": null,
+    "icon": null,
+    "homepage": null,
+    "category": null,
+    "system": null,
+    "requirement": null,
+    "argumentsDesc": null
+  },
+  "off": null,
+  "arguments": [],
+  "hostname": [
+    {
+      "line": 4,
+      "items": "api.a.test, *.cdn.a.test, -skip.a.test"
+    }
+  ],
+  "force-http-hostname": [],
+  "skip-server-cert-verify": null,
+  "client-source-address": [],
+  "h2": null,
+  "url-rewrite": {
+    "6": "UrlRewriteDef { pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/promo\", head: None, replacement: \"\", action: Reject }",
+    "7": "UrlRewriteDef { pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/empty\", head: None, replacement: \"\", action: Reject200 }",
+    "8": "UrlRewriteDef { pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/banner\", head: None, replacement: \"\", action: RejectDict }",
+    "9": "UrlRewriteDef { pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/list\", head: None, replacement: \"\", action: RejectArray }",
+    "10": "UrlRewriteDef { pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/splash\", head: None, replacement: \"\", action: RejectImg }",
+    "11": "UrlRewriteDef { pattern: \"^https?:\\\\/\\\\/a\\\\.test\\\\/old\", head: None, replacement: \"https://a.test/new\", action: Redirect302 }",
+    "12": "UrlRewriteDef { pattern: \"^https?:\\\\/\\\\/a\\\\.test\\\\/moved\", head: None, replacement: \"https://a.test/new\", action: Redirect307 }",
+    "25": "UrlRewriteDef { pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/agent\", head: Some(\"SampleAgent\"), replacement: \"\", action: RejectDict }"
+  },
+  "header-rewrite": {
+    "18": "HeaderRewriteDef { response: false, pattern: \"^https?:\\\\/\\\\/(docs|wiki)\\\\.a\\\\.test\\\\/\", conditions: HeadConditionsDef { request: None, response: None }, edit: Text(\"(\\\\r\\\\n)Accept-Language:.+(\\\\r\\\\n)\", \"$1Accept-Language: en-us$2\") }"
+  },
+  "body-rewrite": {
+    "13": "BodyRewriteDef { response: true, pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/flag\", conditions: HeadConditionsDef { request: None, response: None }, action: Replace([(\"false\", \"true\")]) }",
+    "14": "BodyRewriteDef { response: true, pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/count\", conditions: HeadConditionsDef { request: None, response: None }, action: Replace([(\"offset_ms\\\":\\\\d+\", \"offset_ms\\\":0\")]) }",
+    "15": "BodyRewriteDef { response: true, pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/feed\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\"del(.data.promo)\") }",
+    "16": "BodyRewriteDef { response: true, pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/items\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\"if (.items | type) == \\\"array\\\" then .items |= map(select(.ad | not)) else . end\") }",
+    "17": "BodyRewriteDef { response: false, pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/post\", conditions: HeadConditionsDef { request: None, response: None }, action: Jq(\".client.debug = false\") }"
+  },
+  "map-local": {
+    "23": "MapLocalDef { pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/echo\", conditions: HeadConditionsDef { request: None, response: None }, body: File { base64: false }, data: \"https://cdn.example.com/blank.json\", status: 200, header: {\"content-type\": \"application/json\"}, content_type: \"application/json\", request: false }"
+  },
+  "request-body-mock": {},
+  "script": {
+    "19": "ScriptDef { name: \"response.js\", path: \"https://cdn.example.com/response.js\", kind: HttpResponse, pattern: Some(\"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/script\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: true, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }",
+    "20": "ScriptDef { name: \"head.js\", path: \"https://cdn.example.com/head.js\", kind: HttpResponse, pattern: Some(\"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/head\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: false, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }",
+    "21": "ScriptDef { name: \"request.js\", path: \"https://cdn.example.com/request.js\", kind: HttpRequest, pattern: Some(\"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/request\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: true, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }",
+    "22": "ScriptDef { name: \"unread.js\", path: \"https://cdn.example.com/unread.js\", kind: HttpRequest, pattern: Some(\"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/unread\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: false, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }",
+    "24": "ScriptDef { name: \"box.js\", path: \"https://cdn.example.com/box.js\", kind: HttpRequest, pattern: Some(\"^https?:\\\\/\\\\/(.+\\\\.)?box\\\\.a\\\\.test\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: true, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }",
+    "26": "ScriptDef { name: \"post.js\", path: \"https://cdn.example.com/post.js\", kind: HttpResponse, pattern: Some(\"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/post\"), conditions: HeadConditionsDef { request: Some(\"^POST\"), response: None }, requires_body: true, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }"
+  },
+  "rules": {},
+  "rule-sets": [],
+  "resources": [
+    {
+      "url": "https://cdn.example.com/response.js",
+      "kind": "script",
+      "lines": [
+        19
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/head.js",
+      "kind": "script",
+      "lines": [
+        20
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/request.js",
+      "kind": "script",
+      "lines": [
+        21
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/unread.js",
+      "kind": "script",
+      "lines": [
+        22
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/blank.json",
+      "kind": "map-local",
+      "lines": [
+        23
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/box.js",
+      "kind": "script",
+      "lines": [
+        24
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/post.js",
+      "kind": "script",
+      "lines": [
+        26
+      ]
+    }
+  ],
+  "network": {},
+  "declared-scripts": [
+    19,
+    20,
+    21,
+    22,
+    24,
+    26
+  ],
+  "ignored": []
+}

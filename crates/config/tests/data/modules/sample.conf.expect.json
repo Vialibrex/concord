@@ -1,0 +1,92 @@
+{
+  "format": "quantumult-x",
+  "meta": {
+    "name": "Sample rewrites",
+    "desc": "A Quantumult X configuration on reserved hosts.",
+    "author": null,
+    "icon": null,
+    "homepage": null,
+    "category": null,
+    "system": null,
+    "requirement": null,
+    "argumentsDesc": null
+  },
+  "off": null,
+  "arguments": [],
+  "hostname": [
+    {
+      "line": 29,
+      "items": "api.a.test, *.cdn.a.test"
+    }
+  ],
+  "force-http-hostname": [],
+  "skip-server-cert-verify": {
+    "line": 30,
+    "hosts": "api.a.test, *.cdn.a.test"
+  },
+  "client-source-address": [],
+  "h2": null,
+  "url-rewrite": {
+    "12": "UrlRewriteDef { pattern: \"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/promo\", head: None, replacement: \"\", action: RejectDict }"
+  },
+  "header-rewrite": {},
+  "body-rewrite": {},
+  "map-local": {},
+  "request-body-mock": {},
+  "script": {
+    "13": "ScriptDef { name: \"response.js\", path: \"https://cdn.example.com/response.js\", kind: HttpResponse, pattern: Some(\"^https?:\\\\/\\\\/api\\\\.a\\\\.test\\\\/v1\\\\/feed\"), conditions: HeadConditionsDef { request: None, response: None }, requires_body: true, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"\", timeout: None, argument: None }",
+    "16": "ScriptDef { name: \"Sample cron\", path: \"https://cdn.example.com/cron.js\", kind: Cron, pattern: None, conditions: HeadConditionsDef { request: None, response: None }, requires_body: false, binary_body: false, full_header: false, max_size: 0, cronexp: \"0 8 * * *\", event: \"\", timeout: Some(60.0), argument: None }",
+    "17": "ScriptDef { name: \"Sample network\", path: \"https://cdn.example.com/network.js\", kind: Event, pattern: None, conditions: HeadConditionsDef { request: None, response: None }, requires_body: false, binary_body: false, full_header: false, max_size: 0, cronexp: \"\", event: \"network-changed\", timeout: Some(60.0), argument: None }"
+  },
+  "rules": {
+    "5": "DOMAIN,track.a.test => REJECT",
+    "6": "DOMAIN-SUFFIX,ads.a.test => REJECT",
+    "7": "DOMAIN-KEYWORD,-promo- => REJECT",
+    "8": "IP-CIDR,198.51.100.0/24 => REJECT",
+    "9": "USER-AGENT,SampleAgent* => REJECT"
+  },
+  "rule-sets": [],
+  "resources": [
+    {
+      "url": "https://cdn.example.com/response.js",
+      "kind": "script",
+      "lines": [
+        13
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/cron.js",
+      "kind": "script",
+      "lines": [
+        16
+      ]
+    },
+    {
+      "url": "https://cdn.example.com/network.js",
+      "kind": "script",
+      "lines": [
+        17
+      ]
+    }
+  ],
+  "network": {},
+  "declared-scripts": [
+    13,
+    16,
+    17
+  ],
+  "ignored": [
+    {
+      "line": 20,
+      "reason": "appOnly"
+    },
+    {
+      "line": 23,
+      "reason": "proxies"
+    },
+    {
+      "line": 26,
+      "reason": "proxies"
+    }
+  ]
+}

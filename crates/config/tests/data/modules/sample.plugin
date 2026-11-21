@@ -1,0 +1,71 @@
+#!name = Sample plugin
+#!desc = Rewrites a few sample hosts
+#!author = Sample Author
+#!homepage = https://example.com/sample
+#!icon = https://cdn.example.com/icon.png
+#!openUrl = https://example.com/app
+#!tag = Samples
+#!system = iOS
+#!loon_version = 3.2.1(749)
+
+[Argument]
+feed_enable = switch,true,false,tag=Rewrite the feed,desc=Turns the feed rewrite on
+region = select,"US","JP","DE",tag=Region,desc=The feed's region
+limit = input,"5",tag=Limit,desc=How many items stay
+schedule = input,"0 8 * * *",tag=Schedule
+
+[General]
+skip-proxy = *.local
+bypass-tun = 10.0.0.0/8
+
+[Rule]
+DOMAIN,track.a.test,REJECT
+DOMAIN-SUFFIX, ads.a.test, REJECT
+DOMAIN-KEYWORD,-promo-,REJECT-DROP
+IP-CIDR,198.51.100.0/24,REJECT,no-resolve
+URL-REGEX,^http:\/\/a\.test\/ad,REJECT
+host-suffix, plain.a.test, reject
+
+[Remote Rule]
+https://rules.example.com/loon.list, policy=REJECT, tag=Samples, enabled=true
+https://rules.example.com/off.list, policy=DIRECT, tag=Off, enabled=false
+
+[Rewrite]
+^https:\/\/api\.a\.test\/v1\/promo reject
+^https:\/\/api\.a\.test\/v1\/banner reject-dict
+^https:\/\/api\.a\.test\/v1\/splash reject-img
+^https:\/\/api\.a\.test\/v1\/video reject-video
+^https:\/\/api\.a\.test\/v1\/empty reject-200
+^https:\/\/a\.test\/old 302 https://a.test/new
+^https:\/\/a\.test\/moved 307 https://a.test/new
+^https:\/\/a\.test\/same header https://b.test/same
+^https:\/\/api\.a\.test\/v1\/head header-add X-Sample 1 X-Other 2
+^https:\/\/api\.a\.test\/v1\/head header-del If-None-Match
+^https:\/\/api\.a\.test\/v1\/head header-replace User-Agent Sample/1.0
+^https:\/\/api\.a\.test\/v1\/feed response-body-json-del data.promo data.items[0]
+^https:\/\/api\.a\.test\/v1\/list response-body-json-replace data.items []
+^https:\/\/api\.a\.test\/v1\/member response-body-json-add expire "2099-01-01\x2000:00:00" tier "plus"
+^https:\/\/api\.a\.test\/v1\/post request-body-json-add client.debug false
+^https:\/\/api\.a\.test\/v1\/tabs response-body-json-jq 'del(.data.promo)'
+^https:\/\/api\.a\.test\/v1\/body response-body-replace-regex promo noop
+^https:\/\/api\.a\.test\/v1\/mock mock-response-body data-type=json data="{}" status-code=200
+^https:\/\/api\.a\.test\/v1\/mockfile mock-response-body data-type=json data-path=https://cdn.example.com/blank.json
+^https:\/\/api\.a\.test\/v1\/mockreq mock-request-body data-type=text data="ok"
+request if ${url} ~= /^https:\/\/api\.a\.test\/v2\/promo/i then reject(404)
+request if ${url} ~= /^https:\/\/api\.a\.test\/v2\/banner/ then reject_dict(200)
+response if ${url} ~= /^https:\/\/api\.a\.test\/v2\/splash\?/ then response.body.mock("json", `{"code":0,"data":{"list":[]}}`)
+response if ${url} == "https://api.a.test/v2/status" then response.body.mock("text", "AAAAAA==", 200, true) | response.header.set("grpc-status", "0")
+response if ${url} ~= /^https:\/\/api\.a\.test\/v2\/feed/ && ${response.status} == 200 then response.json.delete(["$.data.promo", "data.items[0].ad"])
+request if ${url} ~= /^https:\/\/api\.a\.test\/v2\/head/ then request.header.set("X-Sample", "true") | request.header.del(["Cookie", "Referer"])
+
+[Script]
+http-response ^https:\/\/api\.a\.test\/v1\/(feed|list)\? script-path=https://cdn.example.com/response.js, requires-body=true, timeout=10, tag=Sample response, argument=[{feed_enable},{region},{limit}], enable={feed_enable}
+http-request ^https:\/\/api\.a\.test\/v1\/post script-path=https://cdn.example.com/request.js, requires-body=true, binary-body-mode=true, tag=Sample request
+cron "{schedule}" script-path=https://cdn.example.com/cron.js, timeout=120, tag=Sample cron
+network-changed script-path=https://cdn.example.com/network.js, tag=Sample network
+generic script-path=https://cdn.example.com/generic.js, tag=Sample tool, timeout=30
+request if ${url} ~= /^https:\/\/api\.a\.test\/v3\// then script("https://cdn.example.com/request3.js") with enable=${feed_enable}
+
+[MITM]
+hostname = api.a.test, *.cdn.a.test, -skip.a.test
+skip-server-cert-verify = true

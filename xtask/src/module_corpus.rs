@@ -1,9 +1,9 @@
-//! `xtask module-corpus`: downloads the modules `crates/config/tests/data/modules/remote.json`
-//! lists into `target/module-corpus`, or the directory `CONCORD_MODULE_CORPUS` names, and keeps
-//! each only when its SHA-256 matches.
+//! `xtask module-corpus`: downloads the modules the `remote.json` of the private corpus that
+//! `CONCORD_MODULE_CORPUS` names lists into that directory, and keeps each only when its SHA-256
+//! matches.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use serde::Deserialize;
@@ -16,19 +16,14 @@ struct Remote {
     sha256: String,
 }
 
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
-}
-
 pub fn run() -> Result<(), String> {
-    let list = root().join("crates/config/tests/data/modules/remote.json");
+    let dir = std::env::var_os("CONCORD_MODULE_CORPUS")
+        .map(PathBuf::from)
+        .ok_or("CONCORD_MODULE_CORPUS names no directory of modules")?;
+    let list = dir.join("remote.json");
     let text = fs::read_to_string(&list).map_err(|err| format!("{}: {err}", list.display()))?;
     let remote: Vec<Remote> =
         serde_json::from_str(&text).map_err(|err| format!("{}: {err}", list.display()))?;
-    let dir = std::env::var_os("CONCORD_MODULE_CORPUS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root().join("target/module-corpus"));
-    fs::create_dir_all(&dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     for module in remote {
         let path = dir.join(&module.name);
         if fs::read(&path).is_ok_and(|bytes| digest(&bytes) == module.sha256) {

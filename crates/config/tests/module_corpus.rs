@@ -1,8 +1,9 @@
-//! Every module of the corpus in `tests/data/modules` read as a host would read it, against the
-//! expectation committed beside it. `remote.json` lists the modules whose licence keeps them
-//! out of the repository; `cargo xtask module-corpus` fetches them into the directory
-//! `CONCORD_MODULE_CORPUS` names (by default `target/module-corpus`), and the test reads
-//! them when they are there. `CONCORD_BLESS=1` rewrites the expectations.
+//! Every module in `tests/data/modules` read as a host would read it, against the expectation
+//! committed beside it. The modules there are samples written for the test on reserved hosts.
+//! Published third-party modules stay out of the repository: when `CONCORD_MODULE_CORPUS` names
+//! a directory of them, each with its expectation beside it, the test reads that directory too,
+//! along with the modules its `remote.json` lists once `cargo xtask module-corpus` has fetched
+//! them there. `CONCORD_BLESS=1` rewrites the expectations.
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -16,32 +17,34 @@ use concord_config::mitm::{HostEntryDef, Items, Read, SourceEntryDef};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-fn data() -> PathBuf {
+fn samples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/modules")
 }
 
-fn cache() -> PathBuf {
-    std::env::var_os("CONCORD_MODULE_CORPUS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/module-corpus")
-        })
+fn corpora() -> Vec<PathBuf> {
+    let mut dirs = vec![samples()];
+    match std::env::var_os("CONCORD_MODULE_CORPUS").map(PathBuf::from) {
+        Some(dir) if dir.is_dir() => dirs.push(dir),
+        Some(dir) => eprintln!("CONCORD_MODULE_CORPUS {} is not a directory", dir.display()),
+        None => eprintln!("CONCORD_MODULE_CORPUS is not set, so only the samples are read"),
+    }
+    dirs
 }
 
 const EXPECT: &str = ".expect.json";
+const REMOTE: &str = "remote.json";
 
 fn is_module(path: &Path) -> bool {
     let name = path.file_name().unwrap().to_string_lossy();
     !name.ends_with(EXPECT)
         && !name.ends_with(".md")
-        && name != "remote.json"
+        && name != REMOTE
         && !name.starts_with("LICENSE")
 }
 
-/// Each module by its name in the corpus, and where its text is; a remote one not fetched
-/// has none.
-fn modules() -> Vec<(String, Option<PathBuf>)> {
-    let mut found: Vec<(String, Option<PathBuf>)> = fs::read_dir(data())
+/// Each module of `dir` by its name, and where its text is; a remote one not fetched has none.
+fn modules(dir: &Path) -> Vec<(String, Option<PathBuf>)> {
+    let mut found: Vec<(String, Option<PathBuf>)> = fs::read_dir(dir)
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.is_file() && is_module(path))
@@ -52,12 +55,15 @@ fn modules() -> Vec<(String, Option<PathBuf>)> {
             )
         })
         .collect();
-    let remote: Vec<Value> =
-        serde_json::from_str(&fs::read_to_string(data().join("remote.json")).unwrap()).unwrap();
-    for entry in remote {
-        let name = entry["name"].as_str().unwrap().to_string();
-        let path = cache().join(&name);
-        found.push((name, path.is_file().then_some(path)));
+    if let Ok(text) = fs::read_to_string(dir.join(REMOTE)) {
+        let remote: Vec<Value> = serde_json::from_str(&text).unwrap();
+        for entry in remote {
+            let name = entry["name"].as_str().unwrap().to_string();
+            let path = dir.join(&name);
+            if !found.iter().any(|(each, _)| *each == name) {
+                found.push((name, path.is_file().then_some(path)));
+            }
+        }
     }
     found.sort();
     found
@@ -218,18 +224,20 @@ fn every_module_reads_as_its_expectation_says() {
         environment: &environment,
     };
     let (mut stale, mut missing) = (Vec::new(), Vec::new());
-    for (name, path) in modules() {
-        let Some(path) = path else {
-            missing.push(name);
-            continue;
-        };
-        let text = fs::read_to_string(&path).unwrap();
-        let actual = render(&read_module(&text, &input));
-        let expected = data().join(format!("{name}{EXPECT}"));
-        if bless {
-            fs::write(&expected, &actual).unwrap();
-        } else if fs::read_to_string(&expected).ok().as_deref() != Some(actual.as_str()) {
-            stale.push(name);
+    for dir in corpora() {
+        for (name, path) in modules(&dir) {
+            let Some(path) = path else {
+                missing.push(name);
+                continue;
+            };
+            let text = fs::read_to_string(&path).unwrap();
+            let actual = render(&read_module(&text, &input));
+            let expected = dir.join(format!("{name}{EXPECT}"));
+            if bless {
+                fs::write(&expected, &actual).unwrap();
+            } else if fs::read_to_string(&expected).ok().as_deref() != Some(actual.as_str()) {
+                stale.push(name);
+            }
         }
     }
     if !missing.is_empty() {
@@ -243,14 +251,16 @@ fn every_module_reads_as_its_expectation_says() {
 
 #[test]
 fn every_expectation_has_its_module() {
-    let names: Vec<String> = modules().into_iter().map(|(name, _)| name).collect();
-    for entry in fs::read_dir(data()).unwrap() {
-        let file = entry.unwrap().file_name().to_string_lossy().into_owned();
-        if let Some(name) = file.strip_suffix(EXPECT) {
-            assert!(
-                names.iter().any(|each| each == name),
-                "{file} has no module"
-            );
+    for dir in corpora() {
+        let names: Vec<String> = modules(&dir).into_iter().map(|(name, _)| name).collect();
+        for entry in fs::read_dir(&dir).unwrap() {
+            let file = entry.unwrap().file_name().to_string_lossy().into_owned();
+            if let Some(name) = file.strip_suffix(EXPECT) {
+                assert!(
+                    names.iter().any(|each| each == name),
+                    "{file} has no module"
+                );
+            }
         }
     }
 }
