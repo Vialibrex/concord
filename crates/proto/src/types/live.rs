@@ -230,6 +230,9 @@ dto! {
         pub domain: String,
         #[serde(rename = "type")]
         pub query_type: String,
+        /// `app` for a query a client sent the core: to its DNS `listen`, through
+        /// `dns-hijack` or a `dns` outbound. `rule`, `direct` and `proxy` for the core's own
+        /// lookups for a rule, a DIRECT dial and a node's server; `other` for the rest.
         pub initiator: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         pub upstream: String,

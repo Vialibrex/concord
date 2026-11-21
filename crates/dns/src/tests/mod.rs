@@ -7,6 +7,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use concord_common::dns_relay::DnsHijack;
 use concord_common::query_trail::traced;
 use concord_common::{Address, HostResolver, Initiator, IpVersion};
 use concord_config::dns::{EnhancedMode, FakeIpFilterMode, PolicyEntry, PolicyKey};
@@ -501,6 +502,31 @@ async fn every_caller_notes_the_record_that_answered_it_and_a_node_notes_nothing
     assert_eq!(hit, [records[1].id]);
     let (_, node) = traced(resolver.lookup("trail.test", IpVersion::Ipv4, Initiator::Proxy)).await;
     assert_eq!(node, Vec::<u64>::new());
+}
+
+#[tokio::test]
+async fn a_query_a_client_hands_the_core_is_the_apps() {
+    let server = serve_udp(answer_with(Ipv4Addr::new(10, 5, 0, 1)), Duration::ZERO).await;
+    let (resolver, sink) = build(&config(&[server.udp_url()]));
+    let hijack: &dyn DnsHijack = &*resolver;
+    hijack
+        .answer(&query_bytes("datagram.test", RecordType::A))
+        .await
+        .unwrap();
+    hijack
+        .answer_stream(&query_bytes("stream.test", RecordType::A))
+        .await
+        .unwrap();
+    assert_eq!(
+        sink.records()
+            .iter()
+            .map(|record| (record.domain.as_str(), record.initiator))
+            .collect::<Vec<_>>(),
+        [
+            ("datagram.test", Initiator::App),
+            ("stream.test", Initiator::App)
+        ]
+    );
 }
 
 #[tokio::test]

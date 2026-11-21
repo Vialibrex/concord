@@ -61,12 +61,12 @@ impl SelfExclusion for KeepOffDevice {
 impl DnsHijack for TunnelDns {
     async fn answer(&self, query: &[u8]) -> Option<Vec<u8>> {
         let runtime = self.0.runtime()?;
-        runtime.dns.handle_query_udp(query, Initiator::Other).await
+        runtime.dns.handle_query_udp(query, Initiator::App).await
     }
 
     async fn answer_stream(&self, query: &[u8]) -> Option<Vec<u8>> {
         let runtime = self.0.runtime()?;
-        runtime.dns.handle_query(query, Initiator::Other).await
+        runtime.dns.handle_query(query, Initiator::App).await
     }
 }
 

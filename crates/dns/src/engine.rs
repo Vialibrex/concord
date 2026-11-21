@@ -330,11 +330,11 @@ impl HostResolver for Resolver {
 #[async_trait]
 impl DnsHijack for Resolver {
     async fn answer(&self, query: &[u8]) -> Option<Vec<u8>> {
-        self.handle_query_udp(query, Initiator::Other).await
+        self.handle_query_udp(query, Initiator::App).await
     }
 
     async fn answer_stream(&self, query: &[u8]) -> Option<Vec<u8>> {
-        self.handle_query(query, Initiator::Other).await
+        self.handle_query(query, Initiator::App).await
     }
 }
 

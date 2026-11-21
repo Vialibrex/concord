@@ -3975,7 +3975,8 @@
           "type": "string"
         },
         "initiator": {
-          "type": "string"
+          "type": "string",
+          "description": "`app` for a query a client sent the core: to its DNS `listen`, through\n`dns-hijack` or a `dns` outbound. `rule`, `direct` and `proxy` for the core's own\nlookups for a rule, a DIRECT dial and a node's server; `other` for the rest."
         },
         "upstream": {
           "type": "string"

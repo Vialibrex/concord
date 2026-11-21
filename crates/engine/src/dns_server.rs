@@ -116,7 +116,7 @@ async fn serve_udp(socket: Arc<UdpSocket>, resolver: Arc<ArcSwap<Resolver>>, tas
             let answer = match admit(&query) {
                 Admission::Ignore => return,
                 Admission::Reply(reply) => Some(reply),
-                Admission::Accept => resolver.handle_query_udp(&query, Initiator::Other).await,
+                Admission::Accept => resolver.handle_query_udp(&query, Initiator::App).await,
             };
             if let Some(answer) = answer {
                 let _ = socket.send_to(&answer, peer).await;
@@ -157,7 +157,7 @@ async fn serve_stream(mut stream: TcpStream, resolver: &ArcSwap<Resolver>) -> io
             Admission::Reply(reply) => reply,
             Admission::Accept => resolver
                 .load_full()
-                .handle_query(&query, Initiator::Other)
+                .handle_query(&query, Initiator::App)
                 .await
                 .ok_or(io::ErrorKind::InvalidData)?,
         };

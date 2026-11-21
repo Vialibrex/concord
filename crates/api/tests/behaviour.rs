@@ -1647,6 +1647,18 @@ async fn a_connection_names_the_dns_queries_that_gave_out_its_address() {
         assert_eq!(named, ids, "{target}: {seen:?}");
         held.push(stream);
     }
+    let initiators = |domain: &str| {
+        seen.iter()
+            .filter(|entry| entry.domain == domain)
+            .map(|entry| entry.initiator.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        initiators("mapped.test"),
+        ["app"],
+        "a client's query to listen"
+    );
+    assert!(initiators("rules.test").contains(&"rule"), "{seen:?}");
     drop((watch, held));
     answering.abort();
     rig.finish().await;
