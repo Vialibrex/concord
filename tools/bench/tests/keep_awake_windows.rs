@@ -20,8 +20,8 @@ const BENCH: &str = env!("CARGO_BIN_EXE_concord-bench");
 
 fn affinity(process: windows_sys::Win32::Foundation::HANDLE) -> usize {
     let (mut mask, mut system) = (0usize, 0usize);
-    // SAFETY: both masks are locals that outlive the call, and the handle is open.
     assert_ne!(
+        // SAFETY: both masks are locals that outlive the call, and the handle is open.
         unsafe { GetProcessAffinityMask(process, &mut mask, &mut system) },
         0
     );
