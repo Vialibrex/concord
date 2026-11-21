@@ -570,7 +570,7 @@ async fn a_sender_hands_the_device_frames_of_several_segments() {
         .connect(client_addr, server_addr, Congestion::Cubic)
         .unwrap();
     drive(&mut link, |l| !l.accepted.is_empty(), 10).await;
-    client.write_all(&pattern(256 << 10, 3)).await.unwrap();
+    client.write_all(&pattern(64 << 10, 3)).await.unwrap();
     let before = link.to_server.packets.len();
     link.client.poll(&mut link.to_server);
     let sizes = payloads(&link.to_server)[before..].to_vec();

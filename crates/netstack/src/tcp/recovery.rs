@@ -10,6 +10,22 @@ const REO_PERSIST: u32 = 16;
 const MAX_REO_MULT: u32 = 16;
 
 impl Tcb {
+    fn update_window(&mut self, seq: Seq, ack: Seq, window: u32) {
+        // The window counts from SEG.ACK, so an ACK that moves SND.UNA always brings its
+        // window, even on a retransmission whose sequence is behind SND.WL1.
+        if ack.gt(self.snd_una)
+            || self.snd_wl1.lt(seq)
+            || (self.snd_wl1 == seq && (window > self.snd_wnd || window == 0))
+        {
+            if window > 0 && self.snd_wnd == 0 {
+                self.persist_at = None;
+                self.backoff = 0;
+            }
+            self.snd_wnd = window;
+            self.snd_wl1 = seq;
+        }
+    }
+
     pub(super) fn process_ack(
         &mut self,
         seg: &TcpSegment<'_>,
@@ -24,21 +40,12 @@ impl Tcb {
             self.ack_now = true;
             return;
         }
-        let seq = Seq(seg.seq);
-        let window = u32::from(seg.window) << self.snd_shift;
-        let window_changed = window != self.snd_wnd;
-        if self.snd_wl1.lt(seq) || (self.snd_wl1 == seq && self.snd_wl2.le(ack)) {
-            if window > 0 && self.snd_wnd == 0 {
-                self.persist_at = None;
-                self.backoff = 0;
-            }
-            self.snd_wnd = window;
-            self.snd_wl1 = seq;
-            self.snd_wl2 = ack;
-        }
         if ack.lt(self.snd_una) {
             return;
         }
+        let window = u32::from(seg.window) << self.snd_shift;
+        let window_changed = window != self.snd_wnd;
+        self.update_window(Seq(seg.seq), ack, window);
         let prior_inflight = self.inflight();
         let prior_fack = self.high_sacked.max(self.snd_una);
         let mut delivered = 0u32;

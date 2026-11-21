@@ -176,7 +176,6 @@ pub(crate) struct Tcb {
     send_base: Seq,
     snd_wnd: u32,
     snd_wl1: Seq,
-    snd_wl2: Seq,
     snd_shift: u8,
     rcv_shift: u8,
     mss: u32,
@@ -281,7 +280,6 @@ impl Tcb {
             send_base: iss + 1,
             snd_wnd: 0,
             snd_wl1: Seq(0),
-            snd_wl2: iss,
             snd_shift: 0,
             rcv_shift: 0,
             mss,
@@ -606,9 +604,8 @@ impl Tcb {
         self.negotiate(&seg.options);
         self.rcv_adv = self.rcv_nxt + self.rcv_cap.min(65_535);
         self.snd_una = self.iss + 1;
-        self.snd_wnd = u32::from(seg.window) << self.snd_shift;
+        self.snd_wnd = u32::from(seg.window);
         self.snd_wl1 = Seq(seg.seq);
-        self.snd_wl2 = Seq(seg.ack);
         self.syn_pending = false;
         self.state = State::Established;
         if !self.rtt.sampled && self.backoff == 0 {
@@ -623,11 +620,13 @@ impl Tcb {
     fn acceptable(&self, seg: &TcpSegment<'_>) -> bool {
         let seq = Seq(seg.seq);
         let len = seg.seq_len();
+        if len == 0 {
+            // The right edge too, as Linux, gVisor and sing-tun take it: a peer that filled the
+            // window sends its ACKs there, at its SND.NXT.
+            return seq.ge(self.rcv_nxt) && seq.le(self.rcv_adv.max(self.rcv_nxt));
+        }
         let wnd = self.rcv_adv.since(self.rcv_nxt).max(1);
         let in_window = |s: Seq| s.ge(self.rcv_nxt) && s.lt(self.rcv_nxt + wnd);
-        if len == 0 {
-            return in_window(seq) || (seq == self.rcv_nxt);
-        }
         in_window(seq)
             || in_window(seq + (len - 1))
             || (seq.lt(self.rcv_nxt) && (seq + len).gt(self.rcv_nxt))
