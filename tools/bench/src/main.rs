@@ -16,6 +16,7 @@ mod control;
 mod core;
 mod env;
 mod gost;
+#[cfg(target_os = "linux")]
 mod groupfault;
 mod isolate;
 mod load;
@@ -66,6 +67,7 @@ enum Command {
     },
     #[command(about = "Measure a tier.")]
     Run(Box<RunArgs>),
+    #[cfg(target_os = "linux")]
     #[command(
         name = "group-faults",
         about = "Linux, as root: a proxy group of four nodes under an injected fault; see `list` for the scenarios."
@@ -246,6 +248,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Run(args) => run(*args),
+        #[cfg(target_os = "linux")]
         Command::GroupFaults(args) => groupfault::run(*args),
         Command::MasqueServer { listen } => masque::serve(listen),
         Command::Compare(args) => compare(args),
@@ -284,9 +287,12 @@ fn list() {
     for w in Workload::ALL {
         println!("  {:<14} {}", w.name(), w.about());
     }
-    println!("group-faults scenarios (`concord-bench group-faults --scenario NAME`):");
-    for s in groupfault::SCENARIOS {
-        println!("  {:<14} {}", s.name, s.about);
+    #[cfg(target_os = "linux")]
+    {
+        println!("group-faults scenarios (`concord-bench group-faults --scenario NAME`):");
+        for s in groupfault::SCENARIOS {
+            println!("  {:<14} {}", s.name, s.about);
+        }
     }
     for tier in [Tier::Quick, Tier::Full] {
         let plan = Plan::tier(tier);
