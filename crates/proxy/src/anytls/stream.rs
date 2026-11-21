@@ -76,6 +76,7 @@ impl Inbox {
 
 struct Outbox {
     sink: PollSender<Out>,
+    wrote_since_read: bool,
 }
 
 impl Outbox {
@@ -93,6 +94,7 @@ impl Outbox {
         }
         ready!(self.sink.poll_reserve(cx))
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        self.wrote_since_read = false;
         if data.len() <= MAX_FRAME {
             self.sink
                 .send_item(Out::Data(frame(CMD_PSH, closer.sid, data)))
@@ -132,13 +134,19 @@ impl Outbox {
             .prepend(HEADER)?
             .copy_from_slice(&header(CMD_PSH, closer.sid, length));
         let mut frame = buffer.take_owned();
-        match closer.session.try_write_owned(cx, &mut frame) {
+        let continued = self.wrote_since_read;
+        let inline = if continued {
+            closer.session.try_write_owned(cx, &mut frame)
+        } else {
+            Ok(false)
+        };
+        match inline {
             Ok(true) => {
                 self.sink.abort_send();
             }
             Ok(false) => self
                 .sink
-                .send_item(Out::Owned(frame))
+                .send_item(Out::Owned { frame, continued })
                 .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?,
             Err(err) => {
                 closer.session.close();
@@ -146,6 +154,7 @@ impl Outbox {
                 return Poll::Ready(Err(err));
             }
         }
+        self.wrote_since_read = true;
         Poll::Ready(Ok(length))
     }
 }
@@ -170,7 +179,10 @@ impl AnyTlsStream {
                 pending: Bytes::new(),
                 ended: false,
             },
-            outbox: Outbox { sink },
+            outbox: Outbox {
+                sink,
+                wrote_since_read: false,
+            },
             closer: Arc::new(Closer { sid, session, done }),
         }
     }
@@ -183,7 +195,12 @@ impl AsyncRead for AnyTlsStream {
         out: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        this.inbox.poll_read(cx, &this.closer.done, out)
+        let before = out.filled().len();
+        let result = this.inbox.poll_read(cx, &this.closer.done, out);
+        if out.filled().len() != before {
+            this.outbox.wrote_since_read = false;
+        }
+        result
     }
 }
 

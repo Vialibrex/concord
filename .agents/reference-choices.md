@@ -226,9 +226,10 @@ Concord already takes these from the references; keep them unless the reference 
   A relay buffer with 7 bytes of headroom is framed in place, as in sing-anytls `580984e4`,
   `stream.go:313-324`. Its `session.go:446-487,582-590` writes from the caller under the session's write lock.
   mihomo `3f27ef39`, `transport/anytls/session/session.go:381-393,445-447,518`, likewise keeps a write contiguous
-  with respect to other streams and control frames. With the slot reserved and the unpadded transport idle,
-  Concord's caller can write and flush the owned frame. The session task takes over an unwritten tail or a
-  pending flush in that slot. It also handles buffered or padded writes, copied frames and control frames.
+  with respect to other streams and control frames. Concord keeps the writer in the session task for the first
+  payload and the first write following a reply. Consecutive relay writes on the same stream can borrow the idle,
+  unpadded writer with their slot reserved. The task takes any unwritten tail or pending flush in that slot and
+  resumes sole ownership for individual requests, copied frames and control frames.
 
 - [language-neutral] **Shadowsocks** AEAD chunk 0x3FFF (`sing-shadowsocks2/shadowaead/protocol.go`); request header
   leaves with the first payload. **ShadowsocksR** auth_aes128 frame threshold `32 KiB − overhead` and random pad below

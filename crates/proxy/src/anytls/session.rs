@@ -30,7 +30,10 @@ const SYNACK_DEADLINE: Duration = Duration::from_secs(3);
 
 pub(super) enum Out {
     Data(Vec<u8>),
-    Owned(StreamBuffer),
+    Owned {
+        frame: StreamBuffer,
+        continued: bool,
+    },
     // These follow the data batch, retaining its extra frame slots until
     // the writer drains it without enlarging every channel item.
     FrameSlot,
@@ -83,7 +86,7 @@ impl Session {
         let session = Arc::new(Session {
             seq,
             out,
-            writer: Mutex::new(Some(FrameWriter { sink, framer })),
+            writer: Mutex::new(None),
             streams: Mutex::new(HashMap::new()),
             next_sid: AtomicU32::new(0),
             die: pool.tasks.child_token(),
@@ -99,7 +102,11 @@ impl Session {
             session.padding.load().md5
         );
         session.queue(Out::Data(frame(CMD_SETTINGS, 0, settings.as_bytes())));
-        pool.tasks.spawn(write_loop(session.clone(), queue));
+        pool.tasks.spawn(write_loop(
+            session.clone(),
+            queue,
+            FrameWriter { sink, framer },
+        ));
         pool.tasks.spawn(read_loop(session.clone(), source));
         session
     }
@@ -306,24 +313,49 @@ async fn read_loop(session: Arc<Session>, mut source: BoxRead) {
     session.close();
 }
 
-async fn write_loop(session: Arc<Session>, mut queue: mpsc::Receiver<Out>) {
+async fn next_write(
+    queue: &mut mpsc::Receiver<Out>,
+    local: &mut Option<FrameWriter>,
+    shared: &Mutex<Option<FrameWriter>>,
+) -> Option<(Out, FrameWriter)> {
+    if local.is_some() {
+        let out = queue.recv().await?;
+        return local.take().map(|writer| (out, writer));
+    }
+    poll_fn(|cx| {
+        // Claim the shared writer before dequeue releases the FIFO slot.
+        let mut slot = lock(shared);
+        let out = ready!(queue.poll_recv(cx));
+        Poll::Ready(out.and_then(|out| slot.take().map(|writer| (out, writer))))
+    })
+    .await
+}
+
+async fn write_loop(session: Arc<Session>, mut queue: mpsc::Receiver<Out>, writer: FrameWriter) {
+    let mut local = Some(writer);
     let stopped_writer = loop {
         let next = tokio::select! {
             _ = session.die.cancelled() => None,
-            next = poll_fn(|cx| {
-                // Claim the writer as dequeue releases the one FIFO slot to the next producer.
-                let mut slot = lock(&session.writer);
-                let next = ready!(queue.poll_recv(cx));
-                Poll::Ready(next.and_then(|out| slot.take().map(|writer| (out, writer))))
-            }) => next,
+            next = next_write(&mut queue, &mut local, &session.writer) => next,
         };
         let Some((out, mut writer)) = next else {
-            break lock(&session.writer).take();
+            break local.or_else(|| lock(&session.writer).take());
         };
+        let continued = matches!(
+            out,
+            Out::Owned {
+                continued: true,
+                ..
+            }
+        );
         if writer.send(out).await.is_err() {
             break Some(writer);
         }
-        *lock(&session.writer) = Some(writer);
+        if continued && writer.framer.passes_through() {
+            *lock(&session.writer) = Some(writer);
+        } else {
+            local = Some(writer);
+        }
     };
     session.close();
     if let Some(mut writer) = stopped_writer {
@@ -475,7 +507,11 @@ mod tests {
         let start = buffer.as_slice().as_ptr();
         assert_eq!(write_buffer(&mut stream, &mut buffer).await.unwrap(), 100);
         assert!(buffer.is_empty());
-        let Some(Out::Owned(owned)) = queue.recv().await else {
+        let Some(Out::Owned {
+            frame: owned,
+            continued: false,
+        }) = queue.recv().await
+        else {
             panic!("expected the relay's buffer");
         };
         assert_eq!(owned.as_slice(), frame(CMD_PSH, 1, &payload));
@@ -547,6 +583,24 @@ mod tests {
         assert_eq!(read_frame(&mut far).await.0, CMD_SYN);
         assert_eq!(read_frame(&mut far).await.2, b"start");
 
+        for (payload, shared) in [(b"start".as_slice(), false), (b"next", true)] {
+            let mut frame = relay_buffer(HEADER, payload);
+            assert_eq!(
+                write_buffer(&mut stream, &mut frame).await.unwrap(),
+                payload.len()
+            );
+            assert_eq!(session.out.capacity(), 0);
+            assert_eq!(read_frame(&mut far).await, (CMD_PSH, 1, payload.to_vec()));
+            assert_eq!(lock(&session.writer).is_some(), shared);
+        }
+        let mut input = [0; 1];
+        let mut read = tokio::io::ReadBuf::new(&mut input);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            tokio::io::AsyncRead::poll_read(std::pin::Pin::new(&mut stream), &mut cx, &mut read)
+                .is_pending()
+        );
+
         let mut short = relay_buffer(HEADER, b"a");
         assert_eq!(write_buffer(&mut stream, &mut short).await.unwrap(), 1);
         assert_eq!(session.out.capacity(), OUT_QUEUE);
@@ -570,6 +624,19 @@ mod tests {
         assert_eq!(sent.unwrap(), 4);
         assert_eq!(first, (CMD_PSH, 1, payload.to_vec()));
         assert_eq!(second, (CMD_PSH, 1, b"next".to_vec()));
+
+        far.write_all(&frame(CMD_PSH, 1, b"r")).await.unwrap();
+        stream.read_exact(&mut input).await.unwrap();
+        assert_eq!(input, *b"r");
+        let mut reply = relay_buffer(HEADER, b"reply");
+        assert_eq!(write_buffer(&mut stream, &mut reply).await.unwrap(), 5);
+        assert_eq!(session.out.capacity(), 0);
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 1, b"reply".to_vec()));
+        assert!(lock(&session.writer).is_none());
+        let mut resume = relay_buffer(HEADER, b"resume");
+        assert_eq!(write_buffer(&mut stream, &mut resume).await.unwrap(), 6);
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 1, b"resume".to_vec()));
+        assert!(lock(&session.writer).is_some());
 
         let mut final_frame = relay_buffer(HEADER, &payload);
         assert_eq!(
@@ -604,7 +671,10 @@ mod tests {
         assert!(frame.is_empty());
         let mut received = [0; 8];
         let (sent, read) = tokio::join!(
-            writer.send(Out::Owned(frame)),
+            writer.send(Out::Owned {
+                frame,
+                continued: true
+            }),
             far.read_exact(&mut received)
         );
         sent.unwrap();

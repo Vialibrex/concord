@@ -42,11 +42,11 @@ impl FrameWriter {
 
     pub(super) async fn send(&mut self, out: Out) -> io::Result<()> {
         let writes = match out {
-            Out::Owned(frame) if self.framer.passes_through() => {
+            Out::Owned { frame, .. } if self.framer.passes_through() => {
                 self.sink.write_all(frame.as_slice()).await?;
                 return self.sink.flush().await;
             }
-            Out::Owned(frame) => self.framer.push(frame.as_slice().to_vec()),
+            Out::Owned { frame, .. } => self.framer.push(frame.as_slice().to_vec()),
             Out::Data(bytes) => self.framer.push(bytes),
             Out::FrameSlot => return Ok(()),
             Out::Unbuffer => {
