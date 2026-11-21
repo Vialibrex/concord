@@ -1,0 +1,6 @@
+# Real hosts the MITM and module sources may name: `<path> <host> # why`.
+# A host passes with its subdomains, in that path only.
+crates/config/src/mitm/module/rule.rs apple.com # Surge's built-in SYSTEM rule set, which modules name.
+crates/config/src/mitm/module/rule.rs apple.cn # Surge's built-in SYSTEM rule set, which modules name.
+crates/config/src/mitm/module/rule.rs push-apple.com.akadns.net # Surge's built-in SYSTEM rule set, which modules name.
+crates/config/src/mitm/module/requirement.rs manual.nssurge.com # The specification the requirement parser follows.

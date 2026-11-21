@@ -6,6 +6,8 @@ mod internal_marks;
 mod interop_peers;
 mod layers;
 mod mihomo_keys;
+#[cfg(test)]
+mod mitm_fixtures;
 mod module_corpus;
 mod public_suffix;
 #[cfg(test)]

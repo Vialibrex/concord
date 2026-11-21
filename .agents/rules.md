@@ -157,6 +157,9 @@ replays the list on the new release.
 - Nothing tracked and no commit message names the project's own coordination: its working directories and notes, run
   or branch names, work-line codes. A test vector says which upstream, version and call produced it. The `public_tree`
   test and `check-commits` hold both to the same list.
+- MITM and module sources, tests and fixtures name only reserved hosts (`a.test`, `example.com`) and carry no published
+  third-party module; xtask's `mitm_fixtures` test enforces it, and a real host the product needs goes in
+  `xtask/mitm-hosts.txt` with its reason.
 
 ## Commits
 
