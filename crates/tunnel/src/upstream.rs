@@ -7,7 +7,7 @@ use concord_common::{ConnRecord, OutboundKind, io_error};
 
 use crate::flow::FlowState;
 use crate::intercept::{
-    ConnMark, DialFailure, HeldConn, InterceptFlow, Reject, Route, RuleLabel, Upstream,
+    ConnMark, ConnTag, DialFailure, HeldConn, InterceptFlow, Reject, Route, RuleLabel, Upstream,
     UpstreamDialer, UpstreamRequest,
 };
 use crate::route::Decision;
@@ -44,6 +44,7 @@ impl From<FailedDial> for DialFailure {
 struct Held {
     table: Arc<ConnTable>,
     tracked: Arc<Tracked>,
+    conn: Arc<ConnTag>,
     released: AtomicBool,
     closes: u64,
 }
@@ -57,8 +58,8 @@ impl Held {
 }
 
 impl HeldConn for Held {
-    fn id(&self) -> &str {
-        &self.tracked.record.id
+    fn conn(&self) -> &Arc<ConnTag> {
+        &self.conn
     }
 
     fn release(&self, mark: ConnMark) {
@@ -167,27 +168,29 @@ impl UpstreamDialer for TunnelUpstream {
             if inner.table.closes() != closes {
                 return Err(all_closed());
             }
+            let conn = ConnTag::of(&record);
             let registration = inner.table.prepare(record, 0);
             let held = Held {
                 table: inner.table.clone(),
                 tracked: registration.tracked().clone(),
+                conn,
                 released: AtomicBool::new(false),
                 closes,
             };
             return Ok(Upstream {
                 stream: Box::new(MeteredStream::new(remote, registration)),
-                id: None,
+                conn: None,
                 held: Some(Arc::new(held)),
             });
         }
         record.mitm.store(true, Ordering::Relaxed);
-        let id = Arc::from(record.id.as_str());
+        let conn = ConnTag::of(&record);
         let Some(registration) = inner.table.register_since(record, closes) else {
             return Err(all_closed());
         };
         Ok(Upstream {
             stream: Box::new(MeteredStream::new(remote, registration)),
-            id: Some(id),
+            conn: Some(conn),
             held: None,
         })
     }
@@ -204,7 +207,7 @@ impl UpstreamDialer for TunnelUpstream {
         flow: &InterceptFlow,
         chain: &[Arc<str>],
         rule: Option<&RuleLabel>,
-    ) -> Option<Arc<str>> {
+    ) -> Option<Arc<ConnTag>> {
         let inner = self.inner.upgrade()?;
         let meta = FlowState::of_intercept(flow).conn_meta(String::new());
         let (name, payload) = match rule {
@@ -221,8 +224,8 @@ impl UpstreamDialer for TunnelUpstream {
             0,
         ));
         record.mitm.store(true, Ordering::Relaxed);
-        let id = Arc::from(record.id.as_str());
+        let conn = ConnTag::of(&record);
         drop(inner.table.register(record, 0));
-        Some(id)
+        Some(conn)
     }
 }

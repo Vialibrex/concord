@@ -290,7 +290,7 @@ impl Session {
             .dialer
             .record_closed(&flow, &chain, Some(&rule))
         {
-            target.cap.attach(&id);
+            target.cap.attach(Some(&id));
         }
     }
 
@@ -333,7 +333,7 @@ impl Session {
                     if let Some(id) =
                         dialer.record_closed(&flow, &failure.chain, failure.rule.as_ref())
                     {
-                        target.cap.attach(&id);
+                        target.cap.attach(Some(&id));
                     }
                 }
                 return Err(Unsent::Failed(failure.error.to_string()));
@@ -347,7 +347,7 @@ impl Session {
         };
         target.cap.routed(&route.chain, route.rule.as_ref());
         if let Some(id) = dialer.record_closed(&flow, &route.chain, route.rule.as_ref()) {
-            target.cap.attach(&id);
+            target.cap.attach(Some(&id));
         }
         let exit = route.chain.first().map_or("", |exit| &**exit);
         match &route.rule {

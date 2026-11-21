@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use concord_common::exchange_query::ExchangeQuery;
 use concord_common::sync::lock;
 use http_body_util::{BodyExt, StreamBody};
 use serde_json::json;
@@ -15,8 +16,8 @@ use crate::limits::PRESSURE_NO_BODIES;
 use crate::script::testkit::{FakeRuntime, sync_program};
 use crate::script::{ScriptProgram, ScriptResponse, ScriptResult, ScriptRuntime};
 use crate::testing::{
-    Client, Handler, Reply, Rig, Service, TestServer, Wire, flow, offer_on, rig_for, start_server,
-    start_service,
+    Client, Handler, Reply, Rig, Service, TEST_APP, TestServer, Wire, flow, offer_on, rig_for,
+    start_server, start_service,
 };
 
 fn echo() -> Handler {
@@ -176,6 +177,55 @@ async fn exchanges_are_filed_under_the_connection_they_went_out_on() {
         rejected
             .actions
             .contains(&action("url-rewrite", "", "reject-img"))
+    );
+}
+
+#[tokio::test]
+async fn the_capture_across_connections_names_the_app_and_connection_of_each_exchange() {
+    let (_server, rig) = tls_rig(echo(), &["http/1.1"]).await;
+    capture(
+        &rig,
+        json!({
+            "enable": true,
+            "hostname": ["example.test"],
+            "skip-server-cert-verify": true,
+            "url-rewrite": [r"^https://example\.test/ad _ reject-img"],
+        }),
+    );
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+    client.get("/ad").await;
+    client.get("/page").await;
+    settled(&rig, "conn-1", 1).await;
+
+    let answer = rig.mitm.query(&ExchangeQuery::default());
+    let summary = |summary: &ExchangeSummary| {
+        (
+            summary.path.clone(),
+            summary.host.clone(),
+            summary.rewritten,
+            summary.app.as_ref().map(|app| app.process.clone()),
+        )
+    };
+    let app = Some(TEST_APP.to_string());
+    assert_eq!(
+        answer.exchanges.iter().map(summary).collect::<Vec<_>>(),
+        [
+            ("/page".into(), "example.test".into(), false, app.clone()),
+            ("/ad".into(), "example.test".into(), true, app),
+        ]
+    );
+    let (page, ad) = (&answer.exchanges[0], &answer.exchanges[1]);
+    assert_eq!(page.connection_id, Some(1));
+    assert!(
+        ad.connection_id.is_some_and(|id| id != 1),
+        "the rejected request is listed on a closed connection of its own: {:?}",
+        ad.connection_id
+    );
+    assert_eq!(
+        [(page.kind, page.status_class), (ad.kind, ad.status_class)],
+        [("other", "2xx"), ("image", "2xx")]
     );
 }
 

@@ -831,6 +831,18 @@
       }
     },
     {
+      "name": "mitm.query",
+      "kind": "unary",
+      "exec": "concurrent",
+      "capability": "mitm",
+      "params": {
+        "$ref": "#/$defs/MitmQueryParams"
+      },
+      "result": {
+        "$ref": "#/$defs/MitmQueryAnswer"
+      }
+    },
+    {
       "name": "mitm.exchange",
       "kind": "unary",
       "exec": "concurrent",
@@ -6346,6 +6358,461 @@
       },
       "required": [
         "connection"
+      ]
+    },
+    "MitmQueryParams": {
+      "type": "object",
+      "properties": {
+        "filter": {
+          "$ref": "#/$defs/MitmFilter",
+          "default": {}
+        },
+        "before": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Only exchanges with a lower id: the `next` of the page before."
+        },
+        "limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "At most this many, from 1 to 64; absent, 64."
+        },
+        "since": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Only exchanges added or changed after the `version` of an earlier answer, and\nevery exchange still in progress, whose sizes and duration move without\nchanging the version."
+        },
+        "facets": {
+          "type": "boolean",
+          "description": "Also count the held exchanges by status, method, kind and app.",
+          "default": false
+        },
+        "rateFrom": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Also count the matches by the second they started in, from this time on\n(Unix milliseconds)."
+        }
+      },
+      "description": "The capture across connections, newest first. Ids only grow and the oldest\nexchanges are dropped first, so a page taken with `before` never moves when\nnew exchanges arrive. To page through the capture, pass each answer's `next` as\n`before`. To follow it, pass the `version` of the first page of a pass as `since`\nwith no `before`; when that answer has a `next`, keep the same `since` and pass\n`next` as `before` until no `next` comes, then start the next pass from the first\npage's `version`. `matched`, `facets` and `rate` count every held match whatever\n`before` and `since` say. A value out of range, `from` after `to`, or a filter\nlist or `text` over its limit is refused as invalid params."
+    },
+    "MitmFilter": {
+      "type": "object",
+      "properties": {
+        "statuses": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MitmStatus"
+          }
+        },
+        "methods": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Compared without case."
+        },
+        "kinds": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MitmKind"
+          }
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The URL's host, without its port, compared whole and without case."
+        },
+        "apps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The `process` of the exchange's connection as `connection.watch` lists it,\ncompared without case; `\"\"` for none."
+        },
+        "rewritten": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "Whether a rewrite, a local map or a script acted on it."
+        },
+        "slowMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Took at least this long, in milliseconds; an exchange still in progress by how\nlong it had waited when the query ran, so a client counts its running time from\n`start` itself."
+        },
+        "text": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Found without case in the URL, method, content type, error or app."
+        },
+        "from": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Started at or after, in Unix milliseconds."
+        },
+        "to": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Started before, in Unix milliseconds."
+        }
+      },
+      "description": "An empty list or an absent field lets every exchange through; a list keeps the\nexchanges that match any of its items."
+    },
+    "MitmStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "1xx",
+            "2xx",
+            "3xx",
+            "4xx",
+            "5xx"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "failed",
+          "description": "No response: the request failed, was aborted or its connection broke."
+        },
+        {
+          "type": "string",
+          "const": "pending",
+          "description": "Still waiting for its response."
+        }
+      ]
+    },
+    "MitmKind": {
+      "type": "string",
+      "enum": [
+        "json",
+        "html",
+        "script",
+        "css",
+        "image",
+        "font",
+        "media",
+        "text",
+        "other"
+      ],
+      "description": "What a response holds, read from its `Content-Type`; `other` also takes a response\nwithout one and a request not answered yet."
+    },
+    "MitmQueryAnswer": {
+      "type": "object",
+      "properties": {
+        "capturing": {
+          "type": "boolean"
+        },
+        "since": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "When the oldest held exchange started, or capture was turned on (RFC 3339)."
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The `since` that asks for what is added or changed after this answer."
+        },
+        "oldest": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The lowest id held; a client keeping earlier answers drops the ids below it."
+        },
+        "held": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "matched": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "How many held exchanges match the filter."
+        },
+        "exchanges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MitmExchangeSummary"
+          }
+        },
+        "next": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "The `before` of the next page; absent when this page holds the last match."
+        },
+        "unmatched": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "description": "Changed since `since` and no longer matching, so a client drops them."
+        },
+        "facets": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MitmFacets"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rate": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/MitmRateBucket"
+          }
+        },
+        "median-duration": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Of the finished matches, in milliseconds."
+        }
+      },
+      "required": [
+        "capturing",
+        "version",
+        "oldest",
+        "held",
+        "matched",
+        "exchanges"
+      ],
+      "description": "One page of `mitm.query`, newest first, with what a view of the capture needs besides."
+    },
+    "MitmExchangeSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "start": {
+          "type": "string",
+          "description": "RFC 3339."
+        },
+        "pending": {
+          "type": "boolean"
+        },
+        "duration": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Milliseconds; for one in progress, how long it had waited when listed."
+        },
+        "method": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer",
+          "format": "int32",
+          "description": "0 until a response came."
+        },
+        "request-size": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "response-size": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "error": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "description": "With its query."
+        },
+        "content-type": {
+          "type": "string",
+          "description": "The response's, without parameters, in lower case."
+        },
+        "status-class": {
+          "$ref": "#/$defs/MitmStatus"
+        },
+        "kind": {
+          "$ref": "#/$defs/MitmKind"
+        },
+        "rewritten": {
+          "type": "boolean",
+          "description": "A rewrite, a local map or a script acted on it."
+        },
+        "connection-id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The connection it went out on, as `connection.watch` numbers it."
+        },
+        "app": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MitmApp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "start",
+        "duration",
+        "method",
+        "url",
+        "status",
+        "request-size",
+        "response-size",
+        "host",
+        "path",
+        "status-class",
+        "kind"
+      ],
+      "description": "One exchange as `mitm.query` and `mitm.exchanges` list it."
+    },
+    "MitmApp": {
+      "type": "object",
+      "properties": {
+        "process": {
+          "type": "string"
+        },
+        "process-path": {
+          "type": "string"
+        },
+        "uid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "process"
+      ],
+      "description": "The process behind the connection an exchange went out on, kept after it closed."
+    },
+    "MitmFacets": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "description": "Keyed as `MitmStatus` names them."
+        },
+        "method": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "description": "Keyed in upper case."
+        },
+        "kind": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "description": "Keyed as `MitmKind` names them."
+        },
+        "app": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "description": "Keyed by process; `\"\"` holds the exchanges of no known app."
+        }
+      },
+      "required": [
+        "status",
+        "method",
+        "kind",
+        "app"
+      ],
+      "description": "Each dimension counts the matches of every other part of the filter, so a view can\noffer the other values of a dimension it already narrowed."
+    },
+    "MitmRateBucket": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The second's start, in Unix milliseconds."
+        },
+        "requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Failed, or answered 4xx or 5xx."
+        }
+      },
+      "required": [
+        "t",
+        "requests",
+        "errors"
       ]
     },
     "MitmExchangeParams": {

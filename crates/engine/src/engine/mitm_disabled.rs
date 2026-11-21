@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use concord_common::exchange_query::ExchangeQuery;
 use concord_platform::HomeDir;
 use concord_tls::TrustStore;
 use concord_tunnel::{ConnTable, Tunnel};
@@ -85,6 +86,10 @@ impl MitmService {
     }
 
     pub fn exchanges(&self, _id: &str) -> Result<Value, Failure> {
+        Err(unavailable())
+    }
+
+    pub fn query(&self, _query: &ExchangeQuery) -> Result<Value, Failure> {
         Err(unavailable())
     }
 

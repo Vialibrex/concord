@@ -2,13 +2,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
+use concord_common::exchange_query::ExchangeQuery;
 use concord_common::intercept::{ConnInterceptor, InterceptFlow, Offer, UpstreamDialer};
 use concord_common::{BoxStream, EventSink, Tasks};
 use concord_platform::HomeDir;
 use concord_tls::TrustStore;
 
 use crate::ca::{Authority, CaError, CertificateInfo};
-use crate::capture::{Body, CaptureStore, Exchange, ExchangeList};
+use crate::capture::{Body, CaptureStore, Exchange, ExchangeList, QueryAnswer};
 use concord_config::mitm::MitmDef;
 use concord_config::mitm::module::ModuleInput;
 
@@ -278,6 +279,10 @@ impl Mitm {
         } else {
             0
         }
+    }
+
+    pub fn query(&self, query: &ExchangeQuery) -> QueryAnswer {
+        self.shared.captures.query(query)
     }
 
     pub fn exchange(&self, id: i64) -> Option<Exchange> {

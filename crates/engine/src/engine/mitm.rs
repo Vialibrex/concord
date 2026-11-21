@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use arc_swap::ArcSwapOption;
+use concord_common::exchange_query::ExchangeQuery;
 use concord_common::{
     CoreEvent, EventSink, Fetch, ResourceKind, ResourcePhase, ResourceUpdate, Tasks,
 };
@@ -257,6 +258,11 @@ impl MitmService {
             map.insert("closed".into(), Value::Bool(closed));
         }
         Ok(value)
+    }
+
+    pub fn query(&self, query: &ExchangeQuery) -> Result<Value, Failure> {
+        let answer = self.started()?.query(query);
+        Ok(serde_json::to_value(answer).unwrap_or(Value::Null))
     }
 
     pub fn exchange(&self, id: i64) -> Result<Value, Failure> {

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use concord_common::HttpFacts;
 use concord_common::intercept::{
-    ConnMark, HeldConn, InterceptFlow, Route, RuleLabel, UpstreamRequest,
+    ConnMark, ConnTag, HeldConn, InterceptFlow, Route, RuleLabel, UpstreamRequest,
 };
 use concord_common::sync::lock;
 use concord_common::{BoxStream, Tasks};
@@ -61,7 +61,7 @@ pub(crate) enum Sender {
 
 pub(crate) struct UpConn {
     pub sender: Sender,
-    pub id: Option<Arc<str>>,
+    pub conn: Option<Arc<ConnTag>>,
     pub hop: Arc<Hop>,
 }
 
@@ -97,7 +97,7 @@ impl UpConn {
         match &self.sender {
             Sender::H2(sender) => Some(UpConn {
                 sender: Sender::H2(sender.clone()),
-                id: self.id.clone(),
+                conn: self.conn.clone(),
                 hop: self.hop.clone(),
             }),
             Sender::H1(_) => None,
@@ -109,7 +109,7 @@ struct Ready {
     tls: tokio_rustls::client::TlsStream<BoxStream>,
     host: String,
     port: u16,
-    id: Option<Arc<str>>,
+    conn: Option<Arc<ConnTag>>,
     hop: Arc<Hop>,
 }
 
@@ -225,10 +225,10 @@ impl Session {
                 .dial_routed(request, route)
                 .await
                 .map_err(|failure| failure.error)?;
-            let id = upstream
-                .id
+            let conn = upstream
+                .conn
                 .clone()
-                .or_else(|| upstream.held.as_ref().map(|held| Arc::from(held.id())));
+                .or_else(|| upstream.held.as_ref().map(|held| held.conn().clone()));
             *lock(&self.held) = upstream.held;
             let tls = self
                 .tls_connect(
@@ -242,7 +242,7 @@ impl Session {
                 tls,
                 host: self.host.clone(),
                 port: self.flow.port,
-                id,
+                conn,
                 hop,
             });
             Ok(())
@@ -310,7 +310,7 @@ impl Session {
         port: u16,
         cap: &Cap,
         routed: Option<&mut Routed>,
-    ) -> io::Result<(BoxStream, Option<Arc<str>>, Arc<Hop>)> {
+    ) -> io::Result<(BoxStream, Option<Arc<ConnTag>>, Arc<Hop>)> {
         let flow = self.upstream_flow(host, port);
         let dialer = &self.core.shared.dialer;
         let request = UpstreamRequest {
@@ -333,14 +333,14 @@ impl Session {
             Err(failure) => Err(failure),
         };
         match dialed {
-            Ok((upstream, hop)) => Ok((upstream.stream, upstream.id, hop)),
+            Ok((upstream, hop)) => Ok((upstream.stream, upstream.conn, hop)),
             Err(failure) => {
                 if !failure.chain.is_empty() {
                     cap.routed(&failure.chain, failure.rule.as_ref());
                     if let Some(id) =
                         dialer.record_closed(&flow, &failure.chain, failure.rule.as_ref())
                     {
-                        cap.attach(&id);
+                        cap.attach(Some(&id));
                     }
                 }
                 Err(failure.error)
@@ -382,17 +382,17 @@ impl Session {
         let guard = self.key_lock(key);
         let _serialized = guard.lock().await;
         if let Some(found) = self.pooled(key, http1) {
-            cap.attach(found.id.as_deref().unwrap_or_default());
+            cap.attach(found.conn.as_ref());
             cap.routed(&found.hop.chain, found.hop.rule.as_ref());
             return Ok((found, true));
         }
         if let Some(ready) = self.take_ready(key, http1) {
             let h2 = ready.tls.get_ref().1.alpn_protocol() == Some(ALPN_H2.as_bytes());
-            let conn = self.start(ready.tls, h2, ready.id, ready.hop).await?;
+            let conn = self.start(ready.tls, h2, ready.conn, ready.hop).await?;
             return Ok(self.register(key, conn, cap));
         }
-        let (stream, id, hop) = self.dial(&key.host, key.port, cap, routed).await?;
-        cap.attach(id.as_deref().unwrap_or_default());
+        let (stream, upstream, hop) = self.dial(&key.host, key.port, cap, routed).await?;
+        cap.attach(upstream.as_ref());
         let conn = if key.https {
             let protocols: &[&str] = if http1 {
                 &[ALPN_HTTP1]
@@ -403,15 +403,15 @@ impl Session {
                 .tls_connect(stream, &key.host, key.port, protocols)
                 .await?;
             let h2 = tls.get_ref().1.alpn_protocol() == Some(ALPN_H2.as_bytes());
-            self.start(tls, h2, id, hop).await?
+            self.start(tls, h2, upstream, hop).await?
         } else {
-            self.start(stream, false, id, hop).await?
+            self.start(stream, false, upstream, hop).await?
         };
         Ok(self.register(key, conn, cap))
     }
 
     fn register(&self, key: &PoolKey, conn: UpConn, cap: &Cap) -> (UpConn, bool) {
-        cap.attach(conn.id.as_deref().unwrap_or_default());
+        cap.attach(conn.conn.as_ref());
         cap.routed(&conn.hop.chain, conn.hop.rule.as_ref());
         if let Some(shared) = conn.duplicate() {
             lock(&self.pool)
@@ -458,7 +458,7 @@ impl Session {
         &self,
         io: S,
         h2: bool,
-        id: Option<Arc<str>>,
+        conn: Option<Arc<ConnTag>>,
         hop: Arc<Hop>,
     ) -> io::Result<UpConn>
     where
@@ -484,7 +484,7 @@ impl Session {
             });
             Sender::H1(sender)
         };
-        Ok(UpConn { sender, id, hop })
+        Ok(UpConn { sender, conn, hop })
     }
 
     /// Serves the client connection until it closes, its CA is retired, it sits idle or its

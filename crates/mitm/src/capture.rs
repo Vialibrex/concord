@@ -1,9 +1,10 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use concord_common::intercept::RuleLabel;
+use concord_common::exchange_query::{ContentKind, StatusClass};
+use concord_common::intercept::{ConnTag, RuleLabel};
 use concord_common::sync::lock;
 use serde::{Serialize, Serializer};
 use time::OffsetDateTime;
@@ -13,6 +14,11 @@ use crate::limits::{
     Pressure,
 };
 use crate::script::HeaderList;
+
+mod query;
+
+pub use query::{App, Facets, QueryAnswer, RateBucket};
+use query::{mime_of, split_url};
 
 const EXCHANGE_OVERHEAD: i64 = std::mem::size_of::<Capture>() as i64;
 
@@ -44,6 +50,22 @@ pub struct ExchangeSummary {
     pub response_size: i64,
     #[serde(skip_serializing_if = "is_empty")]
     pub error: String,
+    pub host: String,
+    pub path: String,
+    /// The response's, without parameters, in lower case.
+    #[serde(rename = "content-type", skip_serializing_if = "is_empty")]
+    pub content_type: String,
+    #[serde(rename = "status-class")]
+    pub status_class: &'static str,
+    pub kind: &'static str,
+    /// A rewrite, a local map or a script acted on it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub rewritten: bool,
+    /// The connection it went out on, as `connection.watch` numbers it.
+    #[serde(rename = "connection-id", skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app: Option<App>,
 }
 
 /// One request as the rules left it: the headers sent upstream and those
@@ -145,9 +167,12 @@ struct Record {
 
 pub struct Capture {
     store: Arc<CaptureStore>,
+    id: i64,
     started: Instant,
     body_limit: i64,
-    connection: Mutex<String>,
+    connection: Mutex<Option<Arc<ConnTag>>>,
+    /// The store's version when this last changed, written under the store's lock.
+    changed: AtomicU64,
     size: AtomicI64,
     dropped: AtomicBool,
     request_size: AtomicI64,
@@ -158,6 +183,8 @@ pub struct Capture {
 struct StoreInner {
     since: OffsetDateTime,
     last_id: i64,
+    /// Counts every change to a held exchange, for the `since` of a query.
+    version: u64,
     records: VecDeque<Arc<Capture>>,
     by_id: HashMap<i64, Arc<Capture>>,
     by_connection: HashMap<String, Vec<Arc<Capture>>>,
@@ -180,6 +207,7 @@ impl CaptureStore {
             inner: Mutex::new(StoreInner {
                 since: OffsetDateTime::now_utc(),
                 last_id: 0,
+                version: 0,
                 records: VecDeque::new(),
                 by_id: HashMap::new(),
                 by_connection: HashMap::new(),
@@ -318,8 +346,10 @@ impl CaptureStore {
             return Cap(None);
         }
         inner.last_id += 1;
+        inner.version += 1;
         let id = inner.last_id;
         let now = OffsetDateTime::now_utc();
+        let (host, path) = split_url(url);
         let exchange = Exchange {
             summary: ExchangeSummary {
                 id,
@@ -332,6 +362,14 @@ impl CaptureStore {
                 request_size: 0,
                 response_size: 0,
                 error: String::new(),
+                host: host.to_string(),
+                path: path.to_string(),
+                content_type: String::new(),
+                status_class: StatusClass::Pending.name(),
+                kind: ContentKind::Other.name(),
+                rewritten: false,
+                connection_id: None,
+                app: None,
             },
             connection: String::new(),
             original_url: String::new(),
@@ -345,9 +383,11 @@ impl CaptureStore {
         let size = exchange.footprint();
         let capture = Arc::new(Capture {
             store: self.clone(),
+            id,
             started: Instant::now(),
             body_limit: inner.max_body,
-            connection: Mutex::new(String::new()),
+            connection: Mutex::new(None),
+            changed: AtomicU64::new(inner.version),
             size: AtomicI64::new(size),
             dropped: AtomicBool::new(false),
             request_size: AtomicI64::new(0),
@@ -371,13 +411,31 @@ impl CaptureStore {
         if capture.dropped.load(Ordering::Relaxed) {
             return;
         }
-        capture.size.fetch_add(delta, Ordering::Relaxed);
-        inner.bytes += delta;
-        inner.evict();
+        inner.grow(capture, delta);
+    }
+
+    /// The change is already in the record, so a query that reads it before the version moves
+    /// sends it again with the next `since` rather than missing it.
+    fn changed(&self, capture: &Capture, delta: i64) {
+        let mut inner = lock(&self.inner);
+        if capture.dropped.load(Ordering::Relaxed) {
+            return;
+        }
+        inner.version += 1;
+        capture.changed.store(inner.version, Ordering::Relaxed);
+        if delta != 0 {
+            inner.grow(capture, delta);
+        }
     }
 }
 
 impl StoreInner {
+    fn grow(&mut self, capture: &Capture, delta: i64) {
+        capture.size.fetch_add(delta, Ordering::Relaxed);
+        self.bytes += delta;
+        self.evict();
+    }
+
     fn clear(&mut self) {
         for capture in &self.records {
             capture.drop_data();
@@ -397,31 +455,31 @@ impl StoreInner {
             };
             capture.drop_data();
             self.bytes -= capture.size.load(Ordering::Relaxed);
-            let (id, started) = {
-                let record = lock(&capture.record);
-                (record.exchange.summary.id, record.exchange.summary.start)
-            };
-            self.by_id.remove(&id);
+            let started = lock(&capture.record).exchange.summary.start;
+            self.by_id.remove(&capture.id);
             self.unlink(&capture);
             self.since = started;
         }
     }
 
     fn unlink(&mut self, capture: &Arc<Capture>) {
-        let connection = std::mem::take(&mut *lock(&capture.connection));
-        if connection.is_empty() {
+        let Some(connection) = lock(&capture.connection).take() else {
             return;
-        }
-        if let Some(list) = self.by_connection.get_mut(&connection) {
+        };
+        if let Some(list) = self.by_connection.get_mut(&connection.id) {
             list.retain(|other| !Arc::ptr_eq(other, capture));
             if list.is_empty() {
-                self.by_connection.remove(&connection);
+                self.by_connection.remove(&connection.id);
             }
         }
     }
 }
 
 impl Exchange {
+    fn rewritten(&self) -> bool {
+        !self.actions.is_empty()
+    }
+
     fn footprint(&self) -> i64 {
         let actions: usize = self
             .actions
@@ -438,6 +496,9 @@ impl Exchange {
                 + self.summary.url.len()
                 + self.original_url.len()
                 + self.summary.error.len()
+                + self.summary.host.len()
+                + self.summary.path.len()
+                + self.summary.content_type.len()
                 + header_size(Some(&self.request_header))
                 + header_size(self.response_header.as_ref())
                 + actions
@@ -464,16 +525,12 @@ impl Capture {
     }
 
     fn snapshot(&self) -> Exchange {
-        let record = lock(&self.record);
-        let mut exchange = record.exchange.clone();
-        drop(record);
-        exchange.connection = lock(&self.connection).clone();
-        exchange.summary.request_size = self.request_size.load(Ordering::Relaxed);
-        exchange.summary.response_size = self.response_size.load(Ordering::Relaxed);
-        if exchange.summary.pending {
-            exchange.summary.duration = millis(self.started);
-        }
-        exchange
+        self.view(|view| {
+            let mut exchange = view.exchange.clone();
+            exchange.summary = self.summary_of(view);
+            exchange.connection = view.conn.map(|conn| conn.id.clone()).unwrap_or_default();
+            exchange
+        })
     }
 
     fn update(&self, change: impl FnOnce(&mut Exchange)) {
@@ -483,9 +540,7 @@ impl Capture {
             change(&mut record.exchange);
             record.exchange.footprint() - before
         };
-        if delta != 0 {
-            self.store.grow(self, delta);
-        }
+        self.store.changed(self, delta);
     }
 
     /// Counts what a body holds, sized from its declared length so that growing it copies nothing.
@@ -579,6 +634,8 @@ impl Cap {
                 if url != e.summary.url && e.original_url.is_empty() {
                     e.original_url = e.summary.url.clone();
                 }
+                let (host, path) = split_url(&url);
+                (e.summary.host, e.summary.path) = (host.to_string(), path.to_string());
                 e.summary.url = url;
                 e.request_header = header;
             });
@@ -606,8 +663,14 @@ impl Cap {
             {
                 lock(&c.record).response_body.length = length;
             }
+            let content_type = header
+                .get("Content-Type")
+                .and_then(|values| values.first())
+                .map(|value| mime_of(value))
+                .unwrap_or_default();
             c.update(|e| {
                 e.summary.status = i32::from(status);
+                e.summary.content_type = content_type;
                 e.response_header = Some(header);
                 e.ttfb = ttfb;
             });
@@ -659,22 +722,27 @@ impl Cap {
 
     /// Files the exchange under the upstream connection it went out on; HTTP/2
     /// may retry it on another.
-    pub fn attach(&self, connection: &str) {
-        let Some(c) = &self.0 else { return };
-        if connection.is_empty() {
+    pub fn attach(&self, connection: Option<&Arc<ConnTag>>) {
+        let (Some(c), Some(connection)) = (&self.0, connection) else {
             return;
-        }
+        };
         let mut inner = lock(&c.store.inner);
-        if c.dropped.load(Ordering::Relaxed) || *lock(&c.connection) == connection {
+        if c.dropped.load(Ordering::Relaxed)
+            || lock(&c.connection)
+                .as_ref()
+                .is_some_and(|held| held.id == connection.id)
+        {
             return;
         }
         inner.unlink(c);
-        *lock(&c.connection) = connection.to_string();
+        *lock(&c.connection) = Some(connection.clone());
         inner
             .by_connection
-            .entry(connection.to_string())
+            .entry(connection.id.clone())
             .or_default()
             .push(c.clone());
+        inner.version += 1;
+        c.changed.store(inner.version, Ordering::Relaxed);
     }
 
     #[cfg(test)]
@@ -710,6 +778,13 @@ mod tests {
         (pressure, store)
     }
 
+    fn conn(id: &str) -> Arc<ConnTag> {
+        Arc::new(ConnTag {
+            id: id.to_string(),
+            ..ConnTag::default()
+        })
+    }
+
     fn begin(store: &Arc<CaptureStore>, url: &str) -> Cap {
         store.begin("GET", url, "HTTP/1.1", HeaderList::new())
     }
@@ -719,9 +794,9 @@ mod tests {
         let (_, store) = store();
         let a = begin(&store, "https://a.test/1");
         let b = begin(&store, "https://a.test/2");
-        a.attach("c1");
-        b.attach("c1");
-        b.attach("c2");
+        a.attach(Some(&conn("c1")));
+        b.attach(Some(&conn("c1")));
+        b.attach(Some(&conn("c2")));
         a.finish();
         let list = store.exchanges("c1");
         assert!(list.capturing && list.since.is_some());
@@ -750,7 +825,7 @@ mod tests {
             .map(|i| begin(&store, &format!("https://a.test/{i}")))
             .collect();
         for cap in &caps {
-            cap.attach("c");
+            cap.attach(Some(&conn("c")));
         }
         let list = store.exchanges("c");
         assert_eq!(list.exchanges.len(), 2);

@@ -1,3 +1,6 @@
+use concord_common::exchange_query::ExchangeQuery;
+use concord_proto::types::{MitmQueryAnswer, MitmStatus};
+
 use super::*;
 
 /// A bare hostname covers 443 and 80 only, and the origins here are on free ports.
@@ -596,6 +599,28 @@ async fn mitm_captures_the_exchanges_of_a_decrypted_connection() {
         (&serde_json::json!(true), &serde_json::json!(false))
     );
     let exchange_id = list["exchanges"][0]["id"].as_i64().unwrap();
+    let answer: MitmQueryAnswer = serde_json::from_value(
+        rig.engine
+            .mitm()
+            .query(&ExchangeQuery {
+                facets: true,
+                rate_from_ms: Some(0),
+                ..ExchangeQuery::default()
+            })
+            .unwrap(),
+    )
+    .expect("the answer decodes as the schema types it");
+    let page = answer
+        .exchanges
+        .iter()
+        .find(|summary| summary.id == exchange_id)
+        .expect("the decrypted request is in the capture");
+    assert_eq!(
+        (page.host.as_str(), page.path.as_str(), page.status_class),
+        ("mitm.test", "/page", MitmStatus::Success)
+    );
+    assert_eq!(page.connection_id, Some(decrypted.seq));
+    assert_eq!(answer.facets.unwrap().method.get("GET"), Some(&2));
     let found = rig.engine.mitm().exchange(exchange_id).unwrap();
     assert_eq!(found["connection"], serde_json::json!(id));
     assert_eq!(found["status"], 200);

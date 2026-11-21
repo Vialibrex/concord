@@ -4,6 +4,7 @@
 pub mod addr;
 pub mod backoff;
 pub mod clock;
+pub mod exchange_query;
 pub mod meta;
 pub mod options;
 pub mod sync;

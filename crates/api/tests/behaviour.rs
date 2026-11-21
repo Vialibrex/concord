@@ -1584,6 +1584,38 @@ async fn the_profile_helpers_read_without_applying() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_capture_query_answers_in_its_typed_shape_and_refuses_a_page_of_none() {
+    let rig = Rig::new().await;
+    let answer = rig
+        .control
+        .mitm_query(MitmQueryParams {
+            facets: true,
+            rate_from: Some(0),
+            ..MitmQueryParams::default()
+        })
+        .await
+        .unwrap();
+    assert!(!answer.capturing);
+    assert!(answer.exchanges.is_empty() && answer.next.is_none());
+    assert_eq!((answer.held, answer.matched), (0, 0));
+    assert_eq!(answer.facets, Some(MitmFacets::default()));
+    assert_eq!(answer.rate, Some(Vec::new()));
+    let refused = rig
+        .control
+        .mitm_query(MitmQueryParams {
+            limit: Some(0),
+            ..MitmQueryParams::default()
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(refused.data, ErrorData::InvalidParams { .. }),
+        "{refused:?}"
+    );
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_service_with_a_capability_it_lacks_answers_unsupported() {
     let rig = Rig::new().await;
     let unknown_connection = rig

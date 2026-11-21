@@ -3,6 +3,7 @@ use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use crate::conn::ConnRecord;
 use crate::{Address, BoxStream, CoreError, FlowMeta, Host, HttpFacts, InboundKind};
 use async_trait::async_trait;
 
@@ -68,7 +69,7 @@ pub enum ConnMark {
 
 /// Dropped without a release, it lists as `ConnMark::Plain`.
 pub trait HeldConn: Send + Sync {
-    fn id(&self) -> &str;
+    fn conn(&self) -> &Arc<ConnTag>;
     fn release(&self, mark: ConnMark);
 }
 
@@ -135,8 +136,31 @@ impl Route {
 
 pub struct Upstream {
     pub stream: BoxStream,
-    pub id: Option<Arc<str>>,
+    pub conn: Option<Arc<ConnTag>>,
     pub held: Option<Arc<dyn HeldConn>>,
+}
+
+/// The connection a request went out on, kept with the request after the connection is gone.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ConnTag {
+    pub id: String,
+    /// The number `connection.watch` lists it by.
+    pub seq: u64,
+    pub uid: Option<u32>,
+    pub process: String,
+    pub process_path: String,
+}
+
+impl ConnTag {
+    pub fn of(record: &ConnRecord) -> Arc<Self> {
+        Arc::new(ConnTag {
+            id: record.id.clone(),
+            seq: record.seq,
+            uid: record.meta.uid,
+            process: record.meta.process.clone(),
+            process_path: record.meta.process_path.clone(),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -190,5 +214,5 @@ pub trait UpstreamDialer: Send + Sync {
         flow: &InterceptFlow,
         chain: &[Arc<str>],
         rule: Option<&RuleLabel>,
-    ) -> Option<Arc<str>>;
+    ) -> Option<Arc<ConnTag>>;
 }

@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use concord_common::intercept::{
-    ConnInterceptor, ConnMark, DialFailure, HeldConn, InterceptFlow, Offer, Reject, Route,
+    ConnInterceptor, ConnMark, ConnTag, DialFailure, HeldConn, InterceptFlow, Offer, Reject, Route,
     RuleLabel, Upstream, UpstreamDialer, UpstreamRequest,
 };
 use concord_common::sync::lock;
@@ -290,14 +290,26 @@ pub(crate) async fn start_service(alpn: &[&str], service: Service) -> TestServer
     }
 }
 
+/// The test dialer's connections all belong to this app.
+pub(crate) const TEST_APP: &str = "test-app";
+
+fn test_conn(id: String, seq: usize) -> Arc<ConnTag> {
+    Arc::new(ConnTag {
+        id,
+        seq: seq as u64,
+        process: TEST_APP.to_string(),
+        ..ConnTag::default()
+    })
+}
+
 pub(crate) struct TestHeld {
-    id: String,
+    conn: Arc<ConnTag>,
     pub mark: Mutex<Option<ConnMark>>,
 }
 
 impl HeldConn for TestHeld {
-    fn id(&self) -> &str {
-        &self.id
+    fn conn(&self) -> &Arc<ConnTag> {
+        &self.conn
     }
 
     fn release(&self, mark: ConnMark) {
@@ -443,10 +455,11 @@ impl UpstreamDialer for TestDialer {
             .and_then(|target| *target)
             .unwrap_or(self.target);
         let stream = tokio::net::TcpStream::connect(target).await?;
-        let id = format!("conn-{}", self.next.fetch_add(1, Ordering::SeqCst));
+        let seq = self.next.fetch_add(1, Ordering::SeqCst);
+        let conn = test_conn(format!("conn-{seq}"), seq);
         let held = request.hold.then(|| {
             let held = Arc::new(TestHeld {
-                id: id.clone(),
+                conn: conn.clone(),
                 mark: Mutex::new(None),
             });
             lock(&self.held).push(held.clone());
@@ -454,7 +467,7 @@ impl UpstreamDialer for TestDialer {
         });
         Ok(Upstream {
             stream: Box::new(stream),
-            id: Some(Arc::from(id.as_str())),
+            conn: Some(conn),
             held,
         })
     }
@@ -468,15 +481,16 @@ impl UpstreamDialer for TestDialer {
         flow: &InterceptFlow,
         chain: &[Arc<str>],
         rule: Option<&RuleLabel>,
-    ) -> Option<Arc<str>> {
-        let id = format!("closed-{}", self.next.fetch_add(1, Ordering::SeqCst));
+    ) -> Option<Arc<ConnTag>> {
+        let seq = self.next.fetch_add(1, Ordering::SeqCst);
+        let id = format!("closed-{seq}");
         lock(&self.closed).push((
             crate::engine::host_of(flow),
             chain.iter().map(ToString::to_string).collect(),
         ));
         lock(&self.closed_ids).push(id.clone());
         lock(&self.closed_rules).push(rule.map(|rule| format!("{},{}", rule.name, rule.payload)));
-        Some(Arc::from(id.as_str()))
+        Some(test_conn(id, seq))
     }
 }
 

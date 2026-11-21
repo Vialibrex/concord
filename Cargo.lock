@@ -1155,6 +1155,7 @@ dependencies = [
  "concord-mitm",
  "concord-net",
  "concord-platform",
+ "concord-proto",
  "concord-proxy",
  "concord-rules",
  "concord-test-support",

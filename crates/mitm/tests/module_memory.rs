@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 
 use async_trait::async_trait;
 use concord_common::intercept::{
-    DialFailure, InterceptFlow, Route, RuleLabel, Upstream, UpstreamDialer, UpstreamRequest,
+    ConnTag, DialFailure, InterceptFlow, Route, RuleLabel, Upstream, UpstreamDialer,
+    UpstreamRequest,
 };
 use concord_mitm::{Mitm, MitmEnv, RawConfig, UtcClock};
 use concord_platform::HomeDir;
@@ -67,7 +68,7 @@ impl UpstreamDialer for NoDial {
         _: &InterceptFlow,
         _: &[Arc<str>],
         _: Option<&RuleLabel>,
-    ) -> Option<Arc<str>> {
+    ) -> Option<Arc<ConnTag>> {
         None
     }
 }
