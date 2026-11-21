@@ -309,7 +309,6 @@ async fn read_loop(session: Arc<Session>, mut source: BoxRead) {
 async fn write_loop(session: Arc<Session>, mut queue: mpsc::Receiver<Out>) {
     let stopped_writer = loop {
         let next = tokio::select! {
-            biased;
             _ = session.die.cancelled() => None,
             next = poll_fn(|cx| {
                 // Claim the writer as dequeue releases the one FIFO slot to the next producer.
@@ -571,6 +570,15 @@ mod tests {
         assert_eq!(sent.unwrap(), 4);
         assert_eq!(first, (CMD_PSH, 1, payload.to_vec()));
         assert_eq!(second, (CMD_PSH, 1, b"next".to_vec()));
+
+        let mut final_frame = relay_buffer(HEADER, &payload);
+        assert_eq!(
+            write_buffer(&mut stream, &mut final_frame).await.unwrap(),
+            payload.len()
+        );
+        drop(stream);
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 1, payload.to_vec()));
+        assert_eq!(read_frame(&mut far).await, (CMD_FIN, 1, Vec::new()));
         session.close();
     }
 

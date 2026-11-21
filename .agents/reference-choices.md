@@ -222,13 +222,13 @@ Concord already takes these from the references; keep them unless the reference 
   `socket/unix.rs:376-377` and `sys/fd/unix.rs`. Per-call suppression preserves the scalar error behaviour without
   depending on the embedding host's signal disposition.
 
-- [language-neutral] **AnyTLS writes** coalesce the frames of each accepted write into one TLS write group, with
-  65535-byte wire payloads and the original 16-frame FIFO budget. Partial acceptance follows bounded mpsc capacity; a
-  single task owns the transport. mihomo `transport/anytls/session/session.go` (`writeDataFrame`, `writeConn`) groups a
-  whole `Stream.Write` to keep it contiguous against other streams and control frames. sing-box `824dbcf` pins
-  `sing-anytls v0.0.0-20260928104022-580984e4d8cb`, whose `session.go` `writeData` also groups a write. A relay buffer
-  with 7 bytes of headroom is framed in place and queued as it is, one frame a queue slot, as sing-anytls's `stream.go`
-  `writeBufferLocked` does with its `FrontHeadroom`; one without, or over a frame, is copied as above.
+- [language-neutral] **AnyTLS writes** reserve one FIFO frame slot and accept up to 65535 payload bytes at a time.
+  A relay buffer with 7 bytes of headroom is framed in place, as in sing-anytls `580984e4`,
+  `stream.go:313-324`. Its `session.go:446-487,582-590` writes from the caller under the session's write lock.
+  mihomo `3f27ef39`, `transport/anytls/session/session.go:381-393,445-447,518`, likewise keeps a write contiguous
+  with respect to other streams and control frames. With the slot reserved and the unpadded transport idle,
+  Concord's caller can write and flush the owned frame. The session task takes over an unwritten tail or a
+  pending flush in that slot. It also handles buffered or padded writes, copied frames and control frames.
 
 - [language-neutral] **Shadowsocks** AEAD chunk 0x3FFF (`sing-shadowsocks2/shadowaead/protocol.go`); request header
   leaves with the first payload. **ShadowsocksR** auth_aes128 frame threshold `32 KiB − overhead` and random pad below

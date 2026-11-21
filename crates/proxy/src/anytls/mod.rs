@@ -3,9 +3,9 @@ mod padding;
 mod pool;
 mod session;
 mod stream;
-mod writer;
 #[cfg(test)]
 mod tests;
+mod writer;
 
 use std::io;
 use std::sync::Arc;
