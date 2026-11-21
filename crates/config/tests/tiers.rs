@@ -405,3 +405,47 @@ fn group_health_keys_have_applied_tiers_and_change_typed_definitions() {
         assert!(changed.report.warnings.is_empty(), "{key}");
     }
 }
+
+#[test]
+fn smart_group_keys_have_tiers_and_the_unsupported_ones_warn() {
+    let text = |options: &str| {
+        format!("proxy-groups: [{{name: g, type: smart, proxies: [DIRECT], {options}}}]")
+    };
+    let base = load_str(&text(""), &LoadOptions::default()).unwrap();
+    assert_eq!(
+        concord_config::keys::GROUP.of("policy-priority"),
+        Some(Tier::T0)
+    );
+    let changed = load_str(&text("policy-priority: 'hk:1.5'"), &LoadOptions::default()).unwrap();
+    assert_ne!(changed.groups[0], base.groups[0]);
+    assert!(changed.report.warnings.is_empty());
+    for key in ["uselightgbm", "collectdata", "sample-rate", "prefer-asn"] {
+        assert_eq!(concord_config::keys::GROUP.of(key), Some(Tier::T2), "{key}");
+        let warned = load_str(&text(&format!("{key}: true")), &LoadOptions::default()).unwrap();
+        assert!(
+            warned
+                .report
+                .warnings
+                .iter()
+                .any(|w| w.path == format!("proxy-groups.g.{key}") && w.code == "not_applied"),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn smart_collector_and_lgbm_keys_are_warned_as_unsupported() {
+    for (text, path) in [
+        ("lgbm-url: https://x", "lgbm-url"),
+        (
+            "profile: {smart-collector-size: 50}",
+            "profile.smart-collector-size",
+        ),
+    ] {
+        let (_, warnings) = loaded(text).unwrap();
+        assert!(
+            warnings.contains(&(path.to_string(), "unsupported_key")),
+            "{path}"
+        );
+    }
+}

@@ -4,7 +4,7 @@ use std::task::{Context, Poll, ready};
 
 use bytes::{Buf, BytesMut};
 use concord_common::stream_buffer::BufferRequirements;
-use concord_common::{BoxRead, BoxWrite, Stream};
+use concord_common::{BoxRead, BoxWrite, CoreError, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::codec::{Decode, Encode};
@@ -245,10 +245,11 @@ impl<D: Decode> Incoming<D> {
 }
 
 fn server_error(code: u8, message: &[u8]) -> io::Error {
-    io::Error::other(format!(
+    CoreError::TargetRefused(format!(
         "server reported code: {code}, message: {}",
         String::from_utf8_lossy(message)
     ))
+    .into()
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin, E: Encode, D: Decode> AsyncRead for SnellStream<S, E, D> {

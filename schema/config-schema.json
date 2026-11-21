@@ -70,7 +70,10 @@
       "external-doh-server",
       "geosite-matcher",
       "etag-support",
-      "global-client-fingerprint"
+      "global-client-fingerprint",
+      "lgbm-auto-update",
+      "lgbm-update-interval",
+      "lgbm-url"
     ],
     "inert": [
       "geodata-loader"
@@ -360,7 +363,9 @@
       "store-fake-ip"
     ],
     "t1": [],
-    "t2": [],
+    "t2": [
+      "smart-collector-size"
+    ],
     "inert": [
       "store-selected"
     ],
@@ -456,7 +461,8 @@
     "select",
     "url-test",
     "fallback",
-    "load-balance"
+    "load-balance",
+    "smart"
   ],
   "proxy-groups": {
     "t0": [
@@ -482,6 +488,7 @@
       "hidden",
       "icon",
       "tolerance",
+      "policy-priority",
       "default-selected",
       "strategy",
       "hash-key"
@@ -490,7 +497,11 @@
     "t2": [
       "routing-mark",
       "interface-name",
-      "dialer-proxy"
+      "dialer-proxy",
+      "uselightgbm",
+      "collectdata",
+      "sample-rate",
+      "prefer-asn"
     ],
     "inert": [],
     "defaults": {}

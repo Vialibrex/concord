@@ -2,7 +2,7 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
-use concord_common::{BoxRead, BoxWrite, Stream};
+use concord_common::{BoxRead, BoxWrite, CoreError, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::wire::{MAX_RESPONSE_HEAD, Response, parse_tcp_response};
@@ -60,9 +60,10 @@ impl<S: AsyncRead + Unpin> AsyncRead for Hy2Stream<S> {
                             this.phase = Phase::Body { leftover, pos: 0 };
                         }
                         Some((Response::Refused(message), _)) => {
-                            return Poll::Ready(Err(io::Error::other(format!(
+                            return Poll::Ready(Err(CoreError::TargetRefused(format!(
                                 "remote error: {message}"
-                            ))));
+                            ))
+                            .into()));
                         }
                         None if head.len() > MAX_RESPONSE_HEAD => {
                             return Poll::Ready(Err(io::Error::new(
@@ -155,7 +156,12 @@ mod tests {
         let mut stream = Hy2Stream::new(near);
         far.write_all(&[1, 3, b'n', b'o', b'!', 0]).await.unwrap();
         let err = stream.read(&mut [0u8; 8]).await.unwrap_err();
-        assert!(err.to_string().contains("remote error: no!"));
+        assert_eq!(err.to_string(), "remote error: no!");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(matches!(
+            CoreError::of(&err),
+            Some(CoreError::TargetRefused(_))
+        ));
     }
 
     #[tokio::test]

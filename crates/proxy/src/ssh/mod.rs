@@ -200,7 +200,12 @@ impl Outbound for Ssh {
         let channel = handle
             .channel_open_direct_tcpip(host, u32::from(dst.port()), "127.0.0.1", 0)
             .await
-            .map_err(|err| io::Error::other(format!("ssh: {err}")))?;
+            .map_err(|err| match err {
+                russh::Error::ChannelOpenFailure(russh::ChannelOpenFailure::ConnectFailed) => {
+                    CoreError::TargetRefused(format!("ssh: {err}")).into()
+                }
+                err => io::Error::other(format!("ssh: {err}")),
+            })?;
         Ok(Box::new(Forwarded {
             stream: channel.into_stream(),
         }))

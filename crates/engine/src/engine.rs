@@ -658,6 +658,9 @@ impl Engine {
         self.shared.platform.network_changed();
         self.clear_dns_cache();
         self.mitm.network_changed();
+        if let Some(outbounds) = self.outbounds() {
+            outbounds.network_changed();
+        }
     }
 
     /// `handleResetNetwork`: connections over a network the device has left would

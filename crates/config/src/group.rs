@@ -17,6 +17,7 @@ pub enum GroupKind {
     UrlTest,
     Fallback,
     LoadBalance,
+    Smart,
 }
 
 impl GroupKind {
@@ -26,6 +27,7 @@ impl GroupKind {
             GroupKind::UrlTest => "url-test",
             GroupKind::Fallback => "fallback",
             GroupKind::LoadBalance => "load-balance",
+            GroupKind::Smart => "smart",
         }
     }
 
@@ -35,6 +37,7 @@ impl GroupKind {
             GroupKind::UrlTest => "URLTest",
             GroupKind::Fallback => "Fallback",
             GroupKind::LoadBalance => "LoadBalance",
+            GroupKind::Smart => "Smart",
         }
     }
 }
@@ -46,6 +49,21 @@ pub enum LbStrategy {
     RoundRobin,
     StickySessions,
 }
+
+/// A `policy-priority` entry; a pattern is a regex when it compiles and a substring otherwise.
+#[derive(Clone, Debug)]
+pub struct PriorityRule {
+    pub pattern: String,
+    pub factor: f64,
+}
+
+impl PartialEq for PriorityRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern && self.factor.to_bits() == other.factor.to_bits()
+    }
+}
+
+impl Eq for PriorityRule {}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GroupDef {
@@ -76,6 +94,7 @@ pub struct GroupDef {
     pub hidden: bool,
     pub icon: String,
     pub tolerance: u16,
+    pub policy_priority: Vec<PriorityRule>,
     pub default_selected: String,
     pub strategy: LbStrategy,
     pub hash_key: String,
@@ -100,6 +119,69 @@ fn explicit_text<'a>(map: &'a Map, key: &str) -> Option<&'a str> {
     map.get(key)
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
+}
+
+fn last_unescaped_colon(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    bytes.iter().enumerate().rev().find_map(|(i, &b)| {
+        let escapes = bytes
+            .get(..i)?
+            .iter()
+            .rev()
+            .take_while(|&&b| b == b'\\')
+            .count();
+        (b == b':' && escapes % 2 == 0).then_some(i)
+    })
+}
+
+fn unescape(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        let escaped = if c == '\\' { chars.next() } else { None };
+        out.push(escaped.unwrap_or(c));
+    }
+    out
+}
+
+fn parse_policy_priority(text: &str, f: &mut Fields<'_>) -> Vec<PriorityRule> {
+    let mut rules = Vec::new();
+    for pair in text.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let split = last_unescaped_colon(pair).filter(|&i| i > 0 && i + 1 < pair.len());
+        let Some(idx) = split else {
+            f.warn(
+                "policy-priority",
+                &format!("`{pair}` is skipped: it must be `pattern:factor`"),
+            );
+            continue;
+        };
+        let (pattern, factor) = (pair[..idx].trim(), pair[idx + 1..].trim());
+        match factor.parse::<f64>() {
+            Ok(factor) if factor.is_finite() && factor > 0.0 => rules.push(PriorityRule {
+                pattern: unescape(pattern),
+                factor,
+            }),
+            _ => f.warn(
+                "policy-priority",
+                &format!("`{pair}` is skipped: the factor must be a positive number"),
+            ),
+        }
+    }
+    rules
+}
+
+fn read_smart(def: &mut GroupDef, f: &mut Fields<'_>) -> Result<()> {
+    def.tolerance = u16::try_from(f.u32("tolerance")?).unwrap_or(u16::MAX);
+    def.policy_priority = parse_policy_priority(&f.string("policy-priority")?, f);
+    for (key, why) in [
+        ("uselightgbm", "this core does not use a LightGBM model"),
+        ("collectdata", "this core does not collect training data"),
+        ("sample-rate", "this core does not collect training data"),
+        ("prefer-asn", "this core does not key nodes by ASN"),
+    ] {
+        f.ignore_switch(key, why);
+    }
+    Ok(())
 }
 
 pub fn parse_group(map: &Map) -> Result<GroupDef> {
@@ -156,6 +238,7 @@ pub fn parse_group(map: &Map) -> Result<GroupDef> {
         "url-test" => GroupKind::UrlTest,
         "fallback" => GroupKind::Fallback,
         "load-balance" => GroupKind::LoadBalance,
+        "smart" => GroupKind::Smart,
         "relay" => {
             return Err(ConfigError::new(format!(
                 "unsupported type: The group [{name}] with relay type was removed, please using dialer-proxy instead"
@@ -167,6 +250,7 @@ pub fn parse_group(map: &Map) -> Result<GroupDef> {
         GroupKind::UrlTest => {
             def.tolerance = u16::try_from(f.u32("tolerance")?).unwrap_or(u16::MAX);
         }
+        GroupKind::Smart => read_smart(&mut def, &mut f)?,
         GroupKind::Select => def.default_selected = f.string("default-selected")?,
         GroupKind::LoadBalance => {
             let strategy = f.string("strategy")?;
@@ -397,5 +481,77 @@ mod tests {
         let cycle = find_group_cycle(&defs).unwrap();
         assert_eq!(cycle.len(), 3);
         assert!(find_group_cycle(&defs[..2]).is_none());
+    }
+
+    fn smart(priority: &str) -> GroupDef {
+        group(json!({"name": "s", "type": "smart", "proxies": ["a"], "tolerance": 30, "policy-priority": priority})).unwrap()
+    }
+
+    fn rules(def: &GroupDef) -> Vec<(&str, f64)> {
+        def.policy_priority
+            .iter()
+            .map(|rule| (rule.pattern.as_str(), rule.factor))
+            .collect()
+    }
+
+    #[test]
+    fn a_smart_group_reads_tolerance_and_priority_rules_in_order() {
+        let def = smart("hk:1.5; (?i)jp.*:0.5 ;; sg:2");
+        assert_eq!(def.kind, GroupKind::Smart);
+        assert_eq!(
+            (def.kind.as_str(), def.kind.display_name()),
+            ("smart", "Smart")
+        );
+        assert_eq!(def.tolerance, 30);
+        assert_eq!(rules(&def), [("hk", 1.5), ("(?i)jp.*", 0.5), ("sg", 2.0)]);
+        assert!(def.ignored.is_empty(), "{:?}", def.ignored);
+        assert!(
+            group(json!({"name": "s", "type": "smart"}))
+                .unwrap()
+                .policy_priority
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_priority_pair_splits_at_the_last_unescaped_colon() {
+        let def = smart(r"a\:b:1.5;x:y:2;c\\:3;d\:e");
+        assert_eq!(rules(&def), [("a:b", 1.5), ("x:y", 2.0), (r"c\", 3.0)]);
+        assert_eq!(def.ignored.len(), 1, "{:?}", def.ignored);
+    }
+
+    #[test]
+    fn an_invalid_priority_pair_is_skipped_with_a_warning() {
+        let def = smart("nocolon;:2;hk:;jp:abc;sg:0;tw:-1;us:inf;ok:3");
+        assert_eq!(rules(&def), [("ok", 3.0)]);
+        assert_eq!(def.ignored.len(), 7, "{:?}", def.ignored);
+        assert!(
+            def.ignored
+                .iter()
+                .all(|w| w.code == "not_applied" && w.key == "policy-priority")
+        );
+    }
+
+    #[test]
+    fn smart_model_keys_warn_only_when_they_ask_for_something() {
+        let warned = |options: serde_json::Value| {
+            let mut value = json!({"name": "s", "type": "smart", "proxies": ["a"]});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(options.as_object().unwrap().clone());
+            group(value)
+                .unwrap()
+                .ignored
+                .iter()
+                .map(|w| w.key.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(warned(json!({"uselightgbm": false, "collectdata": false})).is_empty());
+        assert_eq!(warned(json!({"uselightgbm": true})), ["uselightgbm"]);
+        assert_eq!(
+            warned(json!({"collectdata": true, "sample-rate": 0.5, "prefer-asn": true})),
+            ["collectdata", "sample-rate", "prefer-asn"]
+        );
     }
 }

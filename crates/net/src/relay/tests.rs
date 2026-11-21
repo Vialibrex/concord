@@ -84,6 +84,43 @@ async fn closing_one_side_finishes_that_direction_and_keeps_the_other() {
 }
 
 #[tokio::test]
+async fn the_client_closing_first_reports_upload_first() {
+    let (a, mut a_far) = pair(1024);
+    let (b, mut b_far) = pair(1024);
+    let meter = Counters::default();
+    let cancel = CancellationToken::new();
+
+    let peers = async {
+        a_far.shutdown().await.unwrap();
+        let mut eof = Vec::new();
+        b_far.read_to_end(&mut eof).await.unwrap();
+        b_far.shutdown().await.unwrap();
+    };
+    let (outcome, ()) = tokio::join!(relay(a, b, &meter, &cancel), peers);
+    assert!(matches!(outcome.end, RelayEnd::Eof), "{:?}", outcome.end);
+    assert_eq!(outcome.first_finished, Some(Direction::Upload));
+}
+
+#[tokio::test]
+async fn the_server_closing_first_with_no_download_reports_download_first() {
+    let (a, mut a_far) = pair(1024);
+    let (b, mut b_far) = pair(1024);
+    let meter = Counters::default();
+    let cancel = CancellationToken::new();
+
+    let peers = async {
+        b_far.shutdown().await.unwrap();
+        let mut eof = Vec::new();
+        a_far.read_to_end(&mut eof).await.unwrap();
+        a_far.shutdown().await.unwrap();
+    };
+    let (outcome, ()) = tokio::join!(relay(a, b, &meter, &cancel), peers);
+    assert!(matches!(outcome.end, RelayEnd::Eof), "{:?}", outcome.end);
+    assert_eq!(outcome.download, 0);
+    assert_eq!(outcome.first_finished, Some(Direction::Download));
+}
+
+#[tokio::test]
 async fn cancelling_ends_the_relay_and_closes_both_streams() {
     let (a, mut a_far) = pair(1024);
     let (b, mut b_far) = pair(1024);
@@ -100,6 +137,7 @@ async fn cancelling_ends_the_relay_and_closes_both_streams() {
     cancel.cancel();
     let outcome = task.await.unwrap();
     assert!(matches!(outcome.end, RelayEnd::Cancelled));
+    assert_eq!(outcome.first_finished, None);
     assert_eq!(outcome.upload, 1);
     assert_eq!(a_far.read(&mut one).await.unwrap(), 0);
     assert_eq!(b_far.read(&mut one).await.unwrap(), 0);

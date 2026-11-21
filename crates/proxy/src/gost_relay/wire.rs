@@ -1,6 +1,6 @@
 use std::io;
 
-use concord_common::{Address, PacketBuf};
+use concord_common::{Address, CoreError, PacketBuf};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::addr_codec::SOCKS;
@@ -14,6 +14,8 @@ const FEATURE_ADDRESS: u8 = 2;
 const FEATURE_NETWORK: u8 = 4;
 const NETWORK_TCP: u16 = 0;
 const NETWORK_UDP: u16 = 1;
+const STATUS_FORBIDDEN: u8 = 3;
+const STATUS_NETWORK_UNREACHABLE: u8 = 7;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.into())
@@ -70,10 +72,17 @@ pub(super) async fn response(io: &mut (impl AsyncRead + Unpin)) -> io::Result<()
         return Err(invalid(format!("gost relay bad version: {version}")));
     }
     if status != 0 {
-        return Err(invalid(format!(
+        let message = format!(
             "gost relay connect failed with status 0x{status:02x} ({})",
             status_text(status)
-        )));
+        );
+        if (STATUS_FORBIDDEN..=STATUS_NETWORK_UNREACHABLE).contains(&status) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                CoreError::TargetRefused(message),
+            ));
+        }
+        return Err(invalid(message));
     }
     let mut remaining = usize::from(u16::from_be_bytes([hi, lo]));
     let mut discard = [0; 256];

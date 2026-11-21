@@ -167,7 +167,7 @@ impl Link {
         Ok(link)
     }
 
-    fn netem(&self) -> Vec<String> {
+    pub(crate) fn netem(&self) -> Vec<String> {
         let mut args = vec!["netem".to_string()];
         if self.rtt_ms > 0.0 {
             args.extend([
@@ -287,11 +287,11 @@ impl Drop for Netns {
     }
 }
 
-fn words(text: &str) -> Vec<String> {
+pub(crate) fn words(text: &str) -> Vec<String> {
     text.split_whitespace().map(str::to_string).collect()
 }
 
-fn run(program: &str, args: &[String]) -> Result<(), String> {
+pub(crate) fn run(program: &str, args: &[String]) -> Result<(), String> {
     let out = std::process::Command::new(program)
         .args(args)
         .output()
@@ -387,7 +387,7 @@ fn pin_child(command: &mut tokio::process::Command, cpus: Vec<usize>) {
 fn pin_child(_: &mut tokio::process::Command, _: Vec<usize>) {}
 
 #[cfg(target_os = "linux")]
-fn enter(path: &str) -> Result<(), String> {
+pub(crate) fn enter(path: &str) -> Result<(), String> {
     use std::os::fd::AsRawFd;
     let file = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
     #[allow(
@@ -403,7 +403,7 @@ fn enter(path: &str) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn enter(_: &str) -> Result<(), String> {
+pub(crate) fn enter(_: &str) -> Result<(), String> {
     Err("network namespaces need Linux".into())
 }
 

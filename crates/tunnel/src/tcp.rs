@@ -21,9 +21,10 @@ use crate::flow::{FlowState, pre_handle};
 use crate::intercept::Offer;
 use crate::route::{Decision, route};
 use crate::runtime::{Inner, Runtime};
+use crate::smart::{self, SmartMeter, flow_end};
 use crate::table::{Registration, Tracked};
 
-const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const DIAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// mihomo peeks the client this long after accepting, while it routes and dials.
 const FIRST_BYTES_WINDOW: Duration = Duration::from_millis(200);
 const FIRST_BYTES_MAX: usize = 4 * 1024;
@@ -69,13 +70,26 @@ pub(crate) async fn handle(inner: Arc<Inner>, meta: FlowMeta, stream: BoxStream)
         return;
     };
     let tracked = registration.tracked();
+    let tap = smart::tap(&runtime, &flow, &decision, &head);
     let local: BoxStream = if head.is_empty() {
         stream
     } else {
         Box::new(PeekedStream::new(head, stream))
     };
     let cancel = tracked.record.cancel.clone();
-    relay(local, remote, &TrackedMeter(tracked), &cancel).await;
+    match tap {
+        Some(tap) => {
+            let meter = SmartMeter {
+                tracked,
+                flow: &tap,
+            };
+            let outcome = relay(local, remote, &meter, &cancel).await;
+            tap.finish(flow_end(&outcome));
+        }
+        None => {
+            relay(local, remote, &TrackedMeter(tracked), &cancel).await;
+        }
+    }
 }
 
 struct SetUp {
@@ -264,6 +278,10 @@ pub(crate) async fn dial_decided(
         dst = flow.pure_address();
     }
 
+    if decision.smart {
+        return smart::dial(inner, runtime, flow, decision, &dst).await;
+    }
+
     let deadline = Instant::now() + DIAL_TIMEOUT;
     let outcome = dial_once(inner, runtime, flow, &decision, &dst, deadline).await;
     let kind = decision.leaf.info().kind;
@@ -293,7 +311,7 @@ pub(crate) async fn dial_decided(
     }
 }
 
-async fn dial_once(
+pub(crate) async fn dial_once(
     inner: &Inner,
     runtime: &Runtime,
     flow: &FlowState,

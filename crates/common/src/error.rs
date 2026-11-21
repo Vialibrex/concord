@@ -22,6 +22,9 @@ pub enum CoreError {
     Rejected(String),
     #[error("{0} does not support UDP")]
     UdpUnsupported(String),
+    /// The node answered, and its answer says the target refused or could not be reached.
+    #[error("{0}")]
+    TargetRefused(String),
 }
 
 impl CoreError {
@@ -72,5 +75,17 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::ConnectionRefused);
         assert!(no_retry(&err));
         assert!(!no_retry(&io::Error::from(io::ErrorKind::TimedOut)));
+    }
+
+    #[test]
+    fn a_target_refusal_keeps_its_text_and_may_be_retried() {
+        let err: io::Error = CoreError::TargetRefused("remote said no".into()).into();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert_eq!(err.to_string(), "remote said no");
+        assert!(matches!(
+            CoreError::of(&err),
+            Some(CoreError::TargetRefused(_))
+        ));
+        assert!(!no_retry(&err));
     }
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use concord_common::sync::lock;
-use concord_common::{BoxRead, BoxWrite, Stream};
+use concord_common::{BoxRead, BoxWrite, CoreError, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 use tokio::time::{Instant, Sleep, sleep_until};
@@ -48,9 +48,10 @@ impl Response {
             self.done = true;
             let code = self.raw.get(1).copied().unwrap_or(1);
             if code != 0 {
-                return Err(io::Error::other(format!(
+                return Err(CoreError::TargetRefused(format!(
                     "server returned socks5 error code {code}"
-                )));
+                ))
+                .into());
             }
         }
         Ok(())
@@ -407,5 +408,27 @@ impl Stream for MieruStream {
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
         let MieruStream { read, write } = *self;
         (Box::new(read), Box::new(write))
+    }
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    #[test]
+    fn a_socks5_error_reply_is_a_target_refusal() {
+        let mut response = Response::new();
+        let mut data = Bytes::from_static(&[5, 4, 0, 1, 0, 0, 0, 0, 0, 0]);
+        let err = response.feed(&mut data).unwrap_err();
+        assert_eq!(err.to_string(), "server returned socks5 error code 4");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(matches!(
+            CoreError::of(&err),
+            Some(CoreError::TargetRefused(_))
+        ));
+        let err = Response::new()
+            .feed(&mut Bytes::from_static(&[4]))
+            .unwrap_err();
+        assert!(CoreError::of(&err).is_none());
     }
 }

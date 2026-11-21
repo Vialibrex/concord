@@ -20,6 +20,7 @@ use crate::error::GroupError;
 use crate::group::{Group, GroupParts, Policy};
 use crate::health::StatusRanges;
 use crate::node::{Ghost, Item, Leaf, Node};
+use crate::priority::Priority;
 use crate::provider::ProxyProvider;
 use crate::shared::Shared;
 use crate::strategy::Strategy;
@@ -66,6 +67,10 @@ fn policy_of(def: &GroupDef) -> Policy {
         },
         GroupKind::UrlTest => Policy::UrlTest {
             tolerance: def.tolerance,
+        },
+        GroupKind::Smart => Policy::Smart {
+            tolerance: def.tolerance,
+            priority: Priority::compile(&def.policy_priority),
         },
         GroupKind::Fallback => Policy::Fallback,
         GroupKind::LoadBalance => {
@@ -279,6 +284,7 @@ impl Builder<'_> {
             } else {
                 DEFAULT_MAX_FAILED_TIMES
             },
+            interval: Duration::from_secs(u64::from(def.interval)),
             shared,
         }))
     }
@@ -390,6 +396,11 @@ impl Outbounds {
                 background: AtomicBool::new(false),
             }
         });
+        for group in &outbounds.groups {
+            if let Some(owner) = group.smart() {
+                owner.bind(Arc::downgrade(&outbounds));
+            }
+        }
         *lock(&outbounds.last_picks) = outbounds.pick_snapshot();
         Ok(outbounds)
     }

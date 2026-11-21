@@ -67,8 +67,11 @@ impl Outbounds {
                 group.url().to_string()
             },
             expected_status: (!is_select).then(|| group.expected_text().to_string()),
-            fixed: matches!(group.policy(), Policy::UrlTest { .. } | Policy::Fallback)
-                .then(|| group.fixed()),
+            fixed: matches!(
+                group.policy(),
+                Policy::UrlTest { .. } | Policy::Smart { .. } | Policy::Fallback
+            )
+            .then(|| group.fixed()),
             hidden,
             icon: group.icon().to_string(),
             empty_fallback: group.empty_fallback().name().clone(),

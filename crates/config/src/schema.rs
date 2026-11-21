@@ -48,7 +48,7 @@ pub fn config_schema() -> Value {
     );
     schema.insert(
         "group-types".into(),
-        json!(["select", "url-test", "fallback", "load-balance"]),
+        json!(["select", "url-test", "fallback", "load-balance", "smart"]),
     );
     schema.insert("proxy-groups".into(), key_tiers(&keys::GROUP, json!({})));
     Value::Object(schema)

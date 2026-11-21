@@ -30,7 +30,7 @@ widen exposure are never ignored silently, and keys that name a server's identit
 | `listeners`, `tunnels`, `external-controller-tls`, `-unix`, `-pipe`, `external-ui` and `external-doh-server` | Opened | Never opened; the host opens listeners through the API |
 | `external-controller`, `secret` and `external-controller-cors` | Read from the profile | Read from the profile when Concord runs on its own (`concord run`). An app that embeds Concord sets them itself, and the profile's values are ignored with a warning |
 | Dashboard changes in an app that embeds Concord | mihomo's embedded builds refuse `PUT`/`PATCH /configs` and the geo update | Allowed, except `PUT /configs` and `tun` in `PATCH /configs`, which belong to the app; the app is told of every change so it stays in step |
-| Dial retries | Up to 10 per connection within 5 s | None: one dial per connection, as sing-box does; a failed dial fails the connection |
+| Dial retries | Up to 10 per connection within 5 s | None: one dial per connection, as sing-box does; a failed dial fails the connection. A smart group is the exception: after a node-level failure it redials up to two more of its members within the same 5 s, unless a selection holds it on one member |
 | UDP routing | The first packet from a source decides the route for all its destinations | Each destination is routed by the rules; flows that reach one outbound share its session, so the external mapping stays endpoint-independent. Single-destination protocols such as plain VMess are the exception |
 | `GEOIP` | Reads the mmdb or `GeoIP.dat` | Reads the mmdb only; `geodata-mode: true` and `geox-url.geoip` are ignored with a warning, and a code that only a custom `GeoIP.dat` held does not match. `GEOIP,!cn` negates against the mmdb |
 | `IP-ASN` and `SRC-IP-ASN` without `ASN.mmdb` | The apply downloads the file and fails if the download does | The apply goes ahead; the rules match nothing until the file, fetched in the background and retried, loads, and a `NOT` around one does not turn that into a match |
@@ -48,6 +48,7 @@ widen exposure are never ignored silently, and keys that name a server's identit
 | `iptables` | Installs redirect rules on Linux | Ignored with a warning; Concord does not run as a Linux router |
 | `dns.append-system` | Not a key | A Concord key: `true` puts `system://` last in `nameserver` unless the list already has it, after the MITM modules have edited the list, so a module that replaces the list keeps it. An app sets it for its user |
 | Picking a dead `fallback` member | Stores the pick, then tests the member; a connection during the test drops the pick (`adapter/outboundgroup/fallback.go:105-145`) | Stores the pick, then tests the member; a connection during the test uses another member, and the pick stays until the test decides |
+| `type: smart` | Not a group type | Reads vernesong/mihomo's `smart` group without its model: a node's score is its probe delay plus the failures real flows met through it, decayed over the group's `interval`; `max-failed-times` failures in a row eject it for a while; each site (its registrable domain) keeps the node that served it for an hour and leaves it only when that node fails it. `policy-priority` (`pattern:factor` pairs separated by `;`, the first matching pair wins) divides a node's delay by its factor, so a factor above 1 prefers the node, the opposite direction to Surge's `policy-priority` |
 
 TCP JLS does not resume sessions. Its native Hello matches the AES-capable Go jls-tls default
 (the cipher order can differ from Go on CPUs without AES acceleration), including TLS 1.2 in the offer,
@@ -144,6 +145,9 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   with a warning.
 - `profile.store-selected`: Concord does not save the selected nodes itself. The host saves them and hands them back
   with each profile it applies, so the key is accepted and has no effect.
+- `uselightgbm`, `collectdata`, `sample-rate` and `prefer-asn` on a `smart` group, the top-level `lgbm-auto-update`,
+  `lgbm-update-interval` and `lgbm-url`, and `profile.smart-collector-size`: ignored, with a warning when one asks
+  for something, because Concord trains no model, collects no data and does not key nodes by ASN.
 - The `relay` group type, which mihomo also removed; use `dialer-proxy`.
 - Shadowsocks ciphers that only `sing-shadowsocks2` has: `aes-192-gcm`, `aes-192-ccm`, `chacha8-ietf-poly1305`,
   `xchacha8-ietf-poly1305`, `rabbit128-poly1305`, `aegis-128l`, `aegis-256`, `aez-384`, `deoxys-ii-256-128`,

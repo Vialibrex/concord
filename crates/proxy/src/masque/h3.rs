@@ -2,7 +2,7 @@ use std::io;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use concord_common::{DialCx, Tasks};
+use concord_common::{CoreError, DialCx, Tasks};
 use concord_quic::{QuicConn, io_error};
 use http::{Method, Request};
 use tokio::task::JoinHandle;
@@ -112,10 +112,11 @@ impl Client {
         };
         let response = stream.recv_response().await.map_err(io_error)?;
         if !response.status().is_success() || (ip && response.status() != http::StatusCode::OK) {
-            return Err(io::Error::other(format!(
-                "MASQUE CONNECT rejected: {}",
-                response.status()
-            )));
+            let message = format!("MASQUE CONNECT rejected: {}", response.status());
+            if ip || matches!(response.status().as_u16(), 401 | 407) {
+                return Err(io::Error::other(message));
+            }
+            return Err(CoreError::TargetRefused(message).into());
         }
         Ok(stream)
     }

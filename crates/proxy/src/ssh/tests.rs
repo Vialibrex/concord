@@ -555,3 +555,28 @@ async fn a_disconnect_still_pending_ends_at_a_stop() {
     tracked.stop();
     assert!(tracked.ended_within(Duration::from_secs(1)).await);
 }
+
+#[tokio::test]
+async fn a_target_the_server_cannot_reach_is_a_target_refusal() {
+    let key = russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[8; 32]);
+    let port = serve_passwords(key.into(), Arc::default()).await;
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let outbound = client(port, json!({"server": "localhost", "password": "hunter2"})).unwrap();
+    let env = test_env();
+    let cx = DialCx::new(&env, Initiator::Direct, None);
+    let Err(err) = outbound
+        .connect(&cx, &Address::new("127.0.0.1", closed))
+        .await
+    else {
+        panic!("a closed port was reached")
+    };
+    assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    assert!(err.to_string().starts_with("ssh: "), "{err}");
+    assert!(matches!(
+        concord_common::CoreError::of(&err),
+        Some(concord_common::CoreError::TargetRefused(_))
+    ));
+}

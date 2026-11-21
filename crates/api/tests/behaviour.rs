@@ -1376,6 +1376,51 @@ async fn a_failed_dial_is_watched_as_a_connection_that_opens_and_closes_with_why
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_smart_redial_that_fails_through_every_member_is_watched_as_one_failure() {
+    let rig = Rig::new().await;
+    let proxy = free_port();
+    rig.write_config(&format!(
+        "mixed-port: {proxy}\nproxies:\n  - {{name: a, type: socks5, server: 127.0.0.1, port: {}}}\n  - {{name: b, type: socks5, server: 127.0.0.1, port: {}}}\nproxy-groups:\n  - {{name: s, type: smart, proxies: [a, b], url: 'http://127.0.0.1:{}/', interval: 0}}\nrules:\n  - MATCH,s\n",
+        free_port(),
+        free_port(),
+        free_port()
+    ));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let mut watch = rig
+        .control
+        .connection_watch(ConnectionWatchParams::default())
+        .await
+        .unwrap();
+
+    let nobody = free_port();
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+        .await
+        .unwrap();
+    stream
+        .write_all(format!("CONNECT 127.0.0.1:{nobody} HTTP/1.1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let delta = eventually(&mut watch.events, |delta| !delta.opened.is_empty()).await;
+    let mut failed: Vec<_> = delta.opened.clone();
+    while let Ok(Some(Delivery::Event { data, .. })) =
+        timeout(Duration::from_millis(1500), watch.events.next()).await
+    {
+        failed.extend(data.opened);
+    }
+    assert_eq!(
+        failed.len(),
+        1,
+        "one failure for the flow, not one per attempt"
+    );
+    assert_eq!(failed[0].chains, ["b", "s"], "the last member tried");
+    let failure = failed[0].failure.as_ref().expect("a failed dial says why");
+    assert_eq!(failure.kind, ConnectionFailureKind::Refused, "{failure:?}");
+    drop((watch, stream));
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delay_run_reports_each_proxy_then_done_and_stops_when_dropped() {
     let rig = Rig::new().await;
     rig.write_config("rules:\n  - MATCH,DIRECT\n");

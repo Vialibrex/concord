@@ -44,6 +44,9 @@ mod script_cost;
 #[path = "e2e/rematch.rs"]
 mod rematch;
 
+#[path = "e2e/smart.rs"]
+mod smart;
+
 #[path = "e2e/find_process.rs"]
 mod find_process;
 

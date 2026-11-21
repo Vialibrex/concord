@@ -43,6 +43,11 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 
 /// A fresh CA, and the origin's TLS config with a certificate it signed.
 pub fn authority() -> Result<(Authority, Arc<rustls::ServerConfig>), String> {
+    authority_for(&[HOST])
+}
+
+/// As `authority`, with a leaf valid for each of `names`.
+pub fn authority_for(names: &[&str]) -> Result<(Authority, Arc<rustls::ServerConfig>), String> {
     let ca_key = KeyPair::generate().map_err(|e| e.to_string())?;
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -57,7 +62,7 @@ pub fn authority() -> Result<(Authority, Arc<rustls::ServerConfig>), String> {
     let (cert, key) = (ca.pem(), ca_key.serialize_pem());
     let issuer = Issuer::new(params, ca_key);
     let leaf_key = KeyPair::generate().map_err(|e| e.to_string())?;
-    let leaf = CertificateParams::new(vec![HOST.to_string()])
+    let leaf = CertificateParams::new(names.iter().map(|n| (*n).to_string()).collect::<Vec<_>>())
         .and_then(|params| params.signed_by(&leaf_key, &issuer))
         .map_err(|e| e.to_string())?;
     let authority = Authority {

@@ -4,6 +4,8 @@ mod dialing;
 mod groups;
 mod providers;
 mod public_suffix;
+mod smart;
+mod smart_wire;
 mod views;
 
 use std::collections::HashMap;
@@ -449,7 +451,11 @@ impl Rig {
     }
 
     pub fn leaf(&self, name: &str) -> String {
-        match self.resolve(name) {
+        self.leaf_at(name, "example.com")
+    }
+
+    pub fn leaf_at(&self, name: &str, host: &str) -> String {
+        match self.out.resolve(name, &Rig::flow(host), None, Touch::Yes) {
             Resolved::Route { leaf, .. } | Resolved::Rematch(leaf) => leaf.info().name.to_string(),
             Resolved::Pass => "<pass>".into(),
             Resolved::PassRule => "<pass-rule>".into(),

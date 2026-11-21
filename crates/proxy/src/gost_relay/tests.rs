@@ -8,7 +8,7 @@
 use super::*;
 use crate::dgram::{Decoded, Decoder, Encoder};
 use crate::testing::{LoopbackHop, test_env_with};
-use concord_common::{Initiator, PacketBuf, recv_packet, send_packet};
+use concord_common::{CoreError, Initiator, PacketBuf, recv_packet, send_packet};
 use concord_config::{Capabilities, ProxyParse, parse_proxy};
 use concord_tls::TrustStore;
 use serde_json::json;
@@ -66,6 +66,17 @@ async fn gost_relay_response_consumes_features_without_eating_payload_and_reject
                 .unwrap_err()
                 .to_string()
                 .contains(&format!("0x{status:02x} ({text})"))
+        );
+    }
+    for (status, refused) in [(1, false), (2, false), (3, true), (7, true), (8, false)] {
+        let (mut near, mut far) = duplex(16);
+        far.write_all(&[1, status, 0, 0]).await.unwrap();
+        let err = wire::response(&mut near).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            matches!(CoreError::of(&err), Some(CoreError::TargetRefused(_))),
+            refused,
+            "status {status}"
         );
     }
     for version in [0, 2, 255] {

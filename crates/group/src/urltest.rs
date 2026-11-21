@@ -1,8 +1,10 @@
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use ::http::Method;
 use bytes::Bytes;
+use concord_common::sync::lock;
 use concord_common::{CoreEvent, DelayResult, DialCx, Initiator, Network};
 use futures_util::stream::{self, StreamExt};
 use tokio::time::Instant;
@@ -13,6 +15,7 @@ use crate::health::{Outcome, StatusRanges};
 use crate::http::{self, Target, TlsSettings};
 use crate::node::Node;
 use crate::outbounds::{Outbounds, Resolved, dummy_flow};
+use crate::smart::answered;
 
 const ROUND_CONCURRENCY: usize = 10;
 const HEAD_LIMIT: usize = 10 << 20;
@@ -181,6 +184,7 @@ impl Outbounds {
         let timeout = check
             .timeout()
             .unwrap_or_else(|| self.shared.default_timeout());
+        let epochs = self.smart_epochs();
         for (url, expected, matcher) in check.plan() {
             let url = url.trim().to_string();
             if url.is_empty() {
@@ -191,16 +195,21 @@ impl Outbounds {
                     .as_ref()
                     .is_none_or(|matcher| matcher.is_match(node.name()))
             });
+            let results = Mutex::new(Vec::new());
             stream::iter(selected)
                 .for_each_concurrent(ROUND_CONCURRENCY, |node| {
-                    let (url, expected) = (&url, &expected);
+                    let (url, expected, results) = (&url, &expected, &results);
                     async move {
                         if check.version() == version {
-                            self.url_test_node(node, url, expected, timeout).await;
+                            let outcome = self.url_test_node(node, url, expected, timeout).await;
+                            lock(results).push((node.name().clone(), answered(node, url, outcome)));
                         }
                     }
                 })
                 .await;
+            let results: Vec<(Arc<str>, bool)> =
+                results.into_inner().unwrap_or_else(PoisonError::into_inner);
+            self.feed_smart(&url, &results, &epochs);
         }
         self.shared.request_refresh();
     }

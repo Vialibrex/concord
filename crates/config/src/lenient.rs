@@ -430,6 +430,18 @@ impl<'a> Fields<'a> {
         }
     }
 
+    /// Like [`Fields::ignore`] for a switch whose `false` is the behaviour this core already has.
+    pub fn ignore_switch(&mut self, key: &str, why: &str) {
+        if self.lookup(key) != Some(&Value::Bool(false)) {
+            self.ignore(key, why);
+        }
+    }
+
+    /// Notes a value this core skipped, for the load report.
+    pub fn warn(&mut self, key: &str, why: &str) {
+        self.note("not_applied", key, why.to_string());
+    }
+
     fn note(&self, code: &'static str, key: &str, why: String) {
         self.ignored.borrow_mut().push(Ignored {
             code,

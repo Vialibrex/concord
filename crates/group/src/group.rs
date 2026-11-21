@@ -15,8 +15,10 @@ use tokio::time::Instant;
 use crate::check::Check;
 use crate::health::{NodeHealth, StatusRanges};
 use crate::node::{Ghost, Item, Leaf, Node};
+use crate::priority::Priority;
 use crate::provider::ProxyProvider;
 use crate::shared::Shared;
+use crate::smart::Owner;
 use crate::strategy::Strategy;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +30,7 @@ pub enum Touch {
 pub enum Policy {
     Select { default_selected: Arc<str> },
     UrlTest { tolerance: u16 },
+    Smart { tolerance: u16, priority: Priority },
     Fallback,
     LoadBalance(Strategy),
     Relay,
@@ -106,6 +109,7 @@ pub(crate) struct GroupParts {
     pub own_check: Option<Arc<Check>>,
     pub test_timeout: Duration,
     pub max_failed: u32,
+    pub interval: Duration,
     pub shared: Arc<Shared>,
 }
 
@@ -136,10 +140,20 @@ pub struct Group {
     health: NodeHealth,
     fast: Mutex<FastState>,
     fail: Mutex<FailState>,
+    smart: Option<Owner>,
 }
 
 impl Group {
     pub(crate) fn new(parts: GroupParts) -> Arc<Group> {
+        let smart = match &parts.policy {
+            Policy::Smart { tolerance, .. } => Some(Owner::new(
+                *tolerance,
+                parts.max_failed,
+                parts.interval,
+                parts.test_timeout,
+            )),
+            _ => None,
+        };
         let group = Group {
             members: ArcSwap::from_pointee(Members {
                 nodes: Vec::new(),
@@ -153,6 +167,7 @@ impl Group {
             health: NodeHealth::default(),
             fast: Mutex::new(FastState::default()),
             fail: Mutex::new(FailState::default()),
+            smart,
         };
         group.members.store(Arc::new(group.compute()));
         Arc::new(group)
@@ -170,6 +185,7 @@ impl Group {
         match self.parts.policy {
             Policy::Select { .. } => "Selector",
             Policy::UrlTest { .. } => "URLTest",
+            Policy::Smart { .. } => "Smart",
             Policy::Fallback => "Fallback",
             Policy::LoadBalance(_) => "LoadBalance",
             Policy::Relay => "Relay",
@@ -208,16 +224,31 @@ impl Group {
         matches!(self.parts.policy, Policy::LoadBalance(_))
     }
 
-    /// Select, url-test and fallback take a manual pick.
+    /// Select, url-test, smart and fallback take a manual pick.
     pub fn is_selectable(&self) -> bool {
         matches!(
             self.parts.policy,
-            Policy::Select { .. } | Policy::UrlTest { .. } | Policy::Fallback
+            Policy::Select { .. }
+                | Policy::UrlTest { .. }
+                | Policy::Smart { .. }
+                | Policy::Fallback
         )
     }
 
     pub fn empty_fallback(&self) -> &Arc<Leaf> {
         &self.parts.empty_fallback
+    }
+
+    pub(crate) fn smart(&self) -> Option<&Owner> {
+        self.smart.as_ref()
+    }
+
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
+        &self.parts.shared
+    }
+
+    pub(crate) fn test_timeout(&self) -> Duration {
+        self.parts.test_timeout
     }
 
     pub(crate) fn own_check(&self) -> Option<&Arc<Check>> {
@@ -453,7 +484,15 @@ impl Group {
                 }
                 Pick::Node(first.clone())
             }
-            Policy::UrlTest { tolerance } => Pick::Node(self.url_test_pick(&members, *tolerance)),
+            Policy::UrlTest { tolerance } => {
+                Pick::Node(self.url_test_pick(&members, *tolerance, &Priority::default()))
+            }
+            Policy::Smart { priority, .. } => {
+                let index = self.smart.as_ref().map_or(0, |owner| {
+                    owner.pick(self, &members, priority, flow, host, touch)
+                });
+                Pick::Node(nodes.get(index).unwrap_or(first).clone())
+            }
             Policy::Fallback => {
                 let url = &self.parts.url;
                 if let Some(pin) = self.parts.shared.selections.get(&self.parts.name)
@@ -486,7 +525,7 @@ impl Group {
         }
     }
 
-    fn url_test_pick(&self, members: &Arc<Members>, tolerance: u16) -> Node {
+    fn url_test_pick(&self, members: &Arc<Members>, tolerance: u16, priority: &Priority) -> Node {
         let shared = &self.parts.shared;
         let url = self.parts.url.as_str();
         let pin = shared.selections.get(&self.parts.name);
@@ -501,7 +540,7 @@ impl Group {
             return cached.node.clone();
         }
         let nodes = members.nodes();
-        let chosen = self.fastest(&mut state, nodes, pin.as_deref(), url, tolerance);
+        let chosen = self.fastest(&mut state, nodes, pin.as_deref(), url, tolerance, priority);
         let changed = state
             .cached
             .as_ref()
@@ -526,6 +565,7 @@ impl Group {
         pin: Option<&str>,
         url: &str,
         tolerance: u16,
+        priority: &Priority,
     ) -> Node {
         if let Some(pin) = pin
             && let Some(node) = nodes
@@ -539,7 +579,8 @@ impl Group {
             .first()
             .cloned()
             .unwrap_or_else(|| Node::Leaf(self.parts.empty_fallback.clone()));
-        let mut best = fast.health().last_delay_for(url);
+        let score = |node: &Node| priority.score(node.name(), node.health().last_delay_for(url));
+        let mut best = score(&fast);
         let mut previous_exists = false;
         for (index, node) in nodes.iter().enumerate() {
             if state
@@ -552,7 +593,7 @@ impl Group {
             if index == 0 || !node.health().alive_for(url) {
                 continue;
             }
-            let delay = node.health().last_delay_for(url);
+            let delay = score(node);
             if delay < best {
                 fast = node.clone();
                 best = delay;
@@ -561,8 +602,7 @@ impl Group {
         let keep = state.node.as_ref().filter(|previous| {
             previous_exists
                 && previous.health().alive_for(url)
-                && u32::from(previous.health().last_delay_for(url))
-                    <= u32::from(fast.health().last_delay_for(url)) + u32::from(tolerance)
+                && score(previous) <= score(&fast) + f64::from(tolerance)
         });
         let chosen = keep.cloned().unwrap_or(fast);
         state.node = Some(chosen.clone());
@@ -580,7 +620,7 @@ impl Group {
     /// What `proxy.list` shows as `fixed`: a manual pick of an url-test or fallback.
     pub fn fixed(&self) -> String {
         match self.parts.policy {
-            Policy::UrlTest { .. } | Policy::Fallback => self
+            Policy::UrlTest { .. } | Policy::Smart { .. } | Policy::Fallback => self
                 .parts
                 .shared
                 .selections

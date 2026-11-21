@@ -37,6 +37,17 @@ pub struct RelayOutcome {
     pub upload: u64,
     pub download: u64,
     pub end: RelayEnd,
+    /// The direction that finished first; `None` when the relay was cancelled, failed before
+    /// either direction finished, or ran attached to a stack that reports only the whole
+    /// connection.
+    pub first_finished: Option<Direction>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// The first stream's bytes going to the second.
+    Upload,
+    Download,
 }
 
 enum Step {
@@ -563,6 +574,7 @@ pub async fn relay(
     let mut attached: Option<Handover> = None;
     let mut attach_off = false;
     let mut ticker: Option<Pin<Box<Sleep>>> = None;
+    let mut first_finished = None;
 
     let end = poll_fn(|cx| {
         if cancelled.as_mut().poll(cx).is_ready() {
@@ -618,14 +630,20 @@ pub async fn relay(
                 match up.poll(cx, &mut *a, &mut *b, &on_upload) {
                     Poll::Ready(Err(err)) => return Poll::Ready(RelayEnd::Error(err)),
                     Poll::Ready(Ok(Step::Progress)) => progressed = true,
-                    _ => {}
+                    Poll::Ready(Ok(Step::Finished)) => {
+                        first_finished.get_or_insert(Direction::Upload);
+                    }
+                    Poll::Pending => {}
                 }
             }
             if !down.finished() {
                 match down.poll(cx, &mut *b, &mut *a, &on_download) {
                     Poll::Ready(Err(err)) => return Poll::Ready(RelayEnd::Error(err)),
                     Poll::Ready(Ok(Step::Progress)) => progressed = true,
-                    _ => {}
+                    Poll::Ready(Ok(Step::Finished)) => {
+                        first_finished.get_or_insert(Direction::Download);
+                    }
+                    Poll::Pending => {}
                 }
             }
             if up.finished() && down.finished() {
@@ -646,6 +664,7 @@ pub async fn relay(
         upload: up.total,
         download: down.total,
         end,
+        first_finished,
     }
 }
 

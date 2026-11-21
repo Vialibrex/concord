@@ -16,6 +16,7 @@ mod control;
 mod core;
 mod env;
 mod gost;
+mod groupfault;
 mod isolate;
 mod load;
 mod masque;
@@ -65,6 +66,11 @@ enum Command {
     },
     #[command(about = "Measure a tier.")]
     Run(Box<RunArgs>),
+    #[command(
+        name = "group-faults",
+        about = "Linux, as root: a proxy group of four nodes under an injected fault; see `list` for the scenarios."
+    )]
+    GroupFaults(Box<groupfault::GroupFaultArgs>),
     #[command(about = "Compare two results.json files and fail on a significant regression.")]
     Compare(CompareArgs),
     #[command(about = "Print the cases, workloads and tiers.")]
@@ -240,6 +246,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Run(args) => run(*args),
+        Command::GroupFaults(args) => groupfault::run(*args),
         Command::MasqueServer { listen } => masque::serve(listen),
         Command::Compare(args) => compare(args),
         Command::List => {
@@ -276,6 +283,10 @@ fn list() {
     println!("workloads:");
     for w in Workload::ALL {
         println!("  {:<14} {}", w.name(), w.about());
+    }
+    println!("group-faults scenarios (`concord-bench group-faults --scenario NAME`):");
+    for s in groupfault::SCENARIOS {
+        println!("  {:<14} {}", s.name, s.about);
     }
     for tier in [Tier::Quick, Tier::Full] {
         let plan = Plan::tier(tier);

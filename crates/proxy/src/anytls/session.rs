@@ -702,7 +702,12 @@ mod tests {
             .await
             .unwrap();
         let err = stream.read(&mut [0u8; 4]).await.unwrap_err();
-        assert!(err.to_string().contains("remote: dial failed"));
+        assert_eq!(err.to_string(), "remote: dial failed");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(matches!(
+            concord_common::CoreError::of(&err),
+            Some(concord_common::CoreError::TargetRefused(_))
+        ));
     }
 
     #[tokio::test]

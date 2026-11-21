@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use concord_common::{
-    Address, BoxStream, DialCx, Initiator, IpVersion, Outbound, OutboundInfo, OutboundKind,
-    PacketBuf, PacketSession,
+    Address, BoxStream, CoreError, DialCx, Initiator, IpVersion, Outbound, OutboundInfo,
+    OutboundKind, PacketBuf, PacketSession,
 };
 use concord_config::proxy::{ProxyDef, Socks5Opts};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -72,10 +72,11 @@ pub(crate) async fn client_handshake<S: AsyncRead + AsyncWrite + Unpin>(
         return Err(fail("SOCKS version error"));
     }
     if reply[1] != 0 {
-        return Err(fail(format!(
+        return Err(CoreError::TargetRefused(format!(
             "SOCKS5 request failed, reply code {}",
             reply[1]
-        )));
+        ))
+        .into());
     }
     SOCKS.read(io).await
 }
@@ -298,6 +299,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("reply code 5"));
+        assert_eq!(err.to_string(), "SOCKS5 request failed, reply code 5");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(matches!(
+            CoreError::of(&err),
+            Some(CoreError::TargetRefused(_))
+        ));
     }
 
     #[test]

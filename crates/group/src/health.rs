@@ -143,6 +143,28 @@ impl NodeHealth {
         }
     }
 
+    /// The median of the delays this node's tests at `url` got, failed tests left out.
+    pub fn median_delay_for(&self, url: &str) -> Option<u16> {
+        let inner = self.lock();
+        let state = inner.extra.get(url)?;
+        let mut buffer = [0u16; HISTORY];
+        let mut count = 0;
+        for record in state.history.iter().filter(|record| record.delay != 0) {
+            if let Some(slot) = buffer.get_mut(count) {
+                *slot = record.delay;
+                count += 1;
+            }
+        }
+        let delays = buffer.get_mut(..count)?;
+        delays.sort_unstable();
+        let high = *delays.get(count / 2)?;
+        if count % 2 == 1 {
+            return Some(high);
+        }
+        let low = *delays.get((count / 2).checked_sub(1)?)?;
+        u16::try_from((u32::from(low) + u32::from(high)) / 2).ok()
+    }
+
     pub fn history(&self) -> Vec<DelayRecord> {
         self.lock().global.history.iter().copied().collect()
     }

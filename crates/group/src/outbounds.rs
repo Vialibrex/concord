@@ -1,5 +1,6 @@
 mod build;
 mod select;
+mod smart;
 
 use std::collections::HashMap;
 use std::io;
@@ -401,7 +402,7 @@ impl Outbounds {
                 continue;
             };
             let counts = match group.policy() {
-                Policy::UrlTest { .. } => true,
+                Policy::UrlTest { .. } | Policy::Smart { .. } => true,
                 Policy::Fallback | Policy::LoadBalance(_) => network == Network::Tcp,
                 _ => false,
             };
@@ -435,7 +436,10 @@ impl Outbounds {
                 self.table.get(name),
                 Some(Entry::Group(group)) if matches!(
                     group.policy(),
-                    Policy::UrlTest { .. } | Policy::Fallback | Policy::LoadBalance(_)
+                    Policy::UrlTest { .. }
+                        | Policy::Smart { .. }
+                        | Policy::Fallback
+                        | Policy::LoadBalance(_)
                 )
             )
         });

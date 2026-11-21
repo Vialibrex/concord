@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
-use concord_common::{BoxRead, BoxWrite, Stream};
+use concord_common::{BoxRead, BoxWrite, CoreError, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::{Sleep, sleep};
 
@@ -37,7 +37,7 @@ pub(super) fn check_response(answer: &[u8; 3]) -> io::Result<()> {
     match answer {
         [ver, kind, rep] if *ver == Version::V4.byte() && *kind == CMD_RESPONSE => {
             if *rep == FAILED {
-                Err(io::Error::other("connect failed"))
+                Err(CoreError::TargetRefused("connect failed".into()).into())
             } else {
                 Ok(())
             }
@@ -177,7 +177,13 @@ mod tests {
         let (near, mut far) = duplex(64);
         let mut stream = V4Response::new(near, Duration::ZERO);
         far.write_all(&[4, 0xff, 0xff]).await.unwrap();
-        assert!(stream.read(&mut [0u8; 4]).await.is_err());
+        let err = stream.read(&mut [0u8; 4]).await.unwrap_err();
+        assert_eq!(err.to_string(), "connect failed");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(matches!(
+            CoreError::of(&err),
+            Some(CoreError::TargetRefused(_))
+        ));
     }
 
     #[tokio::test(start_paused = true)]

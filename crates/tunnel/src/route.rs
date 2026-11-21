@@ -8,7 +8,7 @@ use concord_common::{
     CoreError, FindProcessMode, Initiator, IpVersion, LookupIps, Network, Outbound, RouteState,
     TunnelMode,
 };
-use concord_group::{Resolved, Touch};
+use concord_group::{Outbounds, Resolved, Touch};
 use concord_rules::{MatchCtx, RuleInfo, Step};
 use rand::seq::IndexedRandom;
 use tokio::time::timeout;
@@ -74,10 +74,17 @@ pub(crate) struct Decision {
     pub rule: Option<MatchedRule>,
     /// A rule ahead of the deciding one waited for an HTTP request the flow does not carry.
     pub http_pending: bool,
+    /// Whether the chain passes through a smart group, worked out once when the flow is routed.
+    pub smart: bool,
 }
 
 impl Decision {
-    fn of(target: &str, resolved: Resolved, rule: Option<MatchedRule>) -> io::Result<Self> {
+    fn of(
+        outbounds: &Outbounds,
+        target: &str,
+        resolved: Resolved,
+        rule: Option<MatchedRule>,
+    ) -> io::Result<Self> {
         match resolved {
             Resolved::Route {
                 leaf,
@@ -87,6 +94,7 @@ impl Decision {
                 ..
             } => Ok(Decision {
                 target: target.to_string(),
+                smart: outbounds.has_smart(&chain),
                 leaf,
                 chain,
                 provider_chain,
@@ -197,7 +205,7 @@ pub(crate) async fn route(
         let resolved = runtime
             .outbounds
             .resolve(&name, &flow.meta, host_key, touch);
-        return Decision::of(&name, resolved, None);
+        return Decision::of(&runtime.outbounds, &name, resolved, None);
     }
 
     if let Some(host) = host_key
@@ -218,13 +226,13 @@ pub(crate) async fn route(
             let resolved = runtime
                 .outbounds
                 .resolve("DIRECT", &flow.meta, host_key, touch);
-            return Decision::of("DIRECT", resolved, None);
+            return Decision::of(&runtime.outbounds, "DIRECT", resolved, None);
         }
         TunnelMode::Global => {
             let resolved = runtime
                 .outbounds
                 .resolve("GLOBAL", &flow.meta, host_key, touch);
-            return Decision::of("GLOBAL", resolved, None);
+            return Decision::of(&runtime.outbounds, "GLOBAL", resolved, None);
         }
         TunnelMode::Rule => {}
     }
@@ -255,7 +263,7 @@ async fn match_rules(
                 let resolved = runtime
                     .outbounds
                     .resolve("DIRECT", &flow.meta, host_key, touch);
-                return Decision::of("DIRECT", resolved, None)
+                return Decision::of(&runtime.outbounds, "DIRECT", resolved, None)
                     .map(|decision| decision.pending(run.http_pending()));
             }
             Step::NeedIp => {
@@ -321,7 +329,7 @@ async fn match_rules(
                 };
                 flow.observed = run.take_observed();
                 let matched = matched_rule(runtime.program.rule_at(rule));
-                return Decision::of(target, resolved, Some(matched))
+                return Decision::of(&runtime.outbounds, target, resolved, Some(matched))
                     .map(|decision| decision.pending(run.http_pending()));
             }
         }
@@ -351,6 +359,7 @@ fn rematch_decision(target: &str, leaf: Arc<dyn Outbound>, rule: Option<MatchedR
         exit_group: None,
         rule,
         http_pending: false,
+        smart: false,
     }
 }
 

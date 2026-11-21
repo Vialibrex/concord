@@ -168,7 +168,7 @@ fn route_key_with_source(flow: &FlowMeta, host: Option<&str>, in_user: bool) -> 
     format!("{}{}", flow.src.ip(), destination_key(&flow.dst, host))
 }
 
-fn destination_key(dst: &Address, host: Option<&str>) -> String {
+pub(crate) fn destination_key(dst: &Address, host: Option<&str>) -> String {
     let named = match (host.filter(|host| !host.is_empty()), dst) {
         (Some(host), _) => Some(host),
         (None, Address::Domain(host, _)) if !host.is_empty() => Some(&**host),

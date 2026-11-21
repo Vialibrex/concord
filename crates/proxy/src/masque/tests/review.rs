@@ -291,6 +291,11 @@ async fn masque_l4_rejected_target_preserves_another_active_stream() {
         panic!("rejected target was accepted")
     };
     assert!(error.to_string().contains("403"));
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert!(matches!(
+        concord_common::CoreError::of(&error),
+        Some(concord_common::CoreError::TargetRefused(_))
+    ));
     active.write_all(b"after").await.unwrap();
     active.shutdown().await.unwrap();
     let mut reply = Vec::new();

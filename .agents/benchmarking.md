@@ -567,3 +567,45 @@ Its interop test is `gost_relay::gost_relay_round_trips_with_upstream_gost`; it 
 forward mode, TLS, smux, TCP and destination-bound UDP against upstream gost v3.
 CI's interop job runs both tests against gost v2.12.0 and v3.3.3, the releases they were written against
 (`.github/actions/gost`).
+
+## Group faults
+
+`concord-bench group-faults --scenario NAME --concord PATH --mihomo PATH --out DIR` runs one proxy group under one
+injected fault. It is a separate subcommand because it measures a request stream and the choices a group makes, not
+throughput, so it has no cases, workloads or rounds; one invocation is one run, and a job repeats it for rounds. It
+needs Linux and root (`ip`, `tc` and `iptables`), and removes every namespace named `cbg*` before it starts and when
+it ends, also on SIGTERM.
+
+Topology, all in network namespaces:
+
+| Namespace | Holds |
+|---|---|
+| `client` | the Concord under test, with a mixed port and four Shadowsocks `aes-128-gcm` nodes in one group (`--group-type`, default `url-test`, plus `--group-key KEY=VALUE`), `rules: [MATCH,g]`, and the request driver |
+| node 1 to 4 | one mihomo Shadowsocks server each, on its own veth to the client with its own netem round trip (`--delays`, default `60,20,80,40`, so the fastest is not the first); a second veth to the origin; `/etc/netns/<name>/hosts` names the sites |
+| `origin` | eight HTTPS sites (`site1.test` to `site8.test`), each on its own address on `lo`, with one certificate valid for all; their body names the source address of the request, which says which node carried it; and an HTTP endpoint for the group's health checks and an echo for readiness |
+
+The driver issues `--rate` requests a second, open loop, each on a fresh SOCKS5 connection with the site name sent to
+the proxy, then TLS and one HTTP/1.1 request, over the sites in turn. A request that takes longer than `--timeout`
+fails and is classed by the stage it was in. `requests.jsonl` has one line per event: requests (issue time, site,
+outcome and error class, total time, time to first byte, exit node, phase), health checks the origin saw, the
+group's selected node when the core's REST API reports a change, and marks. `summary.json` and `results.json` hold
+the failures per phase, the failure rate of requests through the faulted node, the time from the fault's start to the
+last failure, exit-node switches per site per hour, successes per node, health checks per node, and per node the
+connection-opening packets it saw and the flows the flow drop chose.
+
+A run is a warm-up (`--warmup`), the fault applied to the node with the lowest delay, and an observed phase
+(`--observe`, the scenario's own by default). Faults:
+
+- `blackhole` drops every packet to and from the node on its client link, with no reset.
+- `flowdrop` drops `--drop` of the new TCP flows to the node entirely. The connection tracker marks the chosen flow,
+  and the node's replies on it are dropped in `OUTPUT`; the first packet is let in, because dropping it before the
+  entry is confirmed discards the mark and the retransmitted SYN is drawn again.
+- `rate` limits each end of the node's link with `tbf` to `--rate-kbit`.
+- `site-reject` resets the node's connections to one site's address (`--reject-site`).
+- `local-down` takes the client's links down for `--down-secs`.
+- `jitter` moves every delay by up to `--jitter-ms` every `--jitter-period` seconds.
+- `scale` doubles every delay for the observed phase.
+
+The scenarios, by name in `concord-bench list`: S1 blackhole, S2 flowdrop, S3 rate, S4 site-reject, S6 jitter with
+`tolerance: 0`, S6b doubled delays, S7 an idle phase of `--idle-secs` before the observed phase, S8 local-down, S9 a
+single dropped flow. A route change on the client has no scenario yet.

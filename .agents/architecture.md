@@ -53,7 +53,13 @@ flows through `common::intercept`, and the engine's default-on `mitm` feature li
    under a 5 s deadline. Within it, `net/src/dial.rs` tries each resolved address of the target or server (in order,
    all at once with `tcp-concurrent`; with both families the preferred one has 300 ms to win) and stops at a
    `no_retry` error or descriptor exhaustion. A failed dial is not retried; it is reported to the url-test, fallback
-   and load-balance groups on the chain.
+   and load-balance groups on the chain. A chain through a smart group is the exception (`tunnel/src/smart.rs`):
+   after a node-level failure (a timeout, a refused connect or another node error, not a target refusal) the
+   group's next member is dialed, at most two more within the same 5 s, ejected members last. An attempt that a
+   member not yet tried, not ejected and with a route could still follow is bounded by the RTO of its member's
+   connect time (at least 1 s); a member that ran out of that bound while another then connected is reported as
+   failed. A group a selection holds on one member is not
+   redialed.
 6. Track: the connection is registered in `ConnTable`, which owns metering and cancellation; dropping the
    registration removes it.
 7. Relay: `net/src/relay.rs` drives both directions in one task. Each ordinary read borrows a pooled buffer with a

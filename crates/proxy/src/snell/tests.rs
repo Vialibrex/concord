@@ -249,3 +249,20 @@ async fn the_halves_move_data_both_ways_and_shutdown_keeps_reading() {
     server.write_all(&more).await.unwrap();
     assert_eq!(reader.await.unwrap(), b"down");
 }
+
+#[test]
+fn a_server_error_reply_is_a_target_refusal() {
+    use super::stream::Reply;
+    let mut reply = Reply::default();
+    let mut wire = BytesMut::from(&[2u8, 4, 2, b'n', b'o'][..]);
+    let err = reply.feed(&mut wire).unwrap_err();
+    assert_eq!(err.to_string(), "server reported code: 4, message: no");
+    assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    assert!(matches!(
+        concord_common::CoreError::of(&err),
+        Some(concord_common::CoreError::TargetRefused(_))
+    ));
+    let mut bad = Reply::default();
+    let err = bad.feed(&mut BytesMut::from(&[9u8][..])).unwrap_err();
+    assert!(concord_common::CoreError::of(&err).is_none());
+}

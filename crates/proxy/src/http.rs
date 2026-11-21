@@ -78,8 +78,10 @@ pub(crate) async fn connect_handshake<S: AsyncRead + AsyncWrite + Unpin>(
         200 => Ok(()),
         407 => Err(fail("HTTP need auth")),
         405 => Err(fail("CONNECT method not allowed by proxy")),
-        500.. => Err(fail(line.trim_end().to_string())),
-        other => Err(fail(format!("can not connect remote err code: {other}"))),
+        500.. => Err(CoreError::TargetRefused(line.trim_end().to_string()).into()),
+        other => Err(
+            CoreError::TargetRefused(format!("can not connect remote err code: {other}")).into(),
+        ),
     }
 }
 
@@ -196,6 +198,32 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains(expect), "{status}: {err}");
         }
+    }
+
+    #[tokio::test]
+    async fn only_the_targets_refusals_are_typed() {
+        for (status, typed) in [
+            ("407 Proxy Authentication Required", false),
+            ("405 Method Not Allowed", false),
+            ("502 Bad Gateway", true),
+            ("403 Forbidden", true),
+        ] {
+            let (mut near, _task) = serve(status).await;
+            let err = connect_handshake(&mut near, &Address::new("a.test", 1), None, &[])
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::Other, "{status}");
+            assert_eq!(
+                matches!(CoreError::of(&err), Some(CoreError::TargetRefused(_))),
+                typed,
+                "{status}"
+            );
+        }
+        let (mut near, _task) = serve("502 Bad Gateway").await;
+        let err = connect_handshake(&mut near, &Address::new("a.test", 1), None, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), "HTTP/1.1 502 Bad Gateway");
     }
 
     #[test]

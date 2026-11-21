@@ -6,7 +6,7 @@ use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
 use concord_common::stream_buffer::{self, BufferRequirements, StreamBuffer};
-use concord_common::{BoxRead, BoxWrite, Stream};
+use concord_common::{BoxRead, BoxWrite, CoreError, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 use tokio_util::sync::PollSender;
@@ -59,7 +59,7 @@ impl Inbox {
                 Some(Chunk::Fin) => self.ended = true,
                 Some(Chunk::Error(message)) => {
                     self.ended = true;
-                    return Poll::Ready(Err(io::Error::other(message)));
+                    return Poll::Ready(Err(CoreError::TargetRefused(message).into()));
                 }
                 None if done.load(Ordering::Acquire) => self.ended = true,
                 None => {

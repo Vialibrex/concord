@@ -53,11 +53,24 @@ pub const TUN: Tiers = tiers(TUN_T0, TUN_T1, TUN_T2, &[]);
 pub const SNIFFER: Tiers = tiers(SNIFFER_T0, SNIFFER_T1, SNIFFER_T2, &[]);
 pub const NTP: Tiers = tiers(NTP_KEYS, &[], &[], &[]);
 pub const GEOX: Tiers = tiers(GEOX_KEYS, &[], GEOX_T2, &[]);
-pub const PROFILE: Tiers = tiers(&["store-fake-ip"], &[], &[], PROFILE_INERT);
+pub const PROFILE: Tiers = tiers(
+    &["store-fake-ip"],
+    &[],
+    &["smart-collector-size"],
+    PROFILE_INERT,
+);
 pub const GROUP: Tiers = tiers(
     GROUP_T0,
     &[],
-    &["routing-mark", "interface-name", "dialer-proxy"],
+    &[
+        "routing-mark",
+        "interface-name",
+        "dialer-proxy",
+        "uselightgbm",
+        "collectdata",
+        "sample-rate",
+        "prefer-asn",
+    ],
     &[],
 );
 
@@ -84,6 +97,7 @@ pub const GROUP_T0: &[&str] = &[
     "hidden",
     "icon",
     "tolerance",
+    "policy-priority",
     "default-selected",
     "strategy",
     "hash-key",
@@ -172,6 +186,9 @@ pub const TOP_T2: &[&str] = &[
     "geosite-matcher",
     "etag-support",
     "global-client-fingerprint",
+    "lgbm-auto-update",
+    "lgbm-update-interval",
+    "lgbm-url",
 ];
 
 pub const DNS_T0: &[&str] = &[
