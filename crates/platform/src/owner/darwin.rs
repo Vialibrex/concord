@@ -493,9 +493,21 @@ mod tests {
         let _peer = first.accept().unwrap();
         drop(closed);
 
-        let sockets = parse_pcblist(&read_pcblist(Network::Tcp).unwrap());
-        let listed = sockets.iter().filter(|pcb| pcb.local == src).count();
-        assert_eq!(listed, 1);
+        // Under load the kernel can list a just-closed socket with its descriptor for a moment;
+        // one that was never filtered stays listed while its peer is open, so it still fails.
+        let listed = || {
+            let sockets = parse_pcblist(&read_pcblist(Network::Tcp).unwrap());
+            sockets.iter().filter(|pcb| pcb.local == src).count()
+        };
+        let mut seen = listed();
+        for _ in 0..100 {
+            if seen == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            seen = listed();
+        }
+        assert_eq!(seen, 1);
     }
 
     #[test]
