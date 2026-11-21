@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::Poll;
 
 use arc_swap::ArcSwap;
-use concord_common::{Address, Datagram, PacketBuf, PacketSession, recv_packet, send_packet};
+use concord_common::{
+    Address, Datagram, PacketBuf, PacketSession, RecvBatch, recv_packet, send_packet,
+};
 use concord_platform::{UDP_BATCH, UdpBatch};
 use gotatun::packet::{Packet, PacketBufPool};
 use gotatun::udp::{UdpRecv, UdpSend, UdpTransportFactory, UdpTransportFactoryParams};
@@ -299,8 +301,52 @@ impl UdpSend for WireSend {
     }
 }
 
+fn clear_reserved(packet: &mut Packet) {
+    if let Some(slot) = packet.get_mut(1..HEADER_LEN) {
+        slot.fill(0);
+    }
+}
+
 impl UdpRecv for WireRecv {
-    type RecvManyBuf = ();
+    type RecvManyBuf = RecvBatch;
+
+    async fn recv_many_from(
+        &mut self,
+        batch: &mut Self::RecvManyBuf,
+        pool: &mut PacketBufPool,
+        packets: &mut Vec<(Packet, SocketAddr)>,
+    ) -> io::Result<()> {
+        if UdpBatch::RECEIVES
+            && self.amnezia.is_none()
+            && let Carrier::Sockets(sockets) = &self.carrier
+        {
+            poll_fn(|cx| {
+                for socket in sockets {
+                    while let Poll::Ready(ready) = socket.poll_recv_ready(cx) {
+                        ready?;
+                        match UdpBatch::recv(socket, batch) {
+                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+                            other => return Poll::Ready(other),
+                        }
+                    }
+                }
+                Poll::Pending
+            })
+            .await
+            .inspect_err(|_| self.broken.trip())?;
+            for (data, from) in batch.iter() {
+                let mut packet = pool.get();
+                let len = data.len().min(packet.len());
+                packet.truncate(len);
+                packet.copy_from_slice(&data[..len]);
+                clear_reserved(&mut packet);
+                packets.push((packet, from));
+            }
+        } else {
+            packets.push(self.recv_from(pool).await?);
+        }
+        Ok(())
+    }
 
     async fn recv_from(&mut self, pool: &mut PacketBufPool) -> io::Result<(Packet, SocketAddr)> {
         loop {
@@ -353,11 +399,7 @@ impl UdpRecv for WireRecv {
                     None => continue,
                 }
             }
-            if len >= HEADER_LEN
-                && let Some(slot) = packet.get_mut(1..HEADER_LEN)
-            {
-                slot.fill(0);
-            }
+            clear_reserved(&mut packet);
             return Ok((packet, from));
         }
     }
