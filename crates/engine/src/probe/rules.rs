@@ -20,9 +20,9 @@ const DISNEY_AUTH: &str =
 const GEMINI_REGION_MARKER: &str = ",2,1,200,\"";
 const CLAUDE_BLOCKED_REGIONS: [&str; 10] =
     ["AF", "BY", "CN", "CU", "HK", "IR", "KP", "MO", "RU", "SY"];
-const GEMINI_BLOCKED_REGIONS: [&str; 9] = [
-    "CHN", "RUS", "BLR", "CUB", "IRN", "PRK", "SYR", "HKG", "MAC",
-];
+/// Google's list of Gemini regions (support.google.com/gemini/answer/13575153)
+/// names Hong Kong and Macau, so neither is here.
+const GEMINI_BLOCKED_REGIONS: [&str; 7] = ["CHN", "RUS", "BLR", "CUB", "IRN", "PRK", "SYR"];
 
 pub struct Patterns {
     youtube_region: Vec<Regex>,

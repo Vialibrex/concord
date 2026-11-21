@@ -236,7 +236,9 @@ async fn gemini_reads_the_marker_and_stops_scanning_at_it() {
     for (body, status, region) in [
         (r#"junk,2,1,200,"JPNrest"#, AVAILABLE, "JP"),
         (r#"junk,2,1,200,"CHNrest"#, UNSUPPORTED_REGION, "CN"),
-        (r#"junk,2,1,200,"HKGrest"#, UNSUPPORTED_REGION, "HK"),
+        (r#"junk,2,1,200,"HKGrest"#, AVAILABLE, "HK"),
+        (r#"junk,2,1,200,"MACrest"#, AVAILABLE, "MO"),
+        (r#"junk,2,1,200,"RUSrest"#, UNSUPPORTED_REGION, "RU"),
         (r#"junk,2,1,200,"jpnrest"#, FAILED, ""),
         (r#"junk,2,1,200,"JP"#, FAILED, ""),
         ("no marker", FAILED, ""),
