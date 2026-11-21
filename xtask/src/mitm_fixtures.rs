@@ -5,7 +5,8 @@
 //! them (`SOURCES.md`, `LICENSE-*` under test data) fail anywhere in that scope.
 
 use std::path::Path;
-use std::process::Command;
+
+use crate::public_tree::tracked;
 
 const SELF: &str = "xtask/src/mitm_fixtures.rs";
 const ALLOW_FILE: &str = "xtask/mitm-hosts.txt";
@@ -269,21 +270,6 @@ fn file_problems(path: &str, source: &str, allowed: &[Allowed]) -> Vec<String> {
         }
     }
     problems
-}
-
-fn tracked(root: &Path) -> Vec<String> {
-    let output = Command::new("git")
-        .args(["ls-files", "-z"])
-        .current_dir(root)
-        .output()
-        .expect("git ls-files");
-    assert!(output.status.success(), "git ls-files failed");
-    output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect()
 }
 
 fn check(root: &Path) -> Result<(), String> {

@@ -333,7 +333,7 @@ fn concord_commits(root: &Path, candidates: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn tracked(root: &Path) -> Vec<String> {
+pub(crate) fn tracked(root: &Path) -> Vec<String> {
     Command::new("git")
         .args(["ls-files", "-z"])
         .current_dir(root)
