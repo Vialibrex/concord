@@ -11,8 +11,8 @@ const PATTERNS: [&str; 17] = [
     r"(?i)^https://www\.example\.org/promotions/summer-sale/banner",
     r"^\w+://tracker\.test/",
     r"/collect\?",
-    r"^https://a\.com/(?=x)",
-    r"^https://a\.com/x\d+$",
+    r"^https://a\.test/(?=x)",
+    r"^https://a\.test/x\d+$",
     r"^https?://(www\.)?video\.test/(ad|pre)roll",
     r"^https://API\.Mixed\.test/v1",
     r"^",
@@ -36,8 +36,8 @@ const URLS: [&str; 27] = [
     "https://WWW.EXAMPLE.ORG/PROMOTIONS/SUMMER-SALE/BANNER.png",
     "ws://tracker.test/x",
     "https://site.test/collect?v=1",
-    "https://a.com/xyz",
-    "https://a.com/x12",
+    "https://a.test/xyz",
+    "https://a.test/x12",
     "https://video.test/preroll.mp4",
     "http://www.video.test/adroll",
     "https://api.mixed.test/v1",
@@ -91,20 +91,26 @@ fn the_index_finds_the_rules_a_full_scan_finds_in_the_same_order() {
 
 #[test]
 fn a_prefix_only_makes_a_candidate_and_the_pattern_decides() {
-    let rules = rules_of(&[r"^https://a\.com/x\d+$"]);
+    let rules = rules_of(&[r"^https://a\.test/x\d+$"]);
     assert!(rules.index_of_url_rewrites().always().is_empty());
-    assert_eq!(rules.url_rewrite_candidates("https://a.com/xyz").count(), 1);
+    assert_eq!(
+        rules.url_rewrite_candidates("https://a.test/xyz").count(),
+        1
+    );
     assert!(
         rules
-            .rewrite_url("https://a.com/xyz", &crate::heads::Heads::new(None, None))
+            .rewrite_url("https://a.test/xyz", &crate::heads::Heads::new(None, None))
             .is_none()
     );
     assert!(
         rules
-            .rewrite_url("https://a.com/x12", &crate::heads::Heads::new(None, None))
+            .rewrite_url("https://a.test/x12", &crate::heads::Heads::new(None, None))
             .is_some()
     );
-    assert_eq!(rules.url_rewrite_candidates("https://b.com/x12").count(), 0);
+    assert_eq!(
+        rules.url_rewrite_candidates("https://b.test/x12").count(),
+        0
+    );
 }
 
 #[test]

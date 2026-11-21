@@ -20,8 +20,8 @@ rules:
   - MATCH,sel
 ";
 
-const ADS: &str = "\
-#!name=Ads
+const SAMPLE: &str = "\
+#!name=Sample
 [General]
 dns-server = %INSERT% 8.8.8.8
 skip-proxy = %APPEND% bypass.test
@@ -61,7 +61,7 @@ fn inline(name: &str, text: &str) -> String {
 
 #[test]
 fn a_module_rule_goes_ahead_of_the_profiles_with_its_policy_mapped() {
-    let profile = profile(&inline("ads", ADS), BTreeMap::new());
+    let profile = profile(&inline("sample", SAMPLE), BTreeMap::new());
     let rules: Vec<&str> = profile.rules.iter().collect();
     let set = rules
         .iter()
@@ -99,7 +99,7 @@ fn a_module_rule_goes_ahead_of_the_profiles_with_its_policy_mapped() {
 
 #[test]
 fn a_module_edits_dns_and_hosts_and_leaves_routes_to_the_host() {
-    let profile = profile(&inline("ads", ADS), BTreeMap::new());
+    let profile = profile(&inline("sample", SAMPLE), BTreeMap::new());
     let servers: Vec<String> = profile
         .dns
         .nameserver
@@ -119,8 +119,8 @@ fn a_module_edits_dns_and_hosts_and_leaves_routes_to_the_host() {
 fn a_module_that_cannot_be_read_or_is_named_twice_takes_no_effect() {
     let modules = format!(
         "    - {{name: gone, path: modules/gone.txt}}\n{}{}    - {{name: none}}\n",
-        inline("ads", ADS),
-        inline("ads", "[Rule]\nDOMAIN,twice.test,REJECT\n"),
+        inline("sample", SAMPLE),
+        inline("sample", "[Rule]\nDOMAIN,twice.test,REJECT\n"),
     );
     let texts = BTreeMap::from([(
         "gone".to_string(),
@@ -141,8 +141,8 @@ fn a_module_that_cannot_be_read_or_is_named_twice_takes_no_effect() {
                     detail: "no such file".into()
                 })
             ),
-            ("ads", None),
-            ("ads", Some(ModuleProblem::Duplicate)),
+            ("sample", None),
+            ("sample", Some(ModuleProblem::Duplicate)),
             (
                 "none",
                 Some(ModuleProblem::Unreadable {
@@ -164,7 +164,7 @@ fn a_module_its_requirement_turns_off_is_not_merged() {
 
 #[test]
 fn a_module_turned_off_is_read_and_adds_nothing() {
-    let modules = inline("ads", ADS).replacen("\n", "\n      enabled: false\n", 1);
+    let modules = inline("sample", SAMPLE).replacen("\n", "\n      enabled: false\n", 1);
     let profile = profile(&modules, BTreeMap::new());
     let module = &profile.modules[0];
     assert!(!module.spec.enabled && !module.in_force());
@@ -179,7 +179,7 @@ fn a_module_turned_off_is_read_and_adds_nothing() {
 
 #[test]
 fn a_composed_line_names_its_module_by_its_name_and_the_hosts() {
-    let modules = format!("{}{}", inline("ads", ADS), inline("Ads", ADS));
+    let modules = format!("{}{}", inline("sample", SAMPLE), inline("Sample", SAMPLE));
     let profile = profile(&modules, BTreeMap::new());
     let section = compose(&profile.mitm, &profile.modules, |_| None);
     let origins: Vec<_> = section
@@ -187,7 +187,7 @@ fn a_composed_line_names_its_module_by_its_name_and_the_hosts() {
         .iter()
         .map(|line| line.origin.as_deref())
         .collect();
-    assert_eq!(origins, [None, Some("Ads (ads)"), Some("Ads")]);
+    assert_eq!(origins, [None, Some("Sample (sample)"), Some("Sample")]);
 }
 
 #[test]
@@ -204,8 +204,8 @@ fn a_section_without_a_module_list_is_not_listed() {
 
 #[test]
 fn a_module_read_from_its_path_takes_the_text_the_engine_read() {
-    let texts = BTreeMap::from([("ads".to_string(), Ok(ADS.to_string()))]);
-    let profile = profile("    - {name: ads, path: modules/ads.txt}\n", texts);
+    let texts = BTreeMap::from([("sample".to_string(), Ok(SAMPLE.to_string()))]);
+    let profile = profile("    - {name: sample, path: modules/sample.txt}\n", texts);
     assert!(profile.modules[0].in_force());
     let mitm_warnings: Vec<_> = profile
         .report
@@ -224,7 +224,7 @@ fn a_module_read_from_its_path_takes_the_text_the_engine_read() {
 fn the_section_in_force_follows_the_profiles_lines_with_stored_files() {
     let modules = format!(
         "{}{}",
-        inline("ads", ADS),
+        inline("sample", SAMPLE),
         inline("first", "[MITM]\nhostname = %INSERT% first.test\n")
     );
     let profile = profile(&modules, BTreeMap::new());
@@ -293,9 +293,9 @@ fn an_inline_rule_set_of_one_name_gathers_its_lines_from_every_module() {
         "{}{}",
         inline(
             "a",
-            "[Ruleset Ads]\nDOMAIN,a.com\n[Rule]\nRULE-SET,Ads,REJECT\n"
+            "[Ruleset Sample]\nDOMAIN,a.test\n[Rule]\nRULE-SET,Sample,REJECT\n"
         ),
-        inline("b", "[Ruleset Ads]\nDOMAIN,b.com\n"),
+        inline("b", "[Ruleset Sample]\nDOMAIN,b.test\n"),
     );
     let loaded = profile(&modules, BTreeMap::new());
     let [provider] = loaded.rule_providers.as_slice() else {
@@ -304,7 +304,7 @@ fn an_inline_rule_set_of_one_name_gathers_its_lines_from_every_module() {
     assert!(provider.name.starts_with("mitm-"), "{}", provider.name);
     assert_eq!(
         provider.raw["payload"],
-        json!(["DOMAIN,a.com", "DOMAIN,b.com"])
+        json!(["DOMAIN,a.test", "DOMAIN,b.test"])
     );
     let rule = format!("RULE-SET,{},REJECT", provider.name);
     assert_eq!(loaded.rules.iter().next(), Some(rule.as_str()));

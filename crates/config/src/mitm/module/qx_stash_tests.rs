@@ -166,10 +166,10 @@ http:
   force-http-engine:
     - "*:4480"
   url-rewrite:
-    - ^http://g\.cn https://www.google.com transparent
+    - ^http://g\.test https://www.b.test transparent
     - ^https?://ad\.example - reject
   header-rewrite:
-    - ^http://g\.cn request-replace-regex User-Agent Go-http-client curl
+    - ^http://g\.test request-replace-regex User-Agent Go-http-client curl
   body-rewrite:
     - '^https://api\.example\.com/ response-replace-regex old new disabled enabled'
     - '^https://api\.example\.com/ response-json-add meta.source "${args.region}" meta.version 1'

@@ -517,37 +517,41 @@ mod tests {
     #[test]
     fn url_rewrite_reads_surge_loon_and_quantumult_x() {
         let cases = [
-            (r"^https?://ad\.com/ _ reject", UrlAction::Reject, ""),
-            (r"^https?://ad\.com/ reject-dict", UrlAction::RejectDict, ""),
+            (r"^https?://ad\.test/ _ reject", UrlAction::Reject, ""),
             (
-                r"^https?://ad\.com/ url reject-img",
+                r"^https?://ad\.test/ reject-dict",
+                UrlAction::RejectDict,
+                "",
+            ),
+            (
+                r"^https?://ad\.test/ url reject-img",
                 UrlAction::RejectImg,
                 "",
             ),
             (
-                r"^https?://ad\.com/ url 302 https://b.com/",
+                r"^https?://ad\.test/ url 302 https://b.test/",
                 UrlAction::Redirect302,
-                "https://b.com/",
+                "https://b.test/",
             ),
             (
-                r"^https?://ad\.com/ 302 https://b.com/",
+                r"^https?://ad\.test/ 302 https://b.test/",
                 UrlAction::Redirect302,
-                "https://b.com/",
+                "https://b.test/",
             ),
             (
-                r"^http://a\.com/(.*) http://b.com/$1 307",
+                r"^http://a\.test/(.*) http://b.test/$1 307",
                 UrlAction::Redirect307,
-                "http://b.com/$1",
+                "http://b.test/$1",
             ),
             (
-                r"^http://a\.com http://b.com",
+                r"^http://a\.test http://b.test",
                 UrlAction::Header,
-                "http://b.com",
+                "http://b.test",
             ),
             (
-                r"^http://a\.com http://b.com header",
+                r"^http://a\.test http://b.test header",
                 UrlAction::Header,
-                "http://b.com",
+                "http://b.test",
             ),
         ];
         for (line, action, replacement) in cases {
@@ -592,17 +596,17 @@ mod tests {
     #[test]
     fn rewrite_url_replaces_the_match_and_stops_at_the_first_rule() {
         let rules = rules_with(&[
-            r"^http://www\.google\.cn http://www.google.com",
-            r"^http://www\.google\.cn _ reject",
-            r"^https://a\.com/(\w+)/(\d+) https://b.com/$2/$1 302",
+            r"^http://www\.a\.test http://www.b.test",
+            r"^http://www\.a\.test _ reject",
+            r"^https://a\.test/(\w+)/(\d+) https://b.test/$2/$1 302",
         ]);
         let (rule, replaced) =
-            rewrite_with(&rules, "http://www.google.cn/search?q=x", String::new).unwrap();
+            rewrite_with(&rules, "http://www.a.test/search?q=x", String::new).unwrap();
         assert_eq!(rule.action, UrlAction::Header);
-        assert_eq!(replaced, "http://www.google.com/search?q=x");
-        let (_, replaced) = rewrite_with(&rules, "https://a.com/item/42", String::new).unwrap();
-        assert_eq!(replaced, "https://b.com/42/item");
-        assert!(rewrite_with(&rules, "https://c.com/", String::new).is_none());
+        assert_eq!(replaced, "http://www.b.test/search?q=x");
+        let (_, replaced) = rewrite_with(&rules, "https://a.test/item/42", String::new).unwrap();
+        assert_eq!(replaced, "https://b.test/42/item");
+        assert!(rewrite_with(&rules, "https://c.test/", String::new).is_none());
     }
 
     #[test]
@@ -664,13 +668,13 @@ mod tests {
     #[test]
     fn header_rewrite_actions() {
         let lines = [
-            r"http-request ^https://a\.com header-add X-Added one",
-            r"^https://a\.com header-add User-Agent Mozilla/5.0 (iPhone; CPU OS 18_0)",
-            r"http-request ^https://a\.com header-del Cookie",
-            r"http-request ^https://a\.com header-replace Accept text/html",
-            r"http-request ^https://a\.com header-replace Missing value",
-            r"http-request ^https://a\.com header-replace-regex Referer http https",
-            r"http-response ^https://a\.com header-del Set-Cookie",
+            r"http-request ^https://a\.test header-add X-Added one",
+            r"^https://a\.test header-add User-Agent Mozilla/5.0 (iPhone; CPU OS 18_0)",
+            r"http-request ^https://a\.test header-del Cookie",
+            r"http-request ^https://a\.test header-replace Accept text/html",
+            r"http-request ^https://a\.test header-replace Missing value",
+            r"http-request ^https://a\.test header-replace-regex Referer http https",
+            r"http-response ^https://a\.test header-del Set-Cookie",
         ];
         let mut rules = Rules::default();
         for line in lines {
@@ -681,10 +685,10 @@ mod tests {
         let mut header = headers(&[
             ("cookie", "a=b"),
             ("accept", "*/*"),
-            ("referer", "http://a.com/x"),
+            ("referer", "http://a.test/x"),
             ("set-cookie", "c=d"),
         ]);
-        let picked = rules.header_rewrites_for("https://a.com/", false, &Heads::new(None, None));
+        let picked = rules.header_rewrites_for("https://a.test/", false, &Heads::new(None, None));
         assert_eq!(
             picked
                 .into_iter()
@@ -704,7 +708,7 @@ mod tests {
             Some("Mozilla/5.0 (iPhone; CPU OS 18_0)")
         );
         assert_eq!(get("accept").as_deref(), Some("text/html"));
-        assert_eq!(get("referer").as_deref(), Some("https://a.com/x"));
+        assert_eq!(get("referer").as_deref(), Some("https://a.test/x"));
         assert_eq!(get("set-cookie").as_deref(), Some("c=d"));
         assert_eq!(get("cookie"), None);
         assert_eq!(header.len(), 5);
@@ -713,10 +717,10 @@ mod tests {
     #[test]
     fn head_conditions_read_each_head_once_and_only_past_the_url() {
         let lines = [
-            r"http-response ^https://a\.com/ response-head ^HTTP/\S+\s200\s request-head ^POST\s header-add X-A 1",
-            r"http-response ^https://a\.com/ request-head ^POST\s header-add X-B 1",
-            r"http-response ^https://b\.com/ request-head ^GET header-add X-C 1",
-            r"http-response ^https://a\.com/ header-del X-D",
+            r"http-response ^https://a\.test/ response-head ^HTTP/\S+\s200\s request-head ^POST\s header-add X-A 1",
+            r"http-response ^https://a\.test/ request-head ^POST\s header-add X-B 1",
+            r"http-response ^https://b\.test/ request-head ^GET header-add X-C 1",
+            r"http-response ^https://a\.test/ header-del X-D",
         ];
         let mut rules = Rules::default();
         for line in lines {
@@ -733,7 +737,7 @@ mod tests {
             let response = || response.to_string();
             rules
                 .header_rewrites_for(
-                    "https://a.com/x",
+                    "https://a.test/x",
                     true,
                     &Heads::new(Some(&request), Some(&response)),
                 )
@@ -758,7 +762,7 @@ mod tests {
         );
         assert_eq!(
             rules
-                .header_rewrites_for("https://a.com/x", true, &Heads::new(None, None))
+                .header_rewrites_for("https://a.test/x", true, &Heads::new(None, None))
                 .len(),
             3,
             "a head not known yet lets its condition pass"
@@ -768,7 +772,7 @@ mod tests {
             built.set(built.get() + 1);
             String::new()
         };
-        rules.header_rewrites_for("https://c.com/", true, &Heads::new(Some(&request), None));
+        rules.header_rewrites_for("https://c.test/", true, &Heads::new(Some(&request), None));
         assert_eq!(
             built.get(),
             0,
@@ -779,7 +783,7 @@ mod tests {
     #[test]
     fn head_conditions_and_whole_head_rewrites_parse() {
         let rule = parse_header_rewrite(
-            r#"^https://a\.com/ header-text-replace "(\r\n)User-Agent:[^\r]*(\r\n)" "$1User-Agent: app$2""#,
+            r#"^https://a\.test/ header-text-replace "(\r\n)User-Agent:[^\r]*(\r\n)" "$1User-Agent: app$2""#,
         )
         .unwrap();
         assert!(rule.whole_head().is_some());
@@ -817,7 +821,7 @@ mod tests {
         let mut rules = Rules::default();
         rules.map_locals.push(
             local(
-                r#"^https://a\.com/ request-head ^POST\s data-type=text data="{}""#,
+                r#"^https://a\.test/ request-head ^POST\s data-type=text data="{}""#,
                 nowhere,
             )
             .unwrap(),
@@ -826,12 +830,12 @@ mod tests {
         let get = || "GET / HTTP/1.1\r\n\r\n".to_string();
         assert!(
             rules
-                .map_local("https://a.com/", &Heads::new(Some(&post), None))
+                .map_local("https://a.test/", &Heads::new(Some(&post), None))
                 .is_some()
         );
         assert!(
             rules
-                .map_local("https://a.com/", &Heads::new(Some(&get), None))
+                .map_local("https://a.test/", &Heads::new(Some(&get), None))
                 .is_none()
         );
         for line in [
@@ -849,8 +853,8 @@ mod tests {
     #[test]
     fn header_rewrite_keeps_framing_headers() {
         for line in [
-            r"^https://a\.com header-del Content-Length",
-            r"http-response ^https://a\.com header-replace transfer-encoding chunked",
+            r"^https://a\.test header-del Content-Length",
+            r"http-response ^https://a\.test header-replace transfer-encoding chunked",
         ] {
             assert!(parse_header_rewrite(line).is_err(), "{line}");
         }
@@ -859,7 +863,7 @@ mod tests {
     #[test]
     fn body_rewrite_chains_pairs() {
         let rule = parse_body_rewrite(
-            r#"http-response ^https://a\.com "\"ad\":true" "\"ad\":false" ^line$ replaced"#,
+            r#"http-response ^https://a\.test "\"ad\":true" "\"ad\":false" ^line$ replaced"#,
         )
         .unwrap();
         let got = rule.apply("{\"ad\":true}\nline\nkeep line".to_string());
@@ -878,7 +882,7 @@ mod tests {
     fn map_local_parameters() {
         let nowhere = Path::new("/nonexistent-resources");
         let rule = local(
-            r#"^https://a\.com/json data-type=text data="{\"ok\":1}" status-code=500 header="Content-Type:application/json|X-A:b""#,
+            r#"^https://a\.test/json data-type=text data="{\"ok\":1}" status-code=500 header="Content-Type:application/json|X-A:b""#,
             nowhere,
         )
         .unwrap();
@@ -886,21 +890,21 @@ mod tests {
         assert_eq!(rule.status.as_u16(), 500);
         assert_eq!(rule.header.get("content-type").unwrap(), "application/json");
         assert_eq!(rule.header.get("x-a").unwrap(), "b");
-        let gif = local(r"^https://a\.com/gif data-type=tiny-gif", nowhere).unwrap();
+        let gif = local(r"^https://a\.test/gif data-type=tiny-gif", nowhere).unwrap();
         assert_eq!(gif.header.get("content-type").unwrap(), "image/gif");
         assert!(!gif.body.bytes().is_empty());
         let encoded = local(
-            r#"^https://a\.com/b data-type=base64 data="dGVzdA==" header=WC1COiBj"#,
+            r#"^https://a\.test/b data-type=base64 data="dGVzdA==" header=WC1COiBj"#,
             nowhere,
         )
         .unwrap();
         assert_eq!(encoded.body.bytes(), b"test");
         assert_eq!(encoded.header.get("x-b").unwrap(), "c");
         for line in [
-            r#"^https://a\.com/x data="missing.json""#,
-            r"^https://a\.com/x data-type=text status-code=99",
-            r"^https://a\.com/x data-type=base64 data=%%%",
-            r"^https://a\.com/x novalue",
+            r#"^https://a\.test/x data="missing.json""#,
+            r"^https://a\.test/x data-type=text status-code=99",
+            r"^https://a\.test/x data-type=base64 data=%%%",
+            r"^https://a\.test/x novalue",
         ] {
             assert!(local(line, nowhere).is_err(), "{line}");
         }
@@ -912,9 +916,9 @@ mod tests {
         std::fs::write(dir.path().join("small"), vec![b's'; LOCAL_PIECE]).unwrap();
         std::fs::write(dir.path().join("large"), vec![b'l'; LOCAL_PIECE + 1]).unwrap();
 
-        let small = local(r#"^https://a\.com/x data="small""#, dir.path()).unwrap();
+        let small = local(r#"^https://a\.test/x data="small""#, dir.path()).unwrap();
         assert_eq!(small.body.bytes().len(), LOCAL_PIECE);
-        let large = local(r#"^https://a\.com/x data="large""#, dir.path()).unwrap();
+        let large = local(r#"^https://a\.test/x data="large""#, dir.path()).unwrap();
         assert!(
             matches!(&large.body, LocalBody::File(path) if *path == dir.path().join("large")),
             "{:?}",
@@ -934,11 +938,11 @@ mod tests {
         std::os::unix::fs::symlink(home.path().join("secret.txt"), resources.join("link.txt"))
             .unwrap();
 
-        let rule = local(r#"^https://a\.com/x data="a.json""#, &resources).unwrap();
+        let rule = local(r#"^https://a\.test/x data="a.json""#, &resources).unwrap();
         assert_eq!(rule.body.bytes(), br#"{"ok":1}"#);
         assert_eq!(rule.header.get("content-type").unwrap(), "application/json");
         let rule = local(
-            r#"^https://a\.com/x data-type=file data="sub/b" header="Content-Type:text/x""#,
+            r#"^https://a\.test/x data-type=file data="sub/b" header="Content-Type:text/x""#,
             &resources,
         )
         .unwrap();
@@ -955,7 +959,7 @@ mod tests {
             "sub",
             "",
         ] {
-            let line = format!(r#"^https://a\.com/x data-type=file data="{data}""#);
+            let line = format!(r#"^https://a\.test/x data-type=file data="{data}""#);
             let err = local(&line, &resources).expect_err(data);
             assert!(
                 !err.message.contains(&resources.display().to_string()),

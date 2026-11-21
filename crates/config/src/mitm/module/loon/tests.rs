@@ -71,7 +71,7 @@ fn the_plugin_pages_script_hands_on_typed_arguments() {
 #[test]
 fn a_request_script_hands_on_the_arguments_it_names() {
     let text = format!(
-        "{ARGUMENTS}[Script]\nrequest if ${{url}} ~= /^https?:\\/\\/a\\.com\\/c\\?cmd=\\d+/i then script(\"https://a.test/s.js\", {{${{region}}, ${{level}}, ${{note}}}}) with tag=\"Proto\", timeout=10\n"
+        "{ARGUMENTS}[Script]\nrequest if ${{url}} ~= /^https?:\\/\\/a\\.test\\/c\\?cmd=\\d+/i then script(\"https://a.test/s.js\", {{${{region}}, ${{level}}, ${{note}}}}) with tag=\"Proto\", timeout=10\n"
     );
     let def = read(&text, &[("region", "US")]);
     assert_eq!(ignored(&def), []);
@@ -276,7 +276,7 @@ fn mock_request_body_answers_with_its_data() {
 #[test]
 fn a_plugin_adds_its_dns_servers_routes_and_real_ip_domains() {
     let def = read(
-        "[General]\ndns-server = 119.29.29.29\ndoh-server = https://doh.pub/dns-query\nbypass-tun = 10.0.0.0/8\ninclude-tun = 172.16.0.0/12\nreal-ip = *.lan\n\n[Rewrite]\n^https://a\\.com/ad reject\n",
+        "[General]\ndns-server = 119.29.29.29\ndoh-server = https://doh.pub/dns-query\nbypass-tun = 10.0.0.0/8\ninclude-tun = 172.16.0.0/12\nreal-ip = *.lan\n\n[Rewrite]\n^https://a\\.test/ad reject\n",
         &[],
     );
     let appended = |items: &[&str]| {
@@ -303,11 +303,11 @@ fn a_rewrite_tests_the_status_and_both_heads_of_a_response() {
     let def = read(
         r#"[Rewrite]
 response if ${url} ~= /^https:\/\/api\.example\.com\/profile$/ && ${response.status} == 200 then response.json.replace("data.vip", true)
-response if ${url} ~= /^https:\/\/a\.com\/c/ && ${response.header['Content-Type']} ~= /json/i && ${request.method} == "POST" then response.json.delete("ads") | response.header.set("Cache-Control", "no-store")
-response if ${url} ~= /^https:\/\/a\.com\/s/ && ${response.status} ~= /^30[12]$/ then response.body.replace(/ad/, "")
-request if ${url} ~= /^https:\/\/a\.com\/q/ && ${response.status} == 200 then request.header.del("X")
-response if ${url} ~= /^https:\/\/a\.com\/m/ && ${response.status} == 200 then response.body.mock("json", "{}")
-response if ${url} ~= /^https:\/\/a\.com\/u/ && ${response.status} == 200 then reject(200)
+response if ${url} ~= /^https:\/\/a\.test\/c/ && ${response.header['Content-Type']} ~= /json/i && ${request.method} == "POST" then response.json.delete("ads") | response.header.set("Cache-Control", "no-store")
+response if ${url} ~= /^https:\/\/a\.test\/s/ && ${response.status} ~= /^30[12]$/ then response.body.replace(/ad/, "")
+request if ${url} ~= /^https:\/\/a\.test\/q/ && ${response.status} == 200 then request.header.del("X")
+response if ${url} ~= /^https:\/\/a\.test\/m/ && ${response.status} == 200 then response.body.mock("json", "{}")
+response if ${url} ~= /^https:\/\/a\.test\/u/ && ${response.status} == 200 then reject(200)
 "#,
         &[],
     );
@@ -398,8 +398,8 @@ response if ${url} ~= /^https:\/\/a\.com\/u/ && ${response.status} == 200 then r
 fn scripts_run_by_the_request_and_response_heads() {
     let def = read(
         r#"[Rewrite]
-request if ${url} ~= /^https:\/\/a\.com\/s/ && ${request.method} == "POST" then script("https://cdn.test/s.js") with tag="S"
-response if ${url} ~= /^https:\/\/a\.com\/r/ && ${response.status} == 200 then script("https://cdn.test/s.js") with tag="R"
+request if ${url} ~= /^https:\/\/a\.test\/s/ && ${request.method} == "POST" then script("https://cdn.test/s.js") with tag="S"
+response if ${url} ~= /^https:\/\/a\.test\/r/ && ${response.status} == 200 then script("https://cdn.test/s.js") with tag="R"
 "#,
         &[],
     );

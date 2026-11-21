@@ -355,11 +355,11 @@ mod tests {
     #[test]
     fn script_params_keep_what_they_quote() {
         let params = script_params(
-            r#"pattern="^https://a\.com/\"q\",x",argument=[{a},{b}],max=\d{1,3},class=[,],json="{\"k\":\"a\\"b\"}""#,
+            r#"pattern="^https://a\.test/\"q\",x",argument=[{a},{b}],max=\d{1,3},class=[,],json="{\"k\":\"a\\"b\"}""#,
         )
         .unwrap();
         for (key, want) in [
-            ("pattern", r#"^https://a\.com/"q",x"#),
+            ("pattern", r#"^https://a\.test/"q",x"#),
             ("argument", "[{a},{b}]"),
             ("max", r"\d{1,3}"),
             ("class", "[,]"),

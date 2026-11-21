@@ -805,7 +805,7 @@ async fn the_user_runs_a_task_and_sees_what_it_wrote() {
     rig.config(config(json!([
         "Tool = type=generic,script-path=tool.js",
         "Slow = type=generic,script-path=slow.js",
-        "Ads = type=http-response,pattern=a,script-path=tool.js",
+        "Sample = type=http-response,pattern=a,script-path=tool.js",
     ])));
     let output = rig.mitm.run_script("Tool").await.unwrap();
     assert_eq!(
@@ -818,7 +818,7 @@ async fn the_user_runs_a_task_and_sees_what_it_wrote() {
     );
     assert!(
         matches!(
-            rig.mitm.run_script("Ads").await,
+            rig.mitm.run_script("Sample").await,
             Err(ScriptRunError::NotFound(_))
         ),
         "an http script ran without a request"

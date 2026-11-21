@@ -354,7 +354,7 @@ mod tests {
     fn check_names_the_item_of_a_hostname_line() {
         let (_home, env) = env();
         let raw = RawConfig {
-            hostname: lines(&["b.com", "a.com, bad host"]),
+            hostname: lines(&["b.test", "a.test, bad host"]),
             ..RawConfig::default()
         };
         let issues = check(&raw, &env).issues;
@@ -423,11 +423,11 @@ mod tests {
             ..RawConfig::default()
         };
         let mut def = MitmDef::read(&raw);
-        def.mark_origin(&"Ads (7)".into());
+        def.mark_origin(&"Sample (7)".into());
         let (_, errors) = Config::compile(def, &env, false);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
-            errors[0].starts_with("module Ads (7): map-local"),
+            errors[0].starts_with("module Sample (7): map-local"),
             "{}",
             errors[0]
         );

@@ -21,26 +21,26 @@ fn each_list_reads_as_its_view() {
     let (_home, env) = env();
     let raw = RawConfig {
         url_rewrite: lines(&[
-            r"^https://a\.com/(.*) https://b.com/$1 302",
-            r"^https://ad\.com _ reject-dict",
-            r"^https://a\.com/x ^GET url-and-header https://c.com/ 307",
+            r"^https://a\.test/(.*) https://b.test/$1 302",
+            r"^https://ad\.test _ reject-dict",
+            r"^https://a\.test/x ^GET url-and-header https://c.test/ 307",
         ]),
         header_rewrite: lines(&[
-            r"http-response ^https://a\.com header-replace-regex Set-Cookie (a)=1 $1=2",
-            r"^https://a\.com request-head ^POST header-add x-token abc",
-            r"^https://a\.com header-text-replace ^GET POST",
+            r"http-response ^https://a\.test header-replace-regex Set-Cookie (a)=1 $1=2",
+            r"^https://a\.test request-head ^POST header-add x-token abc",
+            r"^https://a\.test header-text-replace ^GET POST",
         ]),
         body_rewrite: lines(&[
-            r"http-response ^https://a\.com/api ad x foo bar",
-            r"http-response-jq ^https://a\.com/j '.a = 1'",
+            r"http-response ^https://a\.test/api ad x foo bar",
+            r"http-response-jq ^https://a\.test/j '.a = 1'",
         ]),
         map_local: lines(&[
-            r#"^https://a\.com/m data-type=text data="{}" status-code=404 header="X-A:1|Content-Type:application/json""#,
+            r#"^https://a\.test/m data-type=text data="{}" status-code=404 header="X-A:1|Content-Type:application/json""#,
         ]),
-        request_body_mock: lines(&[r"^https://a\.com/p data-type=tiny-gif"]),
+        request_body_mock: lines(&[r"^https://a\.test/p data-type=tiny-gif"]),
         script: lines(&[
             "daily = type=cron, cronexp=0 8 * * *, script-path=a.js, timeout=10",
-            r"http-response ^https://a\.com/x script-path=b.js, requires-body=true, tag=b",
+            r"http-response ^https://a\.test/x script-path=b.js, requires-body=true, tag=b",
         ]),
         ..RawConfig::default()
     };
@@ -48,41 +48,41 @@ fn each_list_reads_as_its_view() {
     assert!(validation.issues.is_empty(), "{:?}", validation.issues);
     let want = json!({
         "url-rewrite": [
-            {"index": 0, "view": {"type": "urlRewrite", "pattern": r"^https://a\.com/(.*)",
-                "action": "302", "replacement": "https://b.com/$1"}},
-            {"index": 1, "view": {"type": "urlRewrite", "pattern": r"^https://ad\.com",
+            {"index": 0, "view": {"type": "urlRewrite", "pattern": r"^https://a\.test/(.*)",
+                "action": "302", "replacement": "https://b.test/$1"}},
+            {"index": 1, "view": {"type": "urlRewrite", "pattern": r"^https://ad\.test",
                 "action": "reject-dict"}},
-            {"index": 2, "view": {"type": "urlRewrite", "pattern": r"^https://a\.com/x",
-                "action": "307", "replacement": "https://c.com/", "requestHead": "^GET"}},
+            {"index": 2, "view": {"type": "urlRewrite", "pattern": r"^https://a\.test/x",
+                "action": "307", "replacement": "https://c.test/", "requestHead": "^GET"}},
         ],
         "header-rewrite": [
             {"index": 0, "view": {"type": "headerRewrite", "phase": "response",
-                "pattern": r"^https://a\.com", "action": "header-replace-regex",
+                "pattern": r"^https://a\.test", "action": "header-replace-regex",
                 "name": "Set-Cookie", "regex": "(a)=1", "replacement": "$1=2"}},
             {"index": 1, "view": {"type": "headerRewrite", "phase": "request",
-                "pattern": r"^https://a\.com", "requestHead": "^POST", "action": "header-add",
+                "pattern": r"^https://a\.test", "requestHead": "^POST", "action": "header-add",
                 "name": "X-Token", "value": "abc"}},
             {"index": 2, "view": {"type": "headerRewrite", "phase": "request",
-                "pattern": r"^https://a\.com", "action": "header-text-replace",
+                "pattern": r"^https://a\.test", "action": "header-text-replace",
                 "regex": "^GET", "replacement": "POST"}},
         ],
         "body-rewrite": [
             {"index": 0, "view": {"type": "bodyRewrite", "phase": "response",
-                "pattern": r"^https://a\.com/api",
+                "pattern": r"^https://a\.test/api",
                 "replacements": [{"regex": "ad", "replacement": "x"},
                     {"regex": "foo", "replacement": "bar"}]}},
             {"index": 1, "view": {"type": "bodyRewrite", "phase": "response",
-                "pattern": r"^https://a\.com/j", "replacements": [], "jq": ".a = 1"}},
+                "pattern": r"^https://a\.test/j", "replacements": [], "jq": ".a = 1"}},
         ],
         "map-local": [
-            {"index": 0, "view": {"type": "mapLocal", "pattern": r"^https://a\.com/m",
+            {"index": 0, "view": {"type": "mapLocal", "pattern": r"^https://a\.test/m",
                 "dataType": "text", "data": "{}", "status": 404,
                 "headers": [{"name": "X-A", "value": "1"},
                     {"name": "Content-Type", "value": "application/json"}],
                 "contentType": "application/json"}},
         ],
         "request-body-mock": [
-            {"index": 0, "view": {"type": "mapLocal", "pattern": r"^https://a\.com/p",
+            {"index": 0, "view": {"type": "mapLocal", "pattern": r"^https://a\.test/p",
                 "dataType": "tiny-gif", "data": "", "headers": [], "contentType": "image/gif"}},
         ],
         "script": [
@@ -90,7 +90,7 @@ fn each_list_reads_as_its_view() {
                 "path": "a.js", "cronexp": "0 8 * * *", "requiresBody": false,
                 "binaryBody": false, "timeoutMs": 10000}},
             {"index": 1, "view": {"type": "script", "name": "b", "kind": "httpResponse",
-                "path": "b.js", "pattern": r"^https://a\.com/x", "requiresBody": true,
+                "path": "b.js", "pattern": r"^https://a\.test/x", "requiresBody": true,
                 "binaryBody": false, "timeoutMs": 5000}},
         ],
     });
@@ -102,10 +102,10 @@ fn a_line_whose_items_partly_apply_has_a_view_of_those_and_an_issue() {
     let (_home, env) = env();
     let raw = RawConfig {
         hostname: lines(&[
-            "a.com, bad host, -[::1]:8443",
+            "a.test, bad host, -[::1]:8443",
             "bad host",
             "# note",
-            "*.b.com:443",
+            "*.b.test:443",
         ]),
         client_source_address: lines(&["10.0.0.0/8, lan, 192.168.0.1", "-192.168.1.2"]),
         ..RawConfig::default()
@@ -130,10 +130,10 @@ fn a_line_whose_items_partly_apply_has_a_view_of_those_and_an_issue() {
         json!({
             "hostname": [
                 {"index": 0, "view": {"type": "hosts", "entries": [
-                    {"host": "a.com", "exclude": false},
+                    {"host": "a.test", "exclude": false},
                     {"host": "::1", "port": 8443, "exclude": true}]}},
                 {"index": 3, "view": {"type": "hosts", "entries": [
-                    {"host": "*.b.com", "port": 443, "exclude": false}]}},
+                    {"host": "*.b.test", "port": 443, "exclude": false}]}},
             ],
             "client-source-address": [
                 {"index": 0, "view": {"type": "sources", "entries": [

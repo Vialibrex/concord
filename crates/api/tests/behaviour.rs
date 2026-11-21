@@ -2208,12 +2208,12 @@ async fn mitm_validate_answers_each_line_with_its_view_or_its_issue() {
     std::fs::create_dir_all(&resources).unwrap();
     std::fs::write(resources.join("a.js"), "$done({})").unwrap();
     let config = json!({
-        "hostname": ["a.com, bad host", "-*.b.com:8443"],
+        "hostname": ["a.test, bad host", "-*.b.test:8443"],
         "client-source-address": ["10.0.0.0/8"],
-        "url-rewrite": [r"^https://ad\.com _ reject", "(broken _ reject"],
-        "header-rewrite": [r"^https://a\.com header-del Cookie"],
-        "body-rewrite": [r"http-response-jq ^https://a\.com '.a'"],
-        "map-local": [r"^https://a\.com/m data-type=text data=ok"],
+        "url-rewrite": [r"^https://ad\.test _ reject", "(broken _ reject"],
+        "header-rewrite": [r"^https://a\.test header-del Cookie"],
+        "body-rewrite": [r"http-response-jq ^https://a\.test '.a'"],
+        "map-local": [r"^https://a\.test/m data-type=text data=ok"],
         "script": ["daily = type=cron, cronexp=0 8 * * *, script-path=a.js"],
     });
     let result = rig
@@ -2247,7 +2247,7 @@ async fn mitm_validate_answers_each_line_with_its_view_or_its_issue() {
         view("hostname", 0),
         Some(MitmLineView::Hosts(MitmHosts {
             entries: vec![MitmHostEntry {
-                host: "a.com".into(),
+                host: "a.test".into(),
                 port: None,
                 exclude: false,
             }],
@@ -2372,7 +2372,7 @@ mitm:
   enable: true
   module-policy: {PROXY: DIRECT}
   modules:
-    - name: ads
+    - name: sample
       text: |
         [Rule]
         DOMAIN,ad.test,PROXY
@@ -2396,13 +2396,13 @@ rules:
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         status = rig.control.mitm_module_status(Empty {}).await.unwrap();
     }
-    let [ads, gone] = &status.modules[..] else {
+    let [sample, gone] = &status.modules[..] else {
         panic!("{status:?}");
     };
-    assert!(ads.in_force);
-    assert_eq!(ads.refused_rules.len(), 1);
-    assert_eq!(ads.refused_rules[0].line, 3);
-    let script = &ads.resources[0];
+    assert!(sample.in_force);
+    assert_eq!(sample.refused_rules.len(), 1);
+    assert_eq!(sample.refused_rules[0].line, 3);
+    let script = &sample.resources[0];
     assert_eq!(script.url, "http://127.0.0.1:1/s.js");
     assert_eq!(script.state, MitmResourceState::Failed, "{script:?}");
     assert_eq!(

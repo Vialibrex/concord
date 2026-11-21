@@ -176,8 +176,8 @@ mod tests {
     fn follows_surge_semantics() {
         let (list, errors) = HostList::parse(&lines(&[
             "-skip.example.com",
-            "*.example.com, api.other.com:8443",
-            "all.ports.com:0",
+            "*.example.com, api.other.test:8443",
+            "all.ports.test:0",
             "[2001:db8::1]:443",
             "10.0.0.?",
         ]));
@@ -191,9 +191,9 @@ mod tests {
             ("a.example.com", 8443, false),
             ("skip.example.com", 443, false),
             ("skip.example.com", 80, false),
-            ("api.other.com", 8443, true),
-            ("api.other.com", 443, false),
-            ("all.ports.com", 22, true),
+            ("api.other.test", 8443, true),
+            ("api.other.test", 443, false),
+            ("all.ports.test", 22, true),
             ("2001:db8::1", 443, true),
             ("10.0.0.7", 443, true),
             ("10.0.0.17", 443, false),
@@ -231,31 +231,31 @@ mod tests {
 
     #[test]
     fn order_decides() {
-        let (list, _) = HostList::parse(&lines(&["*", "-a.com"]));
-        assert!(list.matches("a.com", 443));
+        let (list, _) = HostList::parse(&lines(&["*", "-a.test"]));
+        assert!(list.matches("a.test", 443));
     }
 
     #[test]
     fn sniffed_widens_bare_entries() {
-        let (list, _) = HostList::parse(&lines(&["a.com"]));
-        assert!(!list.matches("a.com", 8080));
-        assert!(list.matches_sniffed("a.com", 8080));
+        let (list, _) = HostList::parse(&lines(&["a.test"]));
+        assert!(!list.matches("a.test", 8080));
+        assert!(list.matches_sniffed("a.test", 8080));
     }
 
     #[test]
     fn reports_bad_entries() {
         let (list, errors) = HostList::parse(&lines(&[
-            "good.com",
-            "bad host.com",
-            "x.com:99999",
+            "good.test",
+            "bad host.test",
+            "x.test:99999",
             "<ip-address>:443",
             "[::1",
         ]));
         assert_eq!(errors.len(), 4, "{errors:?}");
-        assert!(list.matches("good.com", 443));
+        assert!(list.matches("good.test", 443));
         assert_eq!(
             errors.first().map(String::as_str),
-            Some("hostname \"bad host.com\": unsupported character ' '")
+            Some("hostname \"bad host.test\": unsupported character ' '")
         );
     }
 
@@ -263,12 +263,12 @@ mod tests {
     fn glob_cases() {
         let cases = [
             ("*", "anything.at.all", true),
-            ("*.a.com", "x.a.com", true),
-            ("*.a.com", "a.com", false),
+            ("*.a.test", "x.a.test", true),
+            ("*.a.test", "a.test", false),
             ("a*c", "abbbc", true),
             ("a*c", "abbbd", false),
-            ("?.a.com", "x.a.com", true),
-            ("?.a.com", "xy.a.com", false),
+            ("?.a.test", "x.a.test", true),
+            ("?.a.test", "xy.a.test", false),
             ("*x*y*", "1x2y3", true),
         ];
         for (pattern, name, want) in cases {

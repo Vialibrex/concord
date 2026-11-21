@@ -92,7 +92,7 @@ fn a_module_skips_verifying_only_its_own_hostnames() {
 #[test]
 fn surge_header_and_body_rewrites_pass_on_jq_included() {
     let def = read(
-        r#"#!name=Ads
+        r#"#!name=Sample
 [Header Rewrite]
 http-request ^https://example\.com header-del Cookie
 

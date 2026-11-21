@@ -693,11 +693,11 @@ async fn each_action_names_the_module_whose_line_it_was() {
     let mut module = section(json!({
         "url-rewrite": [r"^https://example\.test/old/(.*) https://example.test/new/$1"],
         "header-rewrite": [
-            r"http-request ^https://example\.test header-add X-Ads 1",
-            r"http-request ^https://example\.test header-add X-Ads-Too 1",
+            r"http-request ^https://example\.test header-add X-Sample 1",
+            r"http-request ^https://example\.test header-add X-Sample-Too 1",
         ],
     }));
-    module.mark_origin(&Arc::from("Ads"));
+    module.mark_origin(&Arc::from("Sample"));
     def.url_rewrite.append(&mut module.url_rewrite);
     def.header_rewrite.append(&mut module.header_rewrite);
     assert!(
@@ -721,8 +721,8 @@ async fn each_action_names_the_module_whose_line_it_was() {
         actions,
         [
             from("header-rewrite", "request", "", ""),
-            from("header-rewrite", "request", "", "Ads"),
-            from("url-rewrite", "", "header", "Ads"),
+            from("header-rewrite", "request", "", "Sample"),
+            from("url-rewrite", "", "header", "Sample"),
         ]
     );
 }

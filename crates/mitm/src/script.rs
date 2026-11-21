@@ -490,9 +490,9 @@ mod tests {
         let s = |text: &str| Some(serde_json::Value::String(text.to_string()));
         let cases = vec![
             (
-                r#"Ads = type=http-response,pattern=^https://a\.com/(x|y),requires-body=1,max-size=1024,timeout=10,script-path=a.js,argument="k=v,w""#,
+                r#"Sample = type=http-response,pattern=^https://a\.test/(x|y),requires-body=1,max-size=1024,timeout=10,script-path=a.js,argument="k=v,w""#,
                 Want {
-                    name: "Ads",
+                    name: "Sample",
                     kind: ScriptKind::HttpResponse,
                     requires_body: true,
                     max_size: 1024,
@@ -502,7 +502,7 @@ mod tests {
                 },
             ),
             (
-                r"Req = type=http-request,pattern=^https://a\.com/\d{1,3},script-path=a.js,binary-body-mode=true,timeout=600",
+                r"Req = type=http-request,pattern=^https://a\.test/\d{1,3},script-path=a.js,binary-body-mode=true,timeout=600",
                 Want {
                     name: "Req",
                     kind: ScriptKind::HttpRequest,
@@ -512,7 +512,7 @@ mod tests {
                 },
             ),
             (
-                r#"http-response ^https:\/\/a\.com\/x script-path=a.js, requires-body=true, max-size=-1, tag=Loon, argument-json="{\"on\":true}""#,
+                r#"http-response ^https:\/\/a\.test\/x script-path=a.js, requires-body=true, max-size=-1, tag=Loon, argument-json="{\"on\":true}""#,
                 Want {
                     name: "Loon",
                     kind: ScriptKind::HttpResponse,
@@ -523,7 +523,7 @@ mod tests {
                 },
             ),
             (
-                r"http-request ^https://a\.com script-path=a.js",
+                r"http-request ^https://a\.test script-path=a.js",
                 Want {
                     name: "a.js",
                     kind: ScriptKind::HttpRequest,
@@ -626,12 +626,12 @@ mod tests {
             assert_eq!(got.path, "a.js");
         }
         let req = parse_script(
-            r"Req = type=http-request,pattern=^https://a\.com/\d{1,3},script-path=a.js",
+            r"Req = type=http-request,pattern=^https://a\.test/\d{1,3},script-path=a.js",
             &resources,
             &host,
         )
         .unwrap();
-        assert!(req.matches_http("https://a.com/12", false));
+        assert!(req.matches_http("https://a.test/12", false));
     }
 
     #[test]
@@ -662,14 +662,14 @@ mod tests {
     fn script_lines_read_head_conditions() {
         let (_home, resources, host) = setup();
         let script = parse_script(
-            r#"Ads = type=http-response,pattern=^https://a\.com/,request-head="^(?=POST )",response-head=" 200\r\n",script-path=a.js"#,
+            r#"Sample = type=http-response,pattern=^https://a\.test/,request-head="^(?=POST )",response-head=" 200\r\n",script-path=a.js"#,
             &resources,
             &host,
         )
         .unwrap();
         assert!(script.conditions.request.is_some() && script.conditions.response.is_some());
         let plain = parse_script(
-            r"Ads = type=http-response,pattern=^https://a\.com/,script-path=a.js",
+            r"Sample = type=http-response,pattern=^https://a\.test/,script-path=a.js",
             &resources,
             &host,
         )

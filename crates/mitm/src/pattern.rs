@@ -239,9 +239,9 @@ mod tests {
 
     #[test]
     fn replaces_with_dotnet_templates() {
-        let p = Pattern::new(r"^https://a\.com/(\w+)/(\d+)").unwrap();
-        let got = p.replace("https://a.com/item/42", "https://b.com/$2/$1", false);
-        assert_eq!(got.as_deref(), Some("https://b.com/42/item"));
+        let p = Pattern::new(r"^https://a\.test/(\w+)/(\d+)").unwrap();
+        let got = p.replace("https://a.test/item/42", "https://b.test/$2/$1", false);
+        assert_eq!(got.as_deref(), Some("https://b.test/42/item"));
         let p = Pattern::new(r"(?<k>a)(b)").unwrap();
         assert_eq!(
             p.replace("xaby", "[${k}$2$$$1x]", true).as_deref(),

@@ -927,7 +927,7 @@ mod tests {
             200,
             HeaderList::from([("Content-Length".to_string(), vec!["3".to_string()])]),
         );
-        cap.note("script", PHASE_RESPONSE, "Ads", Some("Ad block"));
+        cap.note("script", PHASE_RESPONSE, "Sample", Some("Sample note"));
         let json = serde_json::to_value(store.find(cap.id().unwrap()).unwrap()).unwrap();
         for key in [
             "id",
