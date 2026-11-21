@@ -275,6 +275,48 @@ async fn an_aligned_read_stops_at_the_end_of_a_record() {
     assert_eq!(records_in_one_read(true).await, 5000);
 }
 
+/// Bytes still queued in the client socket after its split read half has taken the first
+/// record and one byte of the second, out of three full records sent at once.
+async fn left_in_socket_after_one_record(aligned: bool) -> usize {
+    let mut probe = None;
+    let (client, mut server) = connect_with_transport(
+        None,
+        |leaf| server_config(leaf, &ServerSpec::default()),
+        aligned,
+        |io| {
+            let io = io.into_std().unwrap();
+            probe = Some(io.try_clone().unwrap());
+            Box::new(TcpStream::from_std(io).unwrap())
+        },
+    )
+    .await;
+    let probe = probe.unwrap();
+    let (mut read, _write) = split(client);
+    for _ in 0..3 {
+        server.write_all(&[7u8; 16 * 1024]).await.unwrap();
+    }
+    server.flush().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut buf = vec![0u8; 16 * 1024 + 1];
+    read.read_exact(&mut buf).await.unwrap();
+    let mut rest = vec![0u8; 64 * 1024];
+    match probe.peek(&mut rest) {
+        Ok(n) => n,
+        Err(err) if err.kind() == io::ErrorKind::WouldBlock => 0,
+        Err(err) => panic!("{err}"),
+    }
+}
+
+#[tokio::test]
+async fn a_split_read_half_completes_a_record_and_reads_ahead_in_one_call() {
+    assert_eq!(left_in_socket_after_one_record(false).await, 0);
+}
+
+#[tokio::test]
+async fn an_aligned_split_read_half_leaves_the_next_record_in_the_socket() {
+    assert!(left_in_socket_after_one_record(true).await > 0);
+}
+
 #[tokio::test]
 async fn a_whole_connection_reads_ahead_on_the_native_engine() {
     let ca = Ca::new();
