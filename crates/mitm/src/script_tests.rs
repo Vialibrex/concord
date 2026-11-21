@@ -975,9 +975,8 @@ async fn max_size_minus_one_reads_a_body_past_the_engine_limit_for_one() {
     assert_eq!(client.get("/default").await.body.len(), big.len());
 }
 
-#[tokio::test]
-async fn a_script_notification_goes_out_as_an_event() {
-    let program = sync_program(|invocation| {
+fn posts_a_notice() -> Arc<dyn ScriptProgram> {
+    sync_program(|invocation| {
         let notify = invocation
             .notify
             .as_ref()
@@ -988,21 +987,79 @@ async fn a_script_notification_goes_out_as_an_event() {
             subtitle: String::new(),
             body: "b".into(),
             url: "https://a.test/".into(),
+            at: std::time::SystemTime::now(),
+            connection: None,
+            exchange: None,
         });
         Ok(ScriptResult::default())
-    });
-    let (_server, rig) = scripted(vec![("notes", program)]).await;
+    })
+}
+
+#[tokio::test]
+async fn a_script_notification_goes_out_as_an_event() {
+    let (_server, rig) = scripted(vec![("notes", posts_a_notice())]).await;
     rig.config(config(json!([
         r"N = type=http-request,pattern=^https://example\.test/,script-path=notes.js",
+        r"R = type=http-response,pattern=^https://example\.test/,script-path=notes.js",
     ])));
     let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
         .await
         .unwrap();
     client.get("/p").await;
+    rig.mitm.set_capture(true);
+    client.get("/q").await;
     let notices = rig.notices.taken();
-    assert_eq!(notices.len(), 1);
     assert_eq!(
-        (notices[0].script.as_str(), notices[0].url.as_str()),
-        ("N", "https://a.test/")
+        notices
+            .iter()
+            .map(|notice| (notice.script.as_str(), notice.url.as_str()))
+            .collect::<Vec<_>>(),
+        [("N", "https://a.test/"), ("R", "https://a.test/")].repeat(2)
+    );
+    let captured = rig.mitm.exchanges("conn-1").exchanges;
+    let exchange = Some(captured[0].id);
+    assert_eq!(
+        notices
+            .iter()
+            .map(|notice| (notice.connection, notice.exchange))
+            .collect::<Vec<_>>(),
+        [
+            (Some(1), None),
+            (Some(1), None),
+            (Some(1), exchange),
+            (Some(1), exchange)
+        ],
+        "a notice names the connection, and the exchange while capture is on"
+    );
+}
+
+#[tokio::test]
+async fn a_notice_on_a_request_bound_elsewhere_names_no_connection_until_it_is_sent() {
+    let (_server, rig) = scripted(vec![("notes", posts_a_notice())]).await;
+    let errors = rig.config(json!({
+        "enable": true,
+        "hostname": ["example.test"],
+        "skip-server-cert-verify": true,
+        "url-rewrite": [r"^https://example\.test/away https://other.test/away"],
+        "script": [
+            r"N = type=http-request,pattern=^https://other\.test/,script-path=notes.js",
+            r"R = type=http-response,pattern=^https://other\.test/,script-path=notes.js",
+        ],
+    }));
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+    client.get("/away").await;
+    let notices = rig.notices.taken();
+    let named: Vec<_> = notices
+        .iter()
+        .map(|notice| (notice.script.as_str(), notice.connection))
+        .collect();
+    assert_eq!(named.len(), 2, "{named:?}");
+    assert_eq!(named[0], ("N", None));
+    assert!(
+        named[1].0 == "R" && named[1].1.is_some_and(|seq| seq != 1),
+        "the response names the connection to other.test: {named:?}"
     );
 }

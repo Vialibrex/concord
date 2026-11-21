@@ -486,6 +486,18 @@ pub enum CoreEvent {
         /// What opening it opens: the post's `url`, `open-url` or `openUrl`.
         #[serde(default, skip_serializing_if = "String::is_empty")]
         url: String,
+        /// Unix milliseconds when the script posted it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<i64>,
+        /// The `connection.watch` id of the upstream connection the request went out on, or for
+        /// a request not yet sent to the server its client asked for, the one opened for it.
+        /// Absent for a `rule`, `dns` or cron script, and for a request not yet sent that goes
+        /// to another server or is routed on its own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connection: Option<u64>,
+        /// The `mitm.exchanges` id of the request, while capture is on.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exchange: Option<i64>,
     },
     /// Sent only to a watch that asked for `state`.
     StateChanged {

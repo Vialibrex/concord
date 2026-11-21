@@ -185,6 +185,9 @@ async fn a_notification_carries_the_url_each_app_names_it_by() {
             subtitle: "s".into(),
             body: "b".into(),
             url: "https://a.test/1".into(),
+            at: posted[0].at,
+            connection: None,
+            exchange: None,
         }
     );
     assert_eq!(

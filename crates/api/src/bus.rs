@@ -468,6 +468,9 @@ impl EventSink for EventBus {
                     subtitle: notice.subtitle,
                     body: notice.body,
                     url: notice.url,
+                    at: Some(convert::unix_millis(notice.at)),
+                    connection: notice.connection,
+                    exchange: notice.exchange,
                 });
             }
         }

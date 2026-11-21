@@ -9,7 +9,7 @@ use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use concord_common::intercept::{ConnInterceptor, InterceptFlow, Offer, UpstreamDialer};
 use concord_common::sync::lock;
-use concord_common::{BoxStream, CoreEvent, EventSink, PeekedStream};
+use concord_common::{BoxStream, CoreEvent, EventSink, PeekedStream, ScriptNotification};
 use concord_tls::{ClientConfig, TlsError, TrustStore};
 use rustls::AlertDescription;
 use tokio::sync::Semaphore;
@@ -313,8 +313,11 @@ impl Core {
         invocation.memory_limit = self.config.limits.script_memory;
         invocation.dial = dial;
         let events = self.shared.events.clone();
-        invocation.notify = Some(Arc::new(move |notice| {
+        let (connection, exchange) = (invocation.connection, invocation.exchange);
+        invocation.notify = Some(Arc::new(move |mut notice: ScriptNotification| {
             if events.enabled() {
+                notice.connection = connection;
+                notice.exchange = exchange;
                 events.publish(CoreEvent::ScriptNotification(notice));
             }
         }));

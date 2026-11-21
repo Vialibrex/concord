@@ -219,6 +219,10 @@ pub struct ScriptNotification {
     pub body: String,
     /// What opening it opens; empty when the script gave nothing.
     pub url: String,
+    pub at: SystemTime,
+    /// The `connection.watch` id of the upstream connection the script's exchange went out on.
+    pub connection: Option<u64>,
+    pub exchange: Option<i64>,
 }
 
 #[derive(Clone, Debug)]

@@ -419,7 +419,7 @@ mod tests {
 
     /// Sets how long a finished exchange took, which the store reads off the clock.
     fn took(cap: &Cap, millis: i64) {
-        lock(&cap.0.as_ref().unwrap().record)
+        lock(&cap.capture.as_ref().unwrap().record)
             .exchange
             .summary
             .duration = millis;

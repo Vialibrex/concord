@@ -339,11 +339,11 @@ impl CaptureStore {
         request_header: HeaderList,
     ) -> Cap {
         if !self.is_on() {
-            return Cap(None);
+            return Cap::default();
         }
         let mut inner = lock(&self.inner);
         if !self.is_on() {
-            return Cap(None);
+            return Cap::default();
         }
         inner.last_id += 1;
         inner.version += 1;
@@ -403,7 +403,10 @@ impl CaptureStore {
         inner.by_id.insert(id, capture.clone());
         inner.bytes += size;
         inner.evict();
-        Cap(Some(capture))
+        Cap {
+            capture: Some(capture),
+            sent_on: Arc::default(),
+        }
     }
 
     fn grow(&self, capture: &Capture, delta: i64) {
@@ -590,15 +593,28 @@ fn millis(since: Instant) -> i64 {
 
 /// A capture that may not exist: every method does nothing while capture is off.
 #[derive(Clone, Default)]
-pub struct Cap(Option<Arc<Capture>>);
+pub struct Cap {
+    capture: Option<Arc<Capture>>,
+    /// Kept with capture off too, for the scripts that run on the exchange.
+    sent_on: Arc<Mutex<Option<Arc<ConnTag>>>>,
+}
 
 impl Cap {
+    /// The id of the upstream connection the exchange last went out on.
+    pub fn connection(&self) -> Option<u64> {
+        lock(&self.sent_on).as_ref().map(|conn| conn.seq)
+    }
+
+    pub fn exchange(&self) -> Option<i64> {
+        self.capture.as_ref().map(|c| c.id)
+    }
+
     pub fn is_some(&self) -> bool {
-        self.0.is_some()
+        self.capture.is_some()
     }
 
     pub fn note(&self, kind: &str, phase: &str, detail: &str, module: Option<&str>) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             c.update(|e| {
                 e.actions.push(Action {
                     kind: kind.to_string(),
@@ -622,13 +638,13 @@ impl Cap {
     }
 
     pub fn set_request_length(&self, length: i64) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             lock(&c.record).request_body.length = length;
         }
     }
 
     pub fn sent(&self, url: &str, header: HeaderList) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             let url = url.to_string();
             c.update(|e| {
                 if url != e.summary.url && e.original_url.is_empty() {
@@ -643,7 +659,7 @@ impl Cap {
     }
 
     pub fn routed(&self, chain: &[Arc<str>], rule: Option<&RuleLabel>) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             let note = RouteNote {
                 rule: rule.map_or_else(String::new, |rule| rule.name.to_string()),
                 rule_payload: rule.map_or_else(String::new, |rule| rule.payload.to_string()),
@@ -654,7 +670,7 @@ impl Cap {
     }
 
     pub fn responded(&self, status: u16, header: HeaderList) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             let ttfb = millis(c.started);
             if let Some(length) = header
                 .get("Content-Length")
@@ -678,7 +694,7 @@ impl Cap {
     }
 
     pub fn fail(&self, error: &str) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             c.update(|e| {
                 if e.summary.error.is_empty() {
                     e.summary.error = error.to_string();
@@ -688,7 +704,7 @@ impl Cap {
     }
 
     pub fn finish(&self) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             c.update(|e| {
                 e.summary.pending = false;
                 e.summary.duration = millis(c.started);
@@ -697,25 +713,25 @@ impl Cap {
     }
 
     pub fn add_request_size(&self, bytes: usize) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             c.request_size.fetch_add(bytes as i64, Ordering::Relaxed);
         }
     }
 
     pub fn add_response_size(&self, bytes: usize) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             c.response_size.fetch_add(bytes as i64, Ordering::Relaxed);
         }
     }
 
     pub fn keep_request(&self, data: &[u8]) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             c.keep(false, data);
         }
     }
 
     pub fn keep_response(&self, data: &[u8]) {
-        if let Some(c) = &self.0 {
+        if let Some(c) = &self.capture {
             c.keep(true, data);
         }
     }
@@ -723,7 +739,10 @@ impl Cap {
     /// Files the exchange under the upstream connection it went out on; HTTP/2
     /// may retry it on another.
     pub fn attach(&self, connection: Option<&Arc<ConnTag>>) {
-        let (Some(c), Some(connection)) = (&self.0, connection) else {
+        if let Some(connection) = connection {
+            *lock(&self.sent_on) = Some(connection.clone());
+        }
+        let (Some(c), Some(connection)) = (&self.capture, connection) else {
             return;
         };
         let mut inner = lock(&c.store.inner);
@@ -747,12 +766,14 @@ impl Cap {
 
     #[cfg(test)]
     pub(crate) fn id(&self) -> Option<i64> {
-        self.0.as_ref().map(|c| lock(&c.record).exchange.summary.id)
+        self.capture
+            .as_ref()
+            .map(|c| lock(&c.record).exchange.summary.id)
     }
 
     #[cfg(test)]
     pub(crate) fn held_bytes(&self) -> i64 {
-        self.0
+        self.capture
             .as_ref()
             .map_or(0, |c| c.size.load(Ordering::Relaxed))
     }

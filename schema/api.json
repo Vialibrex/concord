@@ -4225,6 +4225,31 @@
             "url": {
               "type": "string",
               "description": "What opening it opens: the post's `url`, `open-url` or `openUrl`."
+            },
+            "at": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "description": "Unix milliseconds when the script posted it."
+            },
+            "connection": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint64",
+              "minimum": 0,
+              "description": "The `connection.watch` id of the upstream connection the request went out on, or for\na request not yet sent to the server its client asked for, the one opened for it.\nAbsent for a `rule`, `dns` or cron script, and for a request not yet sent that goes\nto another server or is routed on its own."
+            },
+            "exchange": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64",
+              "description": "The `mitm.exchanges` id of the request, while capture is on."
             }
           },
           "required": [

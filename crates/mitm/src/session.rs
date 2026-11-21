@@ -141,6 +141,8 @@ pub(crate) struct Session {
     key_locks: Mutex<HashMap<PoolKey, Arc<tokio::sync::Mutex<()>>>>,
     ready: Mutex<Option<Ready>>,
     held: Mutex<Option<Arc<dyn HeldConn>>>,
+    /// The upstream connection `connect` opened, which names a request not yet sent.
+    opened: Mutex<Option<Arc<ConnTag>>>,
     /// The rules may route this session's requests apart, by their URL or User-Agent.
     per_request: AtomicBool,
     /// The h2 streams, upstream drivers and upgrades of this client connection. They end when
@@ -166,6 +168,7 @@ impl Session {
             key_locks: Mutex::default(),
             ready: Mutex::new(None),
             held: Mutex::new(None),
+            opened: Mutex::new(None),
             per_request: AtomicBool::new(per_request),
             tasks,
             ended: ended.clone(),
@@ -230,6 +233,7 @@ impl Session {
                 .clone()
                 .or_else(|| upstream.held.as_ref().map(|held| held.conn().clone()));
             *lock(&self.held) = upstream.held;
+            lock(&self.opened).clone_from(&conn);
             let tls = self
                 .tls_connect(
                     upstream.stream,
@@ -257,6 +261,17 @@ impl Session {
             self.release();
         }
         result
+    }
+
+    /// The connection `connect` opened, when a request to `host` and `port` would go out on it.
+    pub(crate) fn opened_for(&self, host: &str, port: u16) -> Option<u64> {
+        if self.per_request.load(Ordering::Relaxed)
+            || port != self.flow.port
+            || !host.eq_ignore_ascii_case(&self.host)
+        {
+            return None;
+        }
+        lock(&self.opened).as_ref().map(|conn| conn.seq)
     }
 
     /// Lists the connection `connect` opened as one requests are decrypted on.

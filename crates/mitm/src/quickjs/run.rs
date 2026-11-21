@@ -400,6 +400,9 @@ fn install(ctx: &Ctx<'_>, state: &Rc<State>, setup: &Rc<Setup>) -> rquickjs::Res
                         subtitle,
                         body,
                         url,
+                        at: std::time::SystemTime::now(),
+                        connection: None,
+                        exchange: None,
                     });
                 }
             },

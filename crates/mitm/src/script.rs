@@ -98,6 +98,10 @@ pub struct ScriptInvocation {
     pub rule: Option<serde_json::Value>,
     /// A `dns` script's `$domain`.
     pub domain: Option<String>,
+    /// What a notification it posts names: the `connection.watch` id of the upstream
+    /// connection, and the captured exchange.
+    pub connection: Option<u64>,
+    pub exchange: Option<i64>,
 }
 
 impl ScriptInvocation {
@@ -121,6 +125,8 @@ impl ScriptInvocation {
             notify: None,
             rule: None,
             domain: None,
+            connection: None,
+            exchange: None,
         }
     }
 }

@@ -72,10 +72,16 @@ impl Session {
         }
     }
 
-    fn base_invocation(self: &Arc<Self>) -> ScriptInvocation {
-        ScriptInvocation::base(Arc::new(SessionDial {
+    fn base_invocation(self: &Arc<Self>, target: &Target) -> ScriptInvocation {
+        let mut invocation = ScriptInvocation::base(Arc::new(SessionDial {
             session: self.clone(),
-        }))
+        }));
+        invocation.connection = target
+            .cap
+            .connection()
+            .or_else(|| self.opened_for(&target.url.host, target.url.port));
+        invocation.exchange = target.cap.exchange();
+        invocation
     }
 
     pub(crate) async fn run_request_script(
@@ -107,7 +113,7 @@ impl Session {
             request.body = non_empty(&read.data);
             buffered = Some(read.trailers);
         }
-        let mut invocation = self.base_invocation();
+        let mut invocation = self.base_invocation(target);
         invocation.request = Some(request);
         let Some(result) = self.run_script(script, &address, invocation).await else {
             return;
@@ -215,7 +221,7 @@ impl Session {
                 .as_ref()
                 .and_then(|read| read.trailers.as_ref().map(to_list)),
         };
-        let mut invocation = self.base_invocation();
+        let mut invocation = self.base_invocation(target);
         invocation.request = Some(request);
         invocation.response = Some(response);
         let Some(result) = self.run_script(script, &address, invocation).await else {
