@@ -60,7 +60,7 @@ pub use meta::{
 pub use options::{CoreOptions, FindProcessMode, LogLevel, TunnelMode};
 
 #[cfg(feature = "io")]
-pub use conn::{ConnMeta, ConnRecord};
+pub use conn::{ConnFailure, ConnMeta, ConnRecord, FailureKind};
 #[cfg(feature = "io")]
 pub use error::{CoreError, io_error, no_retry};
 #[cfg(feature = "io")]

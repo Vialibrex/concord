@@ -147,6 +147,7 @@ pub(super) async fn associate(
                 state.source_detail(),
                 state.remote_text()
             );
+            inner.table.failed(|| failed_record(state, decision, &err));
             Err(err)
         }
     }

@@ -1,11 +1,13 @@
+use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use tokio_util::sync::CancellationToken;
 
 use crate::addr::{Host, Network};
+use crate::error::CoreError;
 use crate::meta::{DnsMode, InboundInfo};
 
 #[derive(Clone, Debug)]
@@ -53,7 +55,66 @@ pub struct ConnRecord {
     /// Decided after the dial: a held connection is marked as it is listed.
     pub mitm: AtomicBool,
     pub mitm_refused: AtomicBool,
+    /// Set on a connection listed only to report that its dial failed.
+    pub failure: OnceLock<ConnFailure>,
     closed: AtomicBool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnFailure {
+    pub kind: FailureKind,
+    pub message: String,
+}
+
+impl ConnFailure {
+    pub fn of(err: &io::Error) -> Self {
+        ConnFailure {
+            kind: FailureKind::of(err),
+            message: err.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailureKind {
+    Timeout,
+    Refused,
+    Unreachable,
+    /// The name had no address the dial could use.
+    Dns,
+    /// The path to the target was open but the exchange over it failed, as when a proxy
+    /// server closes, resets or answers with something its protocol does not allow.
+    Handshake,
+    Other,
+}
+
+impl FailureKind {
+    pub fn of(err: &io::Error) -> Self {
+        match CoreError::of(err) {
+            Some(CoreError::IpNotFound(_)) => return FailureKind::Dns,
+            Some(CoreError::Ipv6Disabled) => return FailureKind::Unreachable,
+            Some(CoreError::Rejected(_) | CoreError::Loopback(_)) => return FailureKind::Refused,
+            Some(_) => return FailureKind::Other,
+            None => {}
+        }
+        match err.kind() {
+            io::ErrorKind::TimedOut => FailureKind::Timeout,
+            io::ErrorKind::ConnectionRefused => FailureKind::Refused,
+            io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkUnreachable
+            | io::ErrorKind::NetworkDown
+            | io::ErrorKind::AddrNotAvailable => FailureKind::Unreachable,
+            io::ErrorKind::InvalidData
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::WriteZero
+            | io::ErrorKind::PermissionDenied => FailureKind::Handshake,
+            _ => FailureKind::Other,
+        }
+    }
 }
 
 impl ConnRecord {
@@ -82,6 +143,7 @@ impl ConnRecord {
             cancel: CancellationToken::new(),
             mitm: AtomicBool::new(false),
             mitm_refused: AtomicBool::new(false),
+            failure: OnceLock::new(),
             closed: AtomicBool::new(false),
         }
     }
@@ -93,5 +155,59 @@ impl ConnRecord {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_dial_error_falls_into_its_failure_kind() {
+        for (err, kind) in [
+            (
+                io::Error::from(io::ErrorKind::TimedOut),
+                FailureKind::Timeout,
+            ),
+            (
+                io::Error::from(io::ErrorKind::ConnectionRefused),
+                FailureKind::Refused,
+            ),
+            (
+                io::Error::from(io::ErrorKind::HostUnreachable),
+                FailureKind::Unreachable,
+            ),
+            (
+                io::Error::from(io::ErrorKind::NetworkUnreachable),
+                FailureKind::Unreachable,
+            ),
+            (
+                CoreError::IpNotFound("example.test".into()).into(),
+                FailureKind::Dns,
+            ),
+            (CoreError::Ipv6Disabled.into(), FailureKind::Unreachable),
+            (
+                CoreError::Loopback("127.0.0.1:80".into()).into(),
+                FailureKind::Refused,
+            ),
+            (CoreError::DialerLoop("a".into()).into(), FailureKind::Other),
+            (
+                io::Error::from(io::ErrorKind::UnexpectedEof),
+                FailureKind::Handshake,
+            ),
+            (
+                io::Error::new(io::ErrorKind::InvalidData, "bad certificate"),
+                FailureKind::Handshake,
+            ),
+            (
+                io::Error::from(io::ErrorKind::ConnectionReset),
+                FailureKind::Handshake,
+            ),
+            (io::Error::other("something else"), FailureKind::Other),
+        ] {
+            assert_eq!(FailureKind::of(&err), kind, "{err}");
+        }
+        let failure = ConnFailure::of(&CoreError::IpNotFound("example.test".into()).into());
+        assert_eq!(failure.message, "no IP found for example.test");
     }
 }

@@ -3403,6 +3403,17 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConnectionFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present only on a connection whose dial failed. It is never in `connection.list`;\n`connection.watch` sends it in `opened` and `closed` of the same delta, with zero\ntraffic. A route that could not be decided is not reported."
         }
       },
       "required": [
@@ -3425,6 +3436,34 @@
         "tcp",
         "udp"
       ]
+    },
+    "ConnectionFailure": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/ConnectionFailureKind"
+        },
+        "message": {
+          "type": "string",
+          "description": "The error as the core logs it."
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ]
+    },
+    "ConnectionFailureKind": {
+      "type": "string",
+      "enum": [
+        "timeout",
+        "refused",
+        "unreachable",
+        "dns",
+        "handshake",
+        "other"
+      ],
+      "description": "Why a dial failed. `dns`: the name had no usable address. `handshake`: the path\nto the target opened but the exchange over it failed, as when a proxy server\ncloses, resets or breaks its protocol. `other` takes the rest, a resolver's own\nerror among them."
     },
     "ConnectionDelta": {
       "type": "object",

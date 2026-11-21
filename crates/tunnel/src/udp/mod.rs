@@ -36,7 +36,7 @@ use crate::route::{Decision, route};
 use crate::runtime::{Inner, Runtime};
 use crate::sniff::{QUIC_WAIT, QuicSniffer, UdpSniff};
 use crate::table::{Registration, Tracked};
-use crate::tcp::{new_record, server_host};
+use crate::tcp::{failed_record, new_record, server_host};
 
 mod batch;
 mod nat;

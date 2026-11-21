@@ -8,8 +8,8 @@ use concord_common::packet::{PacketBuf, PacketSession};
 use concord_common::stream::PeekedStream;
 use concord_common::stream_buffer::{ReadBufferOptions, StreamBuffer};
 use concord_common::{
-    Address, BoxRead, BoxStream, BoxWrite, ConnRecord, DialCx, FlowMeta, InboundInfo, InboundKind,
-    Initiator, Network, Stream,
+    Address, BoxRead, BoxStream, BoxWrite, ConnFailure, ConnRecord, DialCx, FlowMeta, InboundInfo,
+    InboundKind, Initiator, Network, Stream,
 };
 use concord_group::Touch;
 use concord_net::{Meter, relay};
@@ -142,7 +142,7 @@ async fn set_up(
         }
     }
 
-    let (remote, decision) = dial_reading_first_bytes(
+    let dialed = dial_reading_first_bytes(
         inner,
         runtime,
         &mut flow,
@@ -150,8 +150,20 @@ async fn set_up(
         &mut head,
         accepted + FIRST_BYTES_WINDOW,
     )
-    .await
-    .ok()?;
+    .await;
+    let (remote, decision) = match dialed {
+        Ok(dialed) => dialed,
+        Err(FailedDial {
+            error,
+            decision: Some(decision),
+        }) => {
+            inner
+                .table
+                .failed(|| failed_record(&flow, &decision, &error));
+            return None;
+        }
+        Err(_) => return None,
+    };
     Some(SetUp {
         flow,
         stream,
@@ -169,10 +181,10 @@ async fn dial_reading_first_bytes(
     stream: &mut BoxStream,
     head: &mut Vec<u8>,
     until: Instant,
-) -> io::Result<(BoxStream, Decision)> {
+) -> Result<(BoxStream, Decision), FailedDial> {
     let dialing = dial_traced(inner, runtime, flow);
     if !head.is_empty() {
-        return dialing.await.map_err(|failed| failed.error);
+        return dialing.await;
     }
     let mut dialing = pin!(dialing);
     let mut reading = pin!(read_first_bytes(stream, head, until));
@@ -180,7 +192,7 @@ async fn dial_reading_first_bytes(
     let dialed = loop {
         tokio::select! {
             biased;
-            dialed = &mut dialing => break dialed.map_err(|failed| failed.error)?,
+            dialed = &mut dialing => break dialed?,
             () = &mut reading, if !read => read = true,
         }
     };
@@ -313,6 +325,17 @@ pub(crate) fn record_of(
         None => server_host(&info.addr),
     };
     new_record(flow, decision, destination)
+}
+
+/// A connection that never carried traffic, listed to say why its dial failed.
+pub(crate) fn failed_record(
+    flow: &FlowState,
+    decision: &Decision,
+    error: &io::Error,
+) -> Arc<ConnRecord> {
+    let record = new_record(flow, decision, server_host(&decision.leaf.info().addr));
+    let _ = record.failure.set(ConnFailure::of(error));
+    record
 }
 
 pub(crate) fn new_record(

@@ -52,6 +52,7 @@ These are host tests. Android was exercised by hand in an embedding app on an em
 | 21 | `log`, `subscription-info` and `update-at` keys | verified | `concord-api::behaviour::a_provider_has_the_subscription_numbers_and_an_update_time_in_milliseconds`; log entries are `{level, time, text}` in `schema/api.json` |
 | 22 | A `delay` event for every URL test, naming the URL used | partial | `concord-api::behaviour::a_delay_test_names_its_url_and_a_watcher_that_asked_sees_it`; `concord-group::delays::a_delay_is_the_virtual_time_the_node_took_and_goes_out_as_an_event`. Health-check events are not asserted separately from manual tests |
 | 23 | `requestTraffic` is cumulative, only changed requests, five more cycles after close | verified | `concord-tunnel::table::traffic_is_reported_once_per_change_and_stops_when_idle`, `a_closed_connection_gives_up_after_its_retries_when_the_queue_stays_full` |
+| 57 | A TCP or UDP dial that fails after its route was decided reaches `connection.watch` as a connection opened and closed in one delta with no traffic and a `failure` of `timeout`, `refused`, `unreachable`, `dns`, `handshake` or `other` with the error's text; it is never listed as open, nothing is built while nobody watches, and a route that could not be decided is not reported | verified | `concord-api::behaviour::a_failed_dial_is_watched_as_a_connection_that_opens_and_closes_with_why`, `concord-tunnel::table::a_failed_dial_is_heard_of_as_opened_and_closed_but_never_listed`, `concord-common::conn::a_dial_error_falls_into_its_failure_kind` |
 
 ## Event queue
 

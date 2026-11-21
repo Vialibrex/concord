@@ -96,6 +96,17 @@ dto! {
         pub rule_payload: String,
         pub upload: u64,
         pub download: u64,
+        /// Present only on a connection whose dial failed. It is never in `connection.list`;
+        /// `connection.watch` sends it in `opened` and `closed` of the same delta, with zero
+        /// traffic. A route that could not be decided is not reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub failure: Option<ConnectionFailure>,
+    }
+
+    pub struct ConnectionFailure {
+        pub kind: ConnectionFailureKind,
+        /// The error as the core logs it.
+        pub message: String,
     }
 
     pub struct ConnectionSnapshot {
@@ -270,6 +281,21 @@ dto! {
         #[serde(default)]
         pub interface_changed: bool,
     }
+}
+
+/// Why a dial failed. `dns`: the name had no usable address. `handshake`: the path
+/// to the target opened but the exchange over it failed, as when a proxy server
+/// closes, resets or breaks its protocol. `other` takes the rest, a resolver's own
+/// error among them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionFailureKind {
+    Timeout,
+    Refused,
+    Unreachable,
+    Dns,
+    Handshake,
+    Other,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

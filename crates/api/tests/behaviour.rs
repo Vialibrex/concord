@@ -1321,6 +1321,61 @@ async fn a_watch_with_counters_hears_none_for_a_connection_after_its_close() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_dial_is_watched_as_a_connection_that_opens_and_closes_with_why() {
+    let rig = Rig::new().await;
+    let proxy = free_port();
+    rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let mut watch = rig
+        .control
+        .connection_watch(ConnectionWatchParams::default())
+        .await
+        .unwrap();
+
+    let nobody = free_port();
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+        .await
+        .unwrap();
+    stream
+        .write_all(format!("CONNECT 127.0.0.1:{nobody} HTTP/1.1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let delta = eventually(&mut watch.events, |delta| !delta.opened.is_empty()).await;
+    let failed = &delta.opened[0];
+    assert_eq!(failed.destination_port, nobody);
+    assert_eq!(failed.chains, ["DIRECT"]);
+    let failure = failed.failure.as_ref().expect("a failed dial says why");
+    assert_eq!(failure.kind, ConnectionFailureKind::Refused, "{failure:?}");
+    assert!(!failure.message.is_empty());
+    assert_eq!(
+        delta.closed,
+        [failed.id],
+        "it closes in the delta it opens in"
+    );
+    let totals = delta
+        .counters
+        .iter()
+        .find(|counter| counter.id == failed.id);
+    assert_eq!(
+        totals.map(|counter| (counter.upload, counter.download)),
+        Some((0, 0))
+    );
+
+    let later = rig
+        .control
+        .connection_watch(ConnectionWatchParams::default())
+        .await
+        .unwrap();
+    assert!(
+        later.snapshot.as_ref().unwrap().connections.is_empty(),
+        "a failed dial is never listed as open"
+    );
+    drop((watch, later, stream));
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_delay_run_reports_each_proxy_then_done_and_stops_when_dropped() {
     let rig = Rig::new().await;
     rig.write_config("rules:\n  - MATCH,DIRECT\n");

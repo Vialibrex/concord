@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use concord_common::{
-    Change, ConnRecord, DnsRecord, GeneralChange as EngineChange, LogLevel as EngineLevel, Origin,
-    StateChange,
+    Change, ConnFailure, ConnRecord, DnsRecord, FailureKind, GeneralChange as EngineChange,
+    LogLevel as EngineLevel, Origin, StateChange,
 };
 use concord_engine::{
     DelayRecord as EngineDelay, Failure, GeneralView, GroupView, NodeStateView, NodeView,
@@ -12,10 +12,11 @@ use concord_engine::{
 };
 use concord_proto::ApiError;
 use concord_proto::types::{
-    Capabilities, ChangeOrigin, ConnectionInfo, CoreEvent, DelayRecord, DnsEntry, DnsQueryResult,
-    DnsQuestion, DnsRecord as WireRecord, FaultReason, FaultService, Features, GeneralChange,
-    GeneralState, GroupInfo, LogLevel, Network, NodeInfo, ProviderInfo, ProviderKind, ProxyState,
-    ServiceFault, StateChangeKind, SubscriptionInfo, TunState, UrlHealth, Warning,
+    Capabilities, ChangeOrigin, ConnectionFailure, ConnectionFailureKind, ConnectionInfo,
+    CoreEvent, DelayRecord, DnsEntry, DnsQueryResult, DnsQuestion, DnsRecord as WireRecord,
+    FaultReason, FaultService, Features, GeneralChange, GeneralState, GroupInfo, LogLevel, Network,
+    NodeInfo, ProviderInfo, ProviderKind, ProxyState, ServiceFault, StateChangeKind,
+    SubscriptionInfo, TunState, UrlHealth, Warning,
 };
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -146,6 +147,21 @@ pub fn connection_info(record: &ConnRecord) -> ConnectionInfo {
         rule_payload: record.rule_payload.to_string(),
         upload: record.upload.load(Ordering::Relaxed),
         download: record.download.load(Ordering::Relaxed),
+        failure: record.failure.get().map(connection_failure),
+    }
+}
+
+fn connection_failure(failure: &ConnFailure) -> ConnectionFailure {
+    ConnectionFailure {
+        kind: match failure.kind {
+            FailureKind::Timeout => ConnectionFailureKind::Timeout,
+            FailureKind::Refused => ConnectionFailureKind::Refused,
+            FailureKind::Unreachable => ConnectionFailureKind::Unreachable,
+            FailureKind::Dns => ConnectionFailureKind::Dns,
+            FailureKind::Handshake => ConnectionFailureKind::Handshake,
+            FailureKind::Other => ConnectionFailureKind::Other,
+        },
+        message: failure.message.clone(),
     }
 }
 

@@ -280,6 +280,18 @@ impl ConnTable {
         }
     }
 
+    /// Lists a connection whose dial failed as opened and closed at once, to watchers only:
+    /// it never enters `connection.list`, and nothing is built while no one watches.
+    pub fn failed(&self, record: impl FnOnce() -> Arc<ConnRecord>) {
+        if !self.events.enabled() {
+            return;
+        }
+        let record = record();
+        record.close();
+        self.events.publish(CoreEvent::Request(record.clone()));
+        self.events.closed(&record);
+    }
+
     pub fn is_open(&self, id: &str) -> bool {
         self.open.contains_key(id)
     }
@@ -450,7 +462,7 @@ mod tests {
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::AtomicUsize;
 
-    use concord_common::{Address, ConnMeta, Host, InboundInfo, InboundKind, Network};
+    use concord_common::{Address, ConnMeta, Host, InboundInfo, InboundKind, Network, NullSink};
 
     use super::*;
 
@@ -667,6 +679,22 @@ mod tests {
         table.list(&tracked);
         assert_eq!(*lock(&sink.closed), [(tracked.record.seq, 6, 7)]);
         assert!(table.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_dial_is_heard_of_as_opened_and_closed_but_never_listed() {
+        let sink = Arc::new(Sink::default());
+        let table = ConnTable::new(sink.clone(), Default::default());
+        let record = record(false);
+        let seq = record.seq;
+        table.failed(|| record.clone());
+        assert_eq!(sink.requests.load(Ordering::Relaxed), 1);
+        assert_eq!(*lock(&sink.closed), [(seq, 0, 0)]);
+        assert!(record.is_closed());
+        assert!(table.is_empty() && table.id_of(seq).is_none());
+
+        let unheard = ConnTable::new(Arc::new(NullSink), Default::default());
+        unheard.failed(|| panic!("nothing is built while no one listens"));
     }
 
     #[tokio::test]
