@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -48,6 +49,8 @@ pub struct ServiceItem {
     pub status: &'static str,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub region: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub ip: String,
     #[serde(skip_serializing_if = "is_zero")]
     pub delay: i64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -385,6 +388,14 @@ pub fn trace_value(body: &str, key: &str) -> String {
     body.split('\n')
         .find_map(|line| line.strip_prefix(key)?.strip_prefix('='))
         .map(|rest| rest.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The `ip=` line of a Cloudflare trace, kept only when it is an address.
+pub fn trace_ip(body: &str) -> String {
+    trace_value(body, "ip")
+        .parse::<IpAddr>()
+        .map(|addr| addr.to_canonical().to_string())
         .unwrap_or_default()
 }
 

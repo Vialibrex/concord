@@ -208,19 +208,24 @@ async fn reachable_follows_the_status_code() {
 }
 
 #[tokio::test]
-async fn claude_reads_the_trace_location() {
-    for (body, status, region) in [
-        ("fl=1\nloc=JP\n", AVAILABLE, "JP"),
-        ("loc=cn\n", UNSUPPORTED_REGION, "CN"),
-        ("loc=HK", UNSUPPORTED_REGION, "HK"),
-        ("fl=1\n", FAILED, ""),
-        ("loc=T1\n", FAILED, ""),
+async fn claude_reads_the_trace_location_and_address() {
+    for (body, status, region, ip) in [
+        (
+            "fl=1\nip=198.51.100.9\nloc=JP\n",
+            AVAILABLE,
+            "JP",
+            "198.51.100.9",
+        ),
+        ("loc=cn\n", UNSUPPORTED_REGION, "CN", ""),
+        ("loc=HK", UNSUPPORTED_REGION, "HK", ""),
+        ("fl=1\nip=2001:db8::7\n", FAILED, "", "2001:db8::7"),
+        ("loc=T1\n", FAILED, "", ""),
     ] {
         let script = scripted(move |_| answers(200, body));
         let item = run(&script, |env| rules::claude(env)).await;
         assert_eq!(
-            (item.status, item.region.as_str()),
-            (status, region),
+            (item.status, item.region.as_str(), item.ip.as_str()),
+            (status, region, ip),
             "{body:?}"
         );
     }
@@ -257,11 +262,27 @@ async fn chatgpt_folds_ios_trace_and_web_into_one_entry() {
         url if url.contains("ios.chat") => {
             answers(403, "Request is not allowed. Please try again later.")
         }
-        url if url.contains("cdn-cgi/trace") => answers(200, "loc=jp\n"),
+        url if url.contains("cdn-cgi/trace") => answers(200, "ip=2001:db8::7\nloc=jp\n"),
         _ => answers(200, "{}"),
     });
     let item = run(&script, |env| rules::chatgpt(env)).await;
-    assert_eq!((item.status, item.region.as_str()), (AVAILABLE, "JP"));
+    assert_eq!(
+        (item.status, item.region.as_str(), item.ip.as_str()),
+        (AVAILABLE, "JP", "2001:db8::7")
+    );
+
+    let silent_trace = scripted(|request| match request.url.as_str() {
+        url if url.contains("ios.chat") => {
+            answers(403, "Request is not allowed. Please try again later.")
+        }
+        url if url.contains("cdn-cgi/trace") => fails(ProbeError::Timeout),
+        _ => answers(200, "{}"),
+    });
+    let item = run(&silent_trace, |env| rules::chatgpt(env)).await;
+    assert_eq!(
+        (item.status, item.region.as_str(), item.ip.as_str()),
+        (AVAILABLE, "", "")
+    );
 
     let blocked = scripted(|request| match request.url.as_str() {
         url if url.contains("ios.chat") => {

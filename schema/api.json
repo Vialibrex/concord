@@ -4587,6 +4587,10 @@
         "region": {
           "type": "string"
         },
+        "ip": {
+          "type": "string",
+          "description": "The address the service saw the check come from, which a node that sends\nthe service out another way does not share with its other traffic. Only\nchecks whose answer names it carry one."
+        },
         "delay": {
           "type": "integer",
           "format": "int64"

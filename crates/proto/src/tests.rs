@@ -243,3 +243,21 @@ fn stream_options_ride_along_with_the_stream_parameters() {
     assert_eq!(params.watch.credit, Some(2));
     assert_eq!(params.watch.max_batch_bytes, Some(1024));
 }
+
+#[test]
+fn a_service_item_carries_the_address_only_when_its_check_read_one() {
+    let engine_item = json!({
+        "name": "claude", "status": "available", "region": "US", "ip": "198.51.100.9",
+        "checked-at": 5, "core-epoch": 1, "route-version": 2,
+    });
+    let item: ServiceItem = serde_json::from_value(engine_item).unwrap();
+    assert_eq!(item.ip, "198.51.100.9");
+    assert_eq!(serde_json::to_value(&item).unwrap()["ip"], "198.51.100.9");
+
+    let without: ServiceItem = serde_json::from_value(json!({
+        "name": "google", "status": "available", "checkedAt": 5, "epoch": 1, "version": 2,
+    }))
+    .unwrap();
+    assert_eq!(without.ip, "");
+    assert!(serde_json::to_value(&without).unwrap().get("ip").is_none());
+}

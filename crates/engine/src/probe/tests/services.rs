@@ -11,7 +11,7 @@ use crate::probe::ctx::ProbeError;
 use crate::probe::fetch::ProbeResult;
 use crate::probe::services::{
     AVAILABLE, Checker, FAILED, RESTRICTED, ServiceItem, TIMEOUT, UNAVAILABLE, UNSUPPORTED_REGION,
-    item_from, status_from_code, trace_value,
+    item_from, status_from_code, trace_ip, trace_value,
 };
 use crate::probe::testing::FakeEnv;
 
@@ -434,10 +434,26 @@ fn trace_value_reads_a_key() {
 }
 
 #[test]
+fn trace_ip_keeps_only_an_address() {
+    for (body, want) in [
+        ("ip=203.0.113.7\n", "203.0.113.7"),
+        ("ip=::ffff:203.0.113.7\n", "203.0.113.7"),
+        ("ip=2001:db8::1\n", "2001:db8::1"),
+        ("ip=<html>blocked\n", ""),
+        ("ip=\nloc=US\n", ""),
+        ("loc=US\n", ""),
+        ("<html>ip=203.0.113.7</>\n", ""),
+    ] {
+        assert_eq!(trace_ip(body), want, "{body:?}");
+    }
+}
+
+#[test]
 fn an_item_serializes_like_the_go_one() {
     let full = ServiceItem {
         name: "claude".into(),
         region: "JP".into(),
+        ip: "198.51.100.9".into(),
         delay: 120,
         chains: vec!["node".into()],
         checked_at: 5,
@@ -448,7 +464,8 @@ fn an_item_serializes_like_the_go_one() {
     assert_eq!(
         serde_json::to_value(full).unwrap(),
         json!({
-            "name": "claude", "status": "available", "region": "JP", "delay": 120,
+            "name": "claude", "status": "available", "region": "JP", "ip": "198.51.100.9",
+            "delay": 120,
             "chains": ["node"], "checked-at": 5, "core-epoch": 1, "route-version": 2,
         })
     );

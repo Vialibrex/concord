@@ -55,6 +55,11 @@ dto! {
         pub status: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         pub region: String,
+        /// The address the service saw the check come from, which a node that sends
+        /// the service out another way does not share with its other traffic. Only
+        /// checks whose answer names it carry one.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        pub ip: String,
         #[serde(default, skip_serializing_if = "is_zero")]
         pub delay: i64,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

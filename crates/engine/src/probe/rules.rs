@@ -10,7 +10,7 @@ use super::region::{is_ascii_upper, normalize_region};
 use super::services::{
     AVAILABLE, BLOCKED, COMING_SOON, DISALLOWED_ISP, FAILED, HTML_MAX_BODY, ORIGINALS_ONLY,
     SMALL_MAX_BODY, ServiceEnv, ServiceItem, UNAVAILABLE, UNSUPPORTED_REGION, answered, item_from,
-    status_from_code, trace_value,
+    status_from_code, trace_ip, trace_value,
 };
 
 /// The public browser client token Disney+ hands to any web visitor; the device
@@ -92,6 +92,7 @@ pub async fn claude(env: &ServiceEnv<'_>) -> ServiceItem {
     let Some(result) = answered(&item, &result) else {
         return item;
     };
+    item.ip = trace_ip(&result.body);
     let region = normalize_region(&trace_value(&result.body, "loc"));
     if region.is_empty() {
         item.status = FAILED;
@@ -152,6 +153,7 @@ pub async fn chatgpt(env: &ServiceEnv<'_>) -> ServiceItem {
         .await;
     if let Some(trace) = answered(&item_from(trace.as_ref()), &trace) {
         item.region = normalize_region(&trace_value(&trace.body, "loc"));
+        item.ip = trace_ip(&trace.body);
     }
 
     let web = env
