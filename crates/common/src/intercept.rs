@@ -18,6 +18,7 @@ pub struct InterceptFlow {
     pub port: u16,
     /// The client flow's timing, which the connections dialed for it take as their own.
     pub timing: ConnTiming,
+    pub dns_queries: Vec<u64>,
 }
 
 impl InterceptFlow {
@@ -45,6 +46,7 @@ impl InterceptFlow {
             dst_ip,
             port,
             timing: self.timing.clone(),
+            dns_queries: Vec::new(),
         }
     }
 }

@@ -108,6 +108,13 @@ dto! {
         pub failure: Option<ConnectionFailure>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub timing: Option<ConnectionTiming>,
+        /// The `id`s, in no set order, of the `dns.watch` entries that gave out the destination's
+        /// address: every lookup the core made for it, for the rules and for a DIRECT dial (A and
+        /// AAAA, cache hits included), or the client's query that a redir-host address maps back
+        /// to. A fake-ip address, a `hosts` entry and a node's lookup of its own server have
+        /// none, and neither has a lookup made while nobody watched DNS.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub dns_queries: Vec<u64>,
     }
 
     /// When each step of setting the connection up happened, in microseconds after `accepted`.
@@ -217,6 +224,9 @@ dto! {
     }
 
     pub struct DnsEntry {
+        /// Counts up from 1 over the core process; a connection's `dnsQueries` names entries by it.
+        #[serde(default)]
+        pub id: u64,
         pub domain: String,
         #[serde(rename = "type")]
         pub query_type: String,

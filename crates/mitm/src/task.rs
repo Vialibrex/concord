@@ -62,6 +62,7 @@ pub(crate) fn task_flow(host: &str, port: u16) -> InterceptFlow {
         dst_ip,
         port,
         timing: ConnTiming::start(),
+        dns_queries: Vec::new(),
     }
 }
 

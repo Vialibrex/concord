@@ -538,6 +538,7 @@ pub(crate) fn flow_of(kind: InboundKind, dst: Address) -> InterceptFlow {
         dst_ip,
         port,
         timing: ConnTiming::start(),
+        dns_queries: Vec::new(),
     }
 }
 

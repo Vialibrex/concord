@@ -34,6 +34,7 @@ pub(crate) struct FlowState {
     /// Every address the rules' lookup gave, of which `dst_ip` is one.
     pub resolved: Vec<IpAddr>,
     pub timing: ConnTiming,
+    pub dns_queries: Vec<u64>,
 }
 
 /// `netip.ParseAddr`: an IPv6 literal may carry a `%zone`, which the address drops.
@@ -57,6 +58,7 @@ impl FlowState {
         state.dst_ip = flow.dst_ip;
         state.port = flow.port;
         state.timing = flow.timing.clone();
+        state.dns_queries = flow.dns_queries.clone();
         state
     }
 
@@ -69,6 +71,7 @@ impl FlowState {
             dst_ip: self.dst_ip,
             port: self.port,
             timing: self.timing.clone(),
+            dns_queries: self.dns_queries.clone(),
         }
     }
 
@@ -107,6 +110,15 @@ impl FlowState {
             http: None,
             resolved: Vec::new(),
             timing: ConnTiming::start(),
+            dns_queries: Vec::new(),
+        }
+    }
+
+    pub fn note_queries(&mut self, queries: impl IntoIterator<Item = u64>) {
+        for id in queries {
+            if !self.dns_queries.contains(&id) {
+                self.dns_queries.push(id);
+            }
         }
     }
 
@@ -259,7 +271,8 @@ impl FlowState {
 /// `preHandleMetadata`. An error means a fake-ip with no record behind it.
 pub(crate) fn pre_handle(flow: &mut FlowState, dns: &Resolver) -> Result<(), String> {
     if let (true, None, Some(ip)) = (dns.mapping_enabled(), &flow.host, flow.dst_ip) {
-        if let Some(host) = dns.find_host_by_ip(ip) {
+        if let Some((host, query)) = dns.find_answer_by_ip(ip) {
+            flow.note_queries(query);
             flow.dns_mode = Some(DnsMode::RedirHost);
             let is_fake = dns.is_fake_ip(ip);
             let (node, found) = if is_fake {

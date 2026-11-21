@@ -233,7 +233,10 @@ pub(super) async fn connect(
             tracing::warn!("[UDP] Parse metadata failed: {err}");
         })?;
 
-    let target = resolve_target(runtime, state, &decision).await?;
+    let (target, queries) =
+        concord_common::query_trail::traced(resolve_target(runtime, state, &decision)).await;
+    state.note_queries(queries);
+    let target = target?;
     let session = session_for(inner, runtime, state, &decision, &reply, &target).await?;
 
     if let (Some(origin), Some(ip)) = (id.dst.ip(), target.ip()) {

@@ -43,6 +43,7 @@ pub struct DelayResult {
 
 #[derive(Clone, Debug)]
 pub struct DnsRecord {
+    pub id: u64,
     pub domain: String,
     pub qtype: String,
     pub initiator: Initiator,

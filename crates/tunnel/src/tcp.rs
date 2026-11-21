@@ -5,6 +5,7 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use concord_common::packet::{PacketBuf, PacketSession};
+use concord_common::query_trail::traced;
 use concord_common::stream::PeekedStream;
 use concord_common::stream_buffer::{ReadBufferOptions, StreamBuffer};
 use concord_common::{
@@ -291,11 +292,15 @@ pub(crate) async fn dial_decided(
     }
 
     flow.timing.mark(ConnStep::DialStart);
-    let dialed = if decision.smart {
-        smart::dial(inner, runtime, flow, decision, &dst).await
-    } else {
-        dial_plain(inner, runtime, flow, decision, &dst).await
-    };
+    let (dialed, queries) = traced(async {
+        if decision.smart {
+            smart::dial(inner, runtime, flow, decision, &dst).await
+        } else {
+            dial_plain(inner, runtime, flow, decision, &dst).await
+        }
+    })
+    .await;
+    flow.note_queries(queries);
     if dialed.is_ok() {
         flow.timing.mark(ConnStep::DialEnd);
     }
@@ -403,6 +408,7 @@ pub(crate) fn new_record(
     );
     record.rule_index = decision.rule.as_ref().and_then(|rule| rule.index);
     record.timing = flow.timing.clone();
+    record.dns_queries = flow.dns_queries.clone().into();
     Arc::new(record)
 }
 

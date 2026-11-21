@@ -6,6 +6,7 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use concord_common::query_trail;
 use concord_common::sync::lock;
 use concord_common::{CoreError, EventSink, Initiator, LookupIps, Tasks};
 use futures_util::StreamExt;
@@ -222,7 +223,8 @@ impl Cache {
     }
 }
 
-type Outcome = Result<Arc<Message>, Arc<io::Error>>;
+/// The answer and the id of the record that told it, which every caller joining the flight notes.
+type Outcome = (Result<Arc<Message>, Arc<io::Error>>, Option<u64>);
 type Flight = watch::Receiver<Option<Outcome>>;
 
 pub(crate) struct GroupParts {
@@ -375,9 +377,16 @@ impl Group {
         joined(handle).await
     }
 
-    async fn run_query(&self, req: &Message, initiator: Initiator) -> io::Result<Message> {
+    async fn run_query(
+        &self,
+        req: &Message,
+        initiator: Initiator,
+    ) -> (io::Result<Message>, Option<u64>) {
         let Some(query) = msg::first_query(req).cloned() else {
-            return Err(io::Error::other("should have one question at least"));
+            return (
+                Err(io::Error::other("should have one question at least")),
+                None,
+            );
         };
         let trace = Trace::new(&query, initiator);
         let cx = Cx { initiator };
@@ -400,12 +409,12 @@ impl Group {
                 if batch.cache {
                     self.store(&query, &batch.msg, &batch.upstream);
                 }
-                trace.emit(self.events.as_ref(), Ok(&batch.msg), &batch.upstream, false);
-                Ok(batch.msg)
+                let id = trace.emit(self.events.as_ref(), Ok(&batch.msg), &batch.upstream, false);
+                (Ok(batch.msg), id)
             }
             Err(err) => {
-                trace.emit(self.events.as_ref(), Err(&err), "", false);
-                Err(err)
+                let id = trace.emit(self.events.as_ref(), Err(&err), "", false);
+                (Err(err), id)
             }
         }
     }
@@ -434,13 +443,13 @@ impl Group {
         let group = Arc::clone(self);
         let request = req.clone();
         dialer::spawn(&self.parts.tasks, async move {
-            let result = group.run_query(&request, initiator).await;
+            let (result, id) = group.run_query(&request, initiator).await;
             {
                 let mut flights = lock(&group.flights);
                 flights.remove(&key);
             }
             let failed = result.is_err();
-            tx.send_replace(Some(result.map(Arc::new).map_err(Arc::new)));
+            tx.send_replace(Some((result.map(Arc::new).map_err(Arc::new), id)));
             if failed && retry {
                 group.join_flight(&request, initiator, false);
             }
@@ -459,10 +468,13 @@ impl Group {
             .await
             .map_err(|_| io::Error::other("dns query was dropped"))?
             .clone();
-        match outcome {
-            Some(Ok(message)) => Ok((*message).clone()),
-            Some(Err(err)) => Err(io::Error::new(err.kind(), Shared(err))),
-            None => Err(io::Error::other("dns query was dropped")),
+        let Some((result, id)) = outcome else {
+            return Err(io::Error::other("dns query was dropped"));
+        };
+        note_for(initiator, id);
+        match result {
+            Ok(message) => Ok((*message).clone()),
+            Err(err) => Err(io::Error::new(err.kind(), Shared(err))),
         }
     }
 
@@ -479,7 +491,13 @@ impl Group {
             Age::Remaining(u32::try_from(expire.duration_since(now).as_secs()).unwrap_or(u32::MAX))
         };
         if self.events.enabled() {
-            Trace::new(query, initiator).emit(self.events.as_ref(), Ok(&cached), &upstream, true);
+            let id = Trace::new(query, initiator).emit(
+                self.events.as_ref(),
+                Ok(&cached),
+                &upstream,
+                true,
+            );
+            note_for(initiator, id);
         }
         Some((cached, age))
     }
@@ -578,9 +596,12 @@ impl Group {
     ) -> io::Result<LookupIps> {
         let group = Arc::clone(self);
         let name = host.to_string();
-        let v6_task = dialer::spawn(&self.parts.tasks, async move {
-            group.lookup_one(&name, RecordType::AAAA, initiator).await
-        });
+        let v6_task = dialer::spawn(
+            &self.parts.tasks,
+            query_trail::on_trail(async move {
+                group.lookup_one(&name, RecordType::AAAA, initiator).await
+            }),
+        );
         let v4 = self.lookup_one(host, RecordType::A, initiator).await;
         let wait = if self.parts.ipv6_timeout.is_zero() {
             DEFAULT_IPV6_WAIT
@@ -615,5 +636,14 @@ impl Group {
             self.lookup_v4(host, initiator).await?
         };
         Ok(found.v4.into_iter().chain(found.v6).collect())
+    }
+}
+
+/// A node's lookup of its own server is the node's, not the connection's.
+fn note_for(initiator: Initiator, id: Option<u64>) {
+    if let Some(id) = id
+        && initiator != Initiator::Proxy
+    {
+        query_trail::note_query(id);
     }
 }

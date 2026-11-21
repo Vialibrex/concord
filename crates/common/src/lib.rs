@@ -31,6 +31,8 @@ mod owned_tcp;
 #[cfg(feature = "io")]
 pub mod packet;
 #[cfg(feature = "io")]
+pub mod query_trail;
+#[cfg(feature = "io")]
 pub mod scripts;
 #[cfg(feature = "io")]
 pub mod stream;

@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use concord_common::query_trail::traced;
 use concord_common::scripts::RuleScriptRequest;
 use concord_common::{
     ConnStep, CoreError, FindProcessMode, Initiator, IpVersion, LookupIps, Network, Outbound,
@@ -418,8 +419,9 @@ async fn resolve_rule_ip(flow: &mut FlowState, runtime: &Runtime) {
     };
     flow.timing.mark(ConnStep::DnsStart);
     let lookup = runtime.dns_lookup(flow, &host, IpVersion::Dual, Initiator::Rule);
-    let looked_up = timeout(DNS_TIMEOUT, lookup).await;
+    let (looked_up, queries) = traced(timeout(DNS_TIMEOUT, lookup)).await;
     flow.timing.mark(ConnStep::DnsEnd);
+    flow.note_queries(queries);
     match looked_up {
         Ok(Ok(ips)) => {
             flow.dst_ip = pick_ip(&ips);

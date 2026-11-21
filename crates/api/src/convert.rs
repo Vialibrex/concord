@@ -81,6 +81,7 @@ pub fn engine_level(level: LogLevel) -> EngineLevel {
 
 pub fn dns_entry(record: &DnsRecord) -> DnsEntry {
     DnsEntry {
+        id: record.id,
         domain: record.domain.clone(),
         query_type: record.qtype.clone(),
         initiator: record.initiator.as_str().to_string(),
@@ -151,6 +152,7 @@ pub fn connection_info(record: &ConnRecord) -> ConnectionInfo {
         download: record.download.load(Ordering::Relaxed),
         failure: record.failure.get().map(connection_failure),
         timing: connection_timing(&record.timing),
+        dns_queries: record.dns_queries.to_vec(),
     }
 }
 

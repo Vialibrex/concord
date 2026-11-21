@@ -4,6 +4,7 @@ use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Mutex;
 
+use concord_common::query_trail::traced;
 use concord_common::scripts::DnsScriptAnswer;
 use concord_common::sync::lock;
 use concord_common::{DnsMode, Host, Initiator};
@@ -22,6 +23,9 @@ const MAPPING_SIZE: usize = 4096;
 const FAKE_RECORD_TTL: u32 = 600;
 const HOSTS_TTL: u32 = 10;
 
+/// The name each answered address was asked for, and the record that answered it.
+type Mapping = LruCache<IpAddr, (String, Option<u64>)>;
+
 /// What fake-ip and redir-host add on top of the plain resolver: the pools, the
 /// address-to-name memory the tunnel reads, and the filter.
 pub(crate) struct Enhancer {
@@ -30,7 +34,7 @@ pub(crate) struct Enhancer {
     pub pool6: Option<FakeIpPool>,
     pub skipper: Option<Skipper>,
     pub fake_ttl: u32,
-    pub mapping: Option<Mutex<LruCache<IpAddr, String>>>,
+    pub mapping: Option<Mutex<Mapping>>,
     pub use_hosts: bool,
     pub ipv6: bool,
 }
@@ -54,9 +58,9 @@ impl Enhancer {
         self
     }
 
-    pub(crate) fn insert_mapping(&self, ip: IpAddr, host: &str) {
+    pub(crate) fn insert_mapping(&self, ip: IpAddr, host: &str, query: Option<u64>) {
         if let Some(mapping) = &self.mapping {
-            lock(mapping).insert(ip, host.to_string());
+            lock(mapping).insert(ip, (host.to_string(), query));
         }
     }
 
@@ -74,8 +78,8 @@ impl Enhancer {
         {
             let mut mine = lock(mine);
             let theirs = lock(theirs);
-            for (ip, host) in theirs.entries_oldest_first() {
-                mine.insert(ip, host.clone());
+            for (ip, entry) in theirs.entries_oldest_first() {
+                mine.insert(ip, entry.clone());
             }
         }
         if let (Some(mine), Some(theirs)) = (&self.pool4, &old.pool4) {
@@ -232,7 +236,7 @@ impl Resolver {
                 }
                 _ => continue,
             }
-            self.enhancer.insert_mapping(*ip, host);
+            self.enhancer.insert_mapping(*ip, host, None);
         }
     }
 
@@ -283,11 +287,13 @@ impl Resolver {
     async fn mapping_stage(&self, req: Message, initiator: Initiator) -> io::Result<Message> {
         let is_ip = msg::first_query(&req).is_some_and(msg::is_ip_request);
         let host = query_host(&req);
-        let resp = self.next_stage(Stage::Mapping, req, initiator).await?;
+        let (resp, queries) = traced(self.next_stage(Stage::Mapping, req, initiator)).await;
+        let resp = resp?;
         if is_ip {
             for ip in msg::answer_ips(&resp) {
                 if concord_platform::is_global_unicast(ip) {
-                    self.enhancer.insert_mapping(ip, &host);
+                    self.enhancer
+                        .insert_mapping(ip, &host, queries.last().copied());
                 }
             }
         }
@@ -325,13 +331,15 @@ impl Resolver {
         }
     }
 
-    pub(crate) fn host_for(&self, ip: IpAddr) -> Option<Host> {
+    pub(crate) fn host_for(&self, ip: IpAddr) -> Option<(Host, Option<u64>)> {
         if let Some(host) = self.fake_ip_host(ip) {
-            return Some(host);
+            return Some((host, None));
         }
         let mapping = self.enhancer.mapping.as_ref()?;
         let mut mapping = lock(mapping);
-        mapping.get(&ip).map(|host| Host::from(host.as_str()))
+        mapping
+            .get(&ip)
+            .map(|(host, query)| (Host::from(host.as_str()), *query))
     }
 
     pub(crate) fn fake_ip_host(&self, ip: IpAddr) -> Option<Host> {

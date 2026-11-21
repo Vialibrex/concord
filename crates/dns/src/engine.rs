@@ -91,11 +91,15 @@ impl Resolver {
     }
 
     pub fn find_host_by_ip(&self, ip: IpAddr) -> Option<Host> {
+        self.host_for(ip).map(|(host, _)| host)
+    }
+
+    pub fn find_answer_by_ip(&self, ip: IpAddr) -> Option<(Host, Option<u64>)> {
         self.host_for(ip)
     }
 
     pub fn insert_host_by_ip(&self, ip: IpAddr, host: &str) {
-        self.enhancer.insert_mapping(ip, host);
+        self.enhancer.insert_mapping(ip, host, None);
     }
 
     pub fn flush_fake_ip(&self) {

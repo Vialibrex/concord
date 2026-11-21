@@ -7,6 +7,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use concord_common::query_trail::traced;
 use concord_common::{Address, HostResolver, Initiator, IpVersion};
 use concord_config::dns::{EnhancedMode, FakeIpFilterMode, PolicyEntry, PolicyKey};
 use concord_config::hosts::{HostEntry, HostValue as ConfigHostValue, HostsConfig};
@@ -465,6 +466,44 @@ async fn identical_concurrent_questions_make_one_upstream_query() {
 }
 
 #[tokio::test]
+async fn every_caller_notes_the_record_that_answered_it_and_a_node_notes_nothing() {
+    let server = serve_udp(
+        answer_with(Ipv4Addr::new(10, 4, 0, 2)),
+        Duration::from_millis(200),
+    )
+    .await;
+    let (resolver, sink) = build(&config(&[server.udp_url()]));
+    let mut tasks = Vec::new();
+    for _ in 0..3 {
+        let resolver = Arc::clone(&resolver);
+        tasks.push(tokio::spawn(traced(async move {
+            resolver
+                .lookup("trail.test", IpVersion::Ipv4, Initiator::Rule)
+                .await
+        })));
+    }
+    let mut noted = Vec::new();
+    for task in tasks {
+        let (found, ids) = task.await.unwrap();
+        found.unwrap();
+        noted.push(ids);
+    }
+    let asked = sink.records()[0].id;
+    assert_eq!(
+        noted,
+        vec![vec![asked]; 3],
+        "a shared query is every caller's"
+    );
+
+    let (_, hit) = traced(resolver.lookup("trail.test", IpVersion::Ipv4, Initiator::Direct)).await;
+    let records = sink.records();
+    assert!(records[1].cached);
+    assert_eq!(hit, [records[1].id]);
+    let (_, node) = traced(resolver.lookup("trail.test", IpVersion::Ipv4, Initiator::Proxy)).await;
+    assert_eq!(node, Vec::<u64>::new());
+}
+
+#[tokio::test]
 async fn a_cache_hit_reports_the_upstream_that_answered_and_clear_cache_forgets() {
     let server = serve_udp(answer_with(Ipv4Addr::new(10, 5, 0, 1)), Duration::ZERO).await;
     let (resolver, sink) = build(&config(&[server.udp_url()]));
@@ -880,12 +919,19 @@ async fn redir_host_remembers_answers_and_hosts_answer_the_server_path() {
             value: ConfigHostValue::Ips(vec![ip("192.0.2.9")]),
         }],
     };
-    let (resolver, _) = build_with_hosts(&cfg, &hosts);
+    let (resolver, sink) = build_with_hosts(&cfg, &hosts);
     let reply = ask_a(&resolver, "site.test").await;
     assert_eq!(first_a(&reply), Some(ip("93.184.216.34")));
     assert_eq!(
         resolver.find_host_by_ip(ip("93.184.216.34")).as_deref(),
         Some("site.test")
+    );
+    assert_eq!(
+        resolver
+            .find_answer_by_ip(ip("93.184.216.34"))
+            .and_then(|(_, query)| query),
+        Some(sink.records()[0].id),
+        "the address keeps the record that gave it out"
     );
     assert!(resolver.fake_ip_reverse(ip("93.184.216.34")).is_none());
     assert!(!resolver.is_fake_ip(ip("93.184.216.34")));

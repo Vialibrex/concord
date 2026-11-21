@@ -3433,6 +3433,15 @@
               "type": "null"
             }
           ]
+        },
+        "dnsQueries": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "description": "The `id`s, in no set order, of the `dns.watch` entries that gave out the destination's\naddress: every lookup the core made for it, for the rules and for a DIRECT dial (A and\nAAAA, cache hits included), or the client's query that a redir-host address maps back\nto. A fake-ip address, a `hosts` entry and a node's lookup of its own server have\nnone, and neither has a lookup made while nobody watched DNS."
         }
       },
       "required": [
@@ -3952,6 +3961,13 @@
     "DnsEntry": {
       "type": "object",
       "properties": {
+        "id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Counts up from 1 over the core process; a connection's `dnsQueries` names entries by it.",
+          "default": 0
+        },
         "domain": {
           "type": "string"
         },

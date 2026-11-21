@@ -54,6 +54,9 @@ pub struct ConnRecord {
     /// Decided by the exit's kind, not its name.
     pub direct: bool,
     pub timing: ConnTiming,
+    /// The DNS records that gave out the destination's address; none for a fake-ip address,
+    /// which no record answers.
+    pub dns_queries: Box<[u64]>,
     pub upload: AtomicU64,
     pub download: AtomicU64,
     pub cancel: CancellationToken,
@@ -193,6 +196,7 @@ impl ConnRecord {
             rule_index: None,
             direct,
             timing: ConnTiming::default(),
+            dns_queries: Box::new([]),
             upload: AtomicU64::new(upload),
             download: AtomicU64::new(0),
             cancel: CancellationToken::new(),

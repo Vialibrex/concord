@@ -1440,27 +1440,48 @@ async fn a_closed_connection_says_which_side_ended_it_or_that_the_core_did() {
     rig.finish().await;
 }
 
-/// Answers every A query with 127.0.0.1 and any other type with no records.
-async fn answer_every_name_with_loopback(socket: UdpSocket) {
+/// `mapped.test` gets 198.51.100.7, any other A query 127.0.0.1, any other type nothing.
+async fn answer_names(socket: UdpSocket) {
     let mut buf = [0u8; 512];
     while let Ok((len, from)) = socket.recv_from(&mut buf).await {
         let query = &buf[..len];
+        let mut name = Vec::new();
         let mut end = 12;
         while end < len && query[end] != 0 {
-            end += 1 + usize::from(query[end]);
+            let label = usize::from(query[end]);
+            name.push(
+                String::from_utf8_lossy(&query[end + 1..(end + 1 + label).min(len)]).into_owned(),
+            );
+            end += 1 + label;
         }
         let Some(question) = query.get(12..end + 5) else {
             continue;
         };
         let is_a = question[question.len() - 4..question.len() - 2] == [0, 1];
+        let address = if name.join(".") == "mapped.test" {
+            [198, 51, 100, 7]
+        } else {
+            [127, 0, 0, 1]
+        };
         let mut reply = query[..2].to_vec();
         reply.extend_from_slice(&[0x81, 0x80, 0, 1, 0, u8::from(is_a), 0, 0, 0, 0]);
         reply.extend_from_slice(question);
         if is_a {
-            reply.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
+            reply.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+            reply.extend_from_slice(&address);
         }
         let _ = socket.send_to(&reply, from).await;
     }
+}
+
+fn a_query(name: &str) -> Vec<u8> {
+    let mut query = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+    for label in name.split('.') {
+        query.push(u8::try_from(label.len()).unwrap());
+        query.extend_from_slice(label.as_bytes());
+    }
+    query.extend_from_slice(&[0, 0, 1, 0, 1]);
+    query
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1478,7 +1499,7 @@ async fn a_connection_says_when_each_step_of_setting_it_up_happened() {
     let port = server.local_addr().unwrap().port();
     let dns = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let dns_port = dns.local_addr().unwrap().port();
-    let answering = tokio::spawn(answer_every_name_with_loopback(dns));
+    let answering = tokio::spawn(answer_names(dns));
     rig.write_config(&format!(
         "mixed-port: {proxy}\ndns:\n  enable: true\n  enhanced-mode: redir-host\n  nameserver:\n    - 127.0.0.1:{dns_port}\nrules:\n  - DOMAIN,dial.test,DIRECT\n  - IP-CIDR,192.0.2.0/24,REJECT\n  - MATCH,DIRECT\n"
     ));
@@ -1550,6 +1571,157 @@ async fn a_connection_says_when_each_step_of_setting_it_up_happened() {
         held.push((client, far));
     }
     drop((watch, held));
+    answering.abort();
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connection_names_the_dns_queries_that_gave_out_its_address() {
+    let rig = Rig::new().await;
+    let (proxy, listen) = (free_port(), free_port());
+    let server = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    let dns = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let dns_port = dns.local_addr().unwrap().port();
+    let answering = tokio::spawn(answer_names(dns));
+    rig.write_config(&format!(
+        "mixed-port: {proxy}\ndns:\n  enable: true\n  listen: 127.0.0.1:{listen}\n  enhanced-mode: redir-host\n  nameserver:\n    - 127.0.0.1:{dns_port}\nrules:\n  - DOMAIN,dial.test,DIRECT\n  - IP-CIDR,198.51.100.0/24,REJECT\n  - MATCH,DIRECT\n"
+    ));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let mut queries = rig
+        .control
+        .dns_watch(DnsWatchParams::default())
+        .await
+        .unwrap();
+    let mut watch = rig
+        .control
+        .connection_watch(ConnectionWatchParams::default())
+        .await
+        .unwrap();
+
+    let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    client
+        .send_to(&a_query("mapped.test"), (Ipv4Addr::LOCALHOST, listen))
+        .await
+        .unwrap();
+    let mut reply = [0u8; 512];
+    timeout(Duration::from_secs(5), client.recv_from(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut seen: Vec<DnsEntry> = Vec::new();
+    let mut held = Vec::new();
+    for (target, asked) in [
+        ("rules.test", "rules.test"),
+        ("dial.test", "dial.test"),
+        ("198.51.100.7", "mapped.test"),
+        ("127.0.0.1", ""),
+    ] {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+            .await
+            .unwrap();
+        stream
+            .write_all(format!("CONNECT {target}:{port} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let delta = eventually(&mut watch.events, |delta| !delta.opened.is_empty()).await;
+        while !asked.is_empty() && !seen.iter().any(|entry| entry.domain == asked) {
+            seen.push(next(&mut queries.events).await);
+        }
+        let mut named = delta.opened[0].dns_queries.clone();
+        named.sort_unstable();
+        while seen
+            .iter()
+            .all(|entry| entry.id < named.last().copied().unwrap_or(0))
+        {
+            seen.push(next(&mut queries.events).await);
+        }
+        let ids: Vec<u64> = seen
+            .iter()
+            .filter(|entry| entry.domain == asked)
+            .map(|entry| entry.id)
+            .collect();
+        assert!(ids.iter().all(|id| *id > 0), "{seen:?}");
+        assert_eq!(named, ids, "{target}: {seen:?}");
+        held.push(stream);
+    }
+    drop((watch, held));
+    answering.abort();
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_udp_flow_names_the_dns_queries_its_direct_dial_made() {
+    let rig = Rig::new().await;
+    let proxy = free_port();
+    let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = target.local_addr().unwrap().port();
+    let dns = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let dns_port = dns.local_addr().unwrap().port();
+    let answering = tokio::spawn(answer_names(dns));
+    rig.write_config(&format!(
+        "mixed-port: {proxy}\ndns:\n  enable: true\n  nameserver:\n    - 127.0.0.1:{dns_port}\nrules:\n  - DOMAIN,udp.test,DIRECT\n  - MATCH,DIRECT\n"
+    ));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let mut queries = rig
+        .control
+        .dns_watch(DnsWatchParams::default())
+        .await
+        .unwrap();
+    let mut watch = rig
+        .control
+        .connection_watch(ConnectionWatchParams::default())
+        .await
+        .unwrap();
+
+    let mut control = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+        .await
+        .unwrap();
+    control.write_all(&[5, 1, 0]).await.unwrap();
+    let mut method = [0u8; 2];
+    control.read_exact(&mut method).await.unwrap();
+    control
+        .write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
+    let mut reply = [0u8; 10];
+    control.read_exact(&mut reply).await.unwrap();
+    let relay = (
+        Ipv4Addr::new(reply[4], reply[5], reply[6], reply[7]),
+        u16::from_be_bytes([reply[8], reply[9]]),
+    );
+    let mut datagram = vec![0, 0, 0, 3, 8];
+    datagram.extend_from_slice(b"udp.test");
+    datagram.extend_from_slice(&port.to_be_bytes());
+    datagram.extend_from_slice(b"ping");
+    let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    client.send_to(&datagram, relay).await.unwrap();
+    let mut got = [0u8; 16];
+    timeout(Duration::from_secs(5), target.recv_from(&mut got))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let delta = eventually(&mut watch.events, |delta| !delta.opened.is_empty()).await;
+    let conn = &delta.opened[0];
+    assert_eq!(conn.network, Network::Udp);
+    let mut named = conn.dns_queries.clone();
+    named.sort_unstable();
+    assert!(!named.is_empty(), "the DIRECT dial looked udp.test up");
+    let mut seen: Vec<DnsEntry> = Vec::new();
+    while seen.iter().all(|entry| entry.id < *named.last().unwrap()) {
+        seen.push(next(&mut queries.events).await);
+    }
+    let ids: Vec<u64> = seen
+        .iter()
+        .filter(|entry| entry.domain == "udp.test")
+        .map(|entry| entry.id)
+        .collect();
+    assert_eq!(named, ids, "{seen:?}");
+    drop((watch, control));
     answering.abort();
     rig.finish().await;
 }
