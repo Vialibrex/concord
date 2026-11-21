@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use concord_common::intercept::{InterceptFlow, UpstreamRequest};
 use concord_common::sync::lock;
-use concord_common::{Address, BoxStream, FlowMeta, InboundInfo, InboundKind, Network};
+use concord_common::{Address, BoxStream, ConnTiming, FlowMeta, InboundInfo, InboundKind, Network};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
@@ -61,6 +61,7 @@ pub(crate) fn task_flow(host: &str, port: u16) -> InterceptFlow {
         sniffed: false,
         dst_ip,
         port,
+        timing: ConnTiming::start(),
     }
 }
 

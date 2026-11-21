@@ -8,6 +8,7 @@ pub mod exchange_query;
 pub mod meta;
 pub mod options;
 pub mod sync;
+mod timing;
 
 #[cfg(feature = "io")]
 pub mod conn;
@@ -58,6 +59,7 @@ pub use meta::{
     UdpFlow,
 };
 pub use options::{CoreOptions, FindProcessMode, LogLevel, TunnelMode};
+pub use timing::{ConnStep, ConnTiming};
 
 #[cfg(feature = "io")]
 pub use conn::{ConnEnd, ConnFailure, ConnMeta, ConnRecord, EndReason, FailureKind};

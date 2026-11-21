@@ -127,13 +127,19 @@ pub(super) async fn associate(
         return Err(err);
     }
     let env = runtime.env_for(state);
-    let cx = DialCx::new(&env, Initiator::Other, Some(deadline)).with_source(state.meta.src);
+    let cx = DialCx::new(&env, Initiator::Other, Some(deadline))
+        .with_source(state.meta.src)
+        .with_trace(Some(&state.timing));
+    state.timing.mark(ConnStep::DialStart);
     let outcome = match timeout_at(deadline, leaf.associate(&cx, hint)).await {
         Ok(result) => result,
         Err(_) => Err(io::Error::from(io::ErrorKind::TimedOut)),
     };
     match outcome {
-        Ok(session) => Ok(session),
+        Ok(session) => {
+            state.timing.mark(ConnStep::DialEnd);
+            Ok(session)
+        }
         Err(err) => {
             runtime.outbounds.note_dial_failed(
                 &decision.chain,

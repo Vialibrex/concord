@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use concord_common::{
-    Address, BoxStream, DialCx, Initiator, IpVersion, Outbound, OutboundInfo, OutboundKind,
-    PacketSession, SockOpts, Tasks,
+    Address, BoxStream, ConnStep, DialCx, Initiator, IpVersion, Outbound, OutboundInfo,
+    OutboundKind, PacketSession, SockOpts, Tasks,
 };
 use concord_net::{DirectPacketSession, LoopbackGuard, dial_tcp};
 
@@ -49,8 +49,9 @@ impl Outbound for Direct {
     }
 
     async fn connect(&self, cx: &DialCx<'_>, dst: &Address) -> io::Result<BoxStream> {
-        let direct = DialCx::new(cx.env, Initiator::Direct, cx.deadline);
+        let direct = DialCx::new(cx.env, Initiator::Direct, cx.deadline).with_trace(cx.trace());
         let stream = dial_tcp(&direct, dst, self.version, &self.opts(cx)).await?;
+        cx.mark(ConnStep::Connected);
         Ok(match &self.loopback {
             Some(guard) => Box::new(guard.track_tcp(stream)),
             None => Box::new(stream),
@@ -62,7 +63,7 @@ impl Outbound for Direct {
         cx: &DialCx<'_>,
         hint: &Address,
     ) -> io::Result<Arc<dyn PacketSession>> {
-        let direct = DialCx::new(cx.env, Initiator::Direct, cx.deadline);
+        let direct = DialCx::new(cx.env, Initiator::Direct, cx.deadline).with_trace(cx.trace());
         let session = DirectPacketSession::associate(
             &direct,
             hint,

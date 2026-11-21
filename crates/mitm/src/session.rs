@@ -12,7 +12,7 @@ use concord_common::intercept::{
     ConnMark, ConnTag, HeldConn, InterceptFlow, Route, RuleLabel, UpstreamRequest,
 };
 use concord_common::sync::lock;
-use concord_common::{BoxStream, Tasks};
+use concord_common::{BoxStream, ConnStep, Tasks};
 use hyper::client::conn::{http1 as client1, http2 as client2};
 use hyper::server::conn::{http1 as server1, http2 as server2};
 use hyper::service::service_fn;
@@ -238,6 +238,9 @@ impl Session {
                     &[ALPN_H2, ALPN_HTTP1],
                 )
                 .await?;
+            if let Some(held) = lock(&self.held).as_ref() {
+                held.mark(ConnStep::TargetTls);
+            }
             *lock(&self.ready) = Some(Ready {
                 tls,
                 host: self.host.clone(),

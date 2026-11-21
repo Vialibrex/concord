@@ -8,8 +8,8 @@ use concord_common::packet::{PacketBuf, PacketSession};
 use concord_common::stream::PeekedStream;
 use concord_common::stream_buffer::{ReadBufferOptions, StreamBuffer};
 use concord_common::{
-    Address, BoxRead, BoxStream, BoxWrite, ConnEnd, ConnFailure, ConnRecord, DialCx, EndReason,
-    FlowMeta, InboundInfo, InboundKind, Initiator, Network, Stream,
+    Address, BoxRead, BoxStream, BoxWrite, ConnEnd, ConnFailure, ConnRecord, ConnStep, DialCx,
+    EndReason, FlowMeta, InboundInfo, InboundKind, Initiator, Network, Stream,
 };
 use concord_group::Touch;
 use concord_net::{Direction, Meter, RelayEnd, RelayOutcome, relay};
@@ -290,12 +290,27 @@ pub(crate) async fn dial_decided(
         dst = flow.pure_address();
     }
 
-    if decision.smart {
-        return smart::dial(inner, runtime, flow, decision, &dst).await;
+    flow.timing.mark(ConnStep::DialStart);
+    let dialed = if decision.smart {
+        smart::dial(inner, runtime, flow, decision, &dst).await
+    } else {
+        dial_plain(inner, runtime, flow, decision, &dst).await
+    };
+    if dialed.is_ok() {
+        flow.timing.mark(ConnStep::DialEnd);
     }
+    dialed
+}
 
+async fn dial_plain(
+    inner: &Arc<Inner>,
+    runtime: &Arc<Runtime>,
+    flow: &FlowState,
+    decision: Decision,
+    dst: &Address,
+) -> Result<(BoxStream, Decision), FailedDial> {
     let deadline = Instant::now() + DIAL_TIMEOUT;
-    let outcome = dial_once(inner, runtime, flow, &decision, &dst, deadline).await;
+    let outcome = dial_once(inner, runtime, flow, &decision, dst, deadline).await;
     let kind = decision.leaf.info().kind;
     match outcome {
         Ok(remote) => {
@@ -337,7 +352,7 @@ pub(crate) async fn dial_once(
             .check_flow(flow.meta.src, flow.meta.arrived_at())?;
     }
     let env = runtime.env_for(flow);
-    let cx = DialCx::new(&env, Initiator::Other, Some(deadline));
+    let cx = DialCx::new(&env, Initiator::Other, Some(deadline)).with_trace(Some(&flow.timing));
     match timeout_at(deadline, decision.leaf.connect(&cx, dst)).await {
         Ok(result) => result,
         Err(_) => Err(io::Error::from(io::ErrorKind::TimedOut)),
@@ -387,6 +402,7 @@ pub(crate) fn new_record(
         0,
     );
     record.rule_index = decision.rule.as_ref().and_then(|rule| rule.index);
+    record.timing = flow.timing.clone();
     Arc::new(record)
 }
 
@@ -450,12 +466,14 @@ pub(crate) async fn associate_inner(
     let decision = route(&mut flow, &runtime, &live, Touch::Yes).await?;
     let deadline = Instant::now() + DIAL_TIMEOUT;
     let env = runtime.env_for(&flow);
-    let cx = DialCx::new(&env, Initiator::Other, Some(deadline));
+    let cx = DialCx::new(&env, Initiator::Other, Some(deadline)).with_trace(Some(&flow.timing));
     let hint = flow.pure_address();
+    flow.timing.mark(ConnStep::DialStart);
     let session = match timeout_at(deadline, decision.leaf.associate(&cx, &hint)).await {
         Ok(result) => result?,
         Err(_) => return Err(io::Error::from(io::ErrorKind::TimedOut)),
     };
+    flow.timing.mark(ConnStep::DialEnd);
     let destination = server_host(&decision.leaf.info().addr);
     let record = new_record(&flow, &decision, destination);
     let registration = inner.table.register(record, 0);

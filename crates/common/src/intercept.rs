@@ -4,7 +4,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use crate::conn::ConnRecord;
-use crate::{Address, BoxStream, CoreError, FlowMeta, Host, HttpFacts, InboundKind};
+use crate::{
+    Address, BoxStream, ConnStep, ConnTiming, CoreError, FlowMeta, Host, HttpFacts, InboundKind,
+};
 use async_trait::async_trait;
 
 #[derive(Clone, Debug)]
@@ -14,6 +16,8 @@ pub struct InterceptFlow {
     pub sniffed: bool,
     pub dst_ip: Option<IpAddr>,
     pub port: u16,
+    /// The client flow's timing, which the connections dialed for it take as their own.
+    pub timing: ConnTiming,
 }
 
 impl InterceptFlow {
@@ -40,6 +44,7 @@ impl InterceptFlow {
             sniffed: false,
             dst_ip,
             port,
+            timing: self.timing.clone(),
         }
     }
 }
@@ -70,7 +75,9 @@ pub enum ConnMark {
 /// Dropped without a release, it lists as `ConnMark::Plain`.
 pub trait HeldConn: Send + Sync {
     fn conn(&self) -> &Arc<ConnTag>;
+    /// `ConnMark::Decrypted` also marks `ConnStep::Decrypted`.
     fn release(&self, mark: ConnMark);
+    fn mark(&self, step: ConnStep);
 }
 
 pub struct UpstreamRequest {

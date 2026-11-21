@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
-use concord_common::{ConnRecord, OutboundKind, io_error};
+use concord_common::{ConnRecord, ConnStep, OutboundKind, io_error};
 
 use crate::flow::FlowState;
 use crate::intercept::{
@@ -69,7 +69,10 @@ impl HeldConn for Held {
         }
         match mark {
             ConnMark::Plain => {}
-            ConnMark::Decrypted => self.tracked.record.mitm.store(true, Ordering::Relaxed),
+            ConnMark::Decrypted => {
+                self.tracked.record.timing.mark(ConnStep::Decrypted);
+                self.tracked.record.mitm.store(true, Ordering::Relaxed);
+            }
             ConnMark::Refused => self
                 .tracked
                 .record
@@ -79,6 +82,10 @@ impl HeldConn for Held {
         self.close_if_all_closed();
         self.table.list(&self.tracked);
         self.close_if_all_closed();
+    }
+
+    fn mark(&self, step: ConnStep) {
+        self.tracked.record.timing.mark(step);
     }
 }
 
@@ -217,6 +224,7 @@ impl UpstreamDialer for TunnelUpstream {
         };
         let mut record = ConnRecord::new(meta, chain.into(), Box::new([]), name, payload, false, 0);
         record.rule_index = rule.and_then(|rule| rule.index);
+        record.timing = flow.timing.clone();
         let record = Arc::new(record);
         record.mitm.store(true, Ordering::Relaxed);
         let conn = ConnTag::of(&record);

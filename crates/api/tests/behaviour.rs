@@ -21,7 +21,7 @@ use concord_test_support::free_port;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::timeout;
 use tracing_subscriber::layer::SubscriberExt;
 
@@ -1437,6 +1437,120 @@ async fn a_closed_connection_says_which_side_ended_it_or_that_the_core_did() {
         drop(client);
     }
     drop(watch);
+    rig.finish().await;
+}
+
+/// Answers every A query with 127.0.0.1 and any other type with no records.
+async fn answer_every_name_with_loopback(socket: UdpSocket) {
+    let mut buf = [0u8; 512];
+    while let Ok((len, from)) = socket.recv_from(&mut buf).await {
+        let query = &buf[..len];
+        let mut end = 12;
+        while end < len && query[end] != 0 {
+            end += 1 + usize::from(query[end]);
+        }
+        let Some(question) = query.get(12..end + 5) else {
+            continue;
+        };
+        let is_a = question[question.len() - 4..question.len() - 2] == [0, 1];
+        let mut reply = query[..2].to_vec();
+        reply.extend_from_slice(&[0x81, 0x80, 0, 1, 0, u8::from(is_a), 0, 0, 0, 0]);
+        reply.extend_from_slice(question);
+        if is_a {
+            reply.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
+        }
+        let _ = socket.send_to(&reply, from).await;
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Lookup {
+    None,
+    ByRules,
+    ByDial,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connection_says_when_each_step_of_setting_it_up_happened() {
+    let rig = Rig::new().await;
+    let proxy = free_port();
+    let server = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    let dns = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let dns_port = dns.local_addr().unwrap().port();
+    let answering = tokio::spawn(answer_every_name_with_loopback(dns));
+    rig.write_config(&format!(
+        "mixed-port: {proxy}\ndns:\n  enable: true\n  enhanced-mode: redir-host\n  nameserver:\n    - 127.0.0.1:{dns_port}\nrules:\n  - DOMAIN,dial.test,DIRECT\n  - IP-CIDR,192.0.2.0/24,REJECT\n  - MATCH,DIRECT\n"
+    ));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let mut watch = rig
+        .control
+        .connection_watch(ConnectionWatchParams::default())
+        .await
+        .unwrap();
+
+    let mut held = Vec::new();
+    for (target, lookup) in [
+        ("127.0.0.1", Lookup::None),
+        ("dial.test", Lookup::ByDial),
+        ("rules.test", Lookup::ByRules),
+    ] {
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+            .await
+            .unwrap();
+        client
+            .write_all(format!("CONNECT {target}:{port} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut answer = [0u8; 39];
+        client.read_exact(&mut answer).await.unwrap();
+        let (far, _) = server.accept().await.unwrap();
+        let delta = eventually(&mut watch.events, |delta| !delta.opened.is_empty()).await;
+        let conn = &delta.opened[0];
+        let timing = conn
+            .timing
+            .clone()
+            .expect("a connection the core accepted is timed");
+        assert!(timing.accepted <= conn.start, "{target}: {timing:?}");
+        assert_eq!(
+            (timing.tls, timing.target_tls, timing.decrypted),
+            (None, None, None),
+            "{target}: DIRECT has no TLS of its own"
+        );
+        let order = match lookup {
+            Lookup::None => {
+                assert_eq!(timing.dns_start, None, "{target}: {timing:?}");
+                vec![
+                    timing.routed,
+                    timing.dial_start,
+                    timing.connected,
+                    timing.dial_end,
+                ]
+            }
+            Lookup::ByRules => vec![
+                timing.dns_start,
+                timing.dns_end,
+                timing.routed,
+                timing.dial_start,
+                timing.connected,
+                timing.dial_end,
+            ],
+            Lookup::ByDial => vec![
+                timing.routed,
+                timing.dial_start,
+                timing.dns_start,
+                timing.dns_end,
+                timing.connected,
+                timing.dial_end,
+            ],
+        };
+        assert!(order.iter().all(Option::is_some), "{target}: {timing:?}");
+        assert!(order.is_sorted(), "{target}: {timing:?}");
+        held.push((client, far));
+    }
+    drop((watch, held));
+    answering.abort();
     rig.finish().await;
 }
 

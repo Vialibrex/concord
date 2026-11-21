@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use concord_common::scripts::RuleScriptRequest;
 use concord_common::{
-    CoreError, FindProcessMode, Initiator, IpVersion, LookupIps, Network, Outbound, RouteState,
-    TunnelMode,
+    ConnStep, CoreError, FindProcessMode, Initiator, IpVersion, LookupIps, Network, Outbound,
+    RouteState, TunnelMode,
 };
 use concord_group::{Outbounds, Resolved, Touch};
 use concord_rules::{MatchCtx, RouteProgram, RuleRef, Step};
@@ -192,9 +192,22 @@ pub(crate) async fn lookup_process(flow: &mut FlowState, runtime: &Runtime) {
         .put(key, flow.process.clone(), Instant::now());
 }
 
+pub(crate) async fn route(
+    flow: &mut FlowState,
+    runtime: &Runtime,
+    live: &LiveOptions,
+    touch: Touch,
+) -> io::Result<Decision> {
+    let decided = decide(flow, runtime, live, touch).await;
+    if decided.is_ok() {
+        flow.timing.mark(ConnStep::Routed);
+    }
+    decided
+}
+
 /// `resolveMetadata` and `match`, with the walk through groups and rules made an
 /// explicit loop.
-pub(crate) async fn route(
+async fn decide(
     flow: &mut FlowState,
     runtime: &Runtime,
     live: &LiveOptions,
@@ -403,8 +416,11 @@ async fn resolve_rule_ip(flow: &mut FlowState, runtime: &Runtime) {
     let Some(host) = flow.host.clone() else {
         return;
     };
+    flow.timing.mark(ConnStep::DnsStart);
     let lookup = runtime.dns_lookup(flow, &host, IpVersion::Dual, Initiator::Rule);
-    match timeout(DNS_TIMEOUT, lookup).await {
+    let looked_up = timeout(DNS_TIMEOUT, lookup).await;
+    flow.timing.mark(ConnStep::DnsEnd);
+    match looked_up {
         Ok(Ok(ips)) => {
             flow.dst_ip = pick_ip(&ips);
             flow.resolved = ips.v4.iter().chain(&ips.v6).copied().collect();

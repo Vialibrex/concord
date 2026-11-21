@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::addr::{Host, Network};
 use crate::error::CoreError;
 use crate::meta::{DnsMode, InboundInfo};
+use crate::timing::ConnTiming;
 
 #[derive(Clone, Debug)]
 pub struct ConnMeta {
@@ -52,6 +53,7 @@ pub struct ConnRecord {
     pub rule_index: Option<u32>,
     /// Decided by the exit's kind, not its name.
     pub direct: bool,
+    pub timing: ConnTiming,
     pub upload: AtomicU64,
     pub download: AtomicU64,
     pub cancel: CancellationToken,
@@ -190,6 +192,7 @@ impl ConnRecord {
             rule_payload,
             rule_index: None,
             direct,
+            timing: ConnTiming::default(),
             upload: AtomicU64::new(upload),
             download: AtomicU64::new(0),
             cancel: CancellationToken::new(),

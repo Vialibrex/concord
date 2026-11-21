@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use concord_common::{
-    Change, ConnEnd, ConnFailure, ConnRecord, DnsRecord, EndReason, FailureKind,
-    GeneralChange as EngineChange, LogLevel as EngineLevel, Origin, StateChange,
+    Change, ConnEnd, ConnFailure, ConnRecord, ConnStep, ConnTiming, DnsRecord, EndReason,
+    FailureKind, GeneralChange as EngineChange, LogLevel as EngineLevel, Origin, StateChange,
 };
 use concord_engine::{
     DelayRecord as EngineDelay, Failure, GeneralView, GroupView, NodeStateView, NodeView,
@@ -13,10 +13,11 @@ use concord_engine::{
 use concord_proto::ApiError;
 use concord_proto::types::{
     Capabilities, ChangeOrigin, ConnectionEnd, ConnectionEndReason, ConnectionFailure,
-    ConnectionFailureKind, ConnectionInfo, CoreEvent, DelayRecord, DnsEntry, DnsQueryResult,
-    DnsQuestion, DnsRecord as WireRecord, FaultReason, FaultService, Features, GeneralChange,
-    GeneralState, GroupInfo, LogLevel, Network, NodeInfo, ProviderInfo, ProviderKind, ProxyState,
-    ServiceFault, StateChangeKind, SubscriptionInfo, TunState, UrlHealth, Warning,
+    ConnectionFailureKind, ConnectionInfo, ConnectionTiming, CoreEvent, DelayRecord, DnsEntry,
+    DnsQueryResult, DnsQuestion, DnsRecord as WireRecord, FaultReason, FaultService, Features,
+    GeneralChange, GeneralState, GroupInfo, LogLevel, Network, NodeInfo, ProviderInfo,
+    ProviderKind, ProxyState, ServiceFault, StateChangeKind, SubscriptionInfo, TunState, UrlHealth,
+    Warning,
 };
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -149,7 +150,23 @@ pub fn connection_info(record: &ConnRecord) -> ConnectionInfo {
         upload: record.upload.load(Ordering::Relaxed),
         download: record.download.load(Ordering::Relaxed),
         failure: record.failure.get().map(connection_failure),
+        timing: connection_timing(&record.timing),
     }
+}
+
+fn connection_timing(timing: &ConnTiming) -> Option<ConnectionTiming> {
+    Some(ConnectionTiming {
+        accepted: unix_millis(timing.accepted()?),
+        dns_start: timing.get(ConnStep::DnsStart),
+        dns_end: timing.get(ConnStep::DnsEnd),
+        routed: timing.get(ConnStep::Routed),
+        dial_start: timing.get(ConnStep::DialStart),
+        connected: timing.get(ConnStep::Connected),
+        tls: timing.get(ConnStep::Tls),
+        dial_end: timing.get(ConnStep::DialEnd),
+        target_tls: timing.get(ConnStep::TargetTls),
+        decrypted: timing.get(ConnStep::Decrypted),
+    })
 }
 
 pub fn connection_end(id: u64, end: &ConnEnd) -> ConnectionEnd {

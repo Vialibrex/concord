@@ -15,7 +15,8 @@ use concord_common::intercept::{
 };
 use concord_common::sync::lock;
 use concord_common::{
-    Address, CoreEvent, EventSink, FlowMeta, InboundInfo, InboundKind, Network, ScriptNotification,
+    Address, ConnStep, ConnTiming, CoreEvent, EventSink, FlowMeta, InboundInfo, InboundKind,
+    Network, ScriptNotification,
 };
 use concord_platform::HomeDir;
 use concord_tls::TrustStore;
@@ -305,6 +306,7 @@ fn test_conn(id: String, seq: usize) -> Arc<ConnTag> {
 pub(crate) struct TestHeld {
     conn: Arc<ConnTag>,
     pub mark: Mutex<Option<ConnMark>>,
+    pub steps: Mutex<Vec<ConnStep>>,
 }
 
 impl HeldConn for TestHeld {
@@ -314,6 +316,10 @@ impl HeldConn for TestHeld {
 
     fn release(&self, mark: ConnMark) {
         *lock(&self.mark) = Some(mark);
+    }
+
+    fn mark(&self, step: ConnStep) {
+        lock(&self.steps).push(step);
     }
 }
 
@@ -367,6 +373,13 @@ impl TestDialer {
         lock(&self.flows)
             .iter()
             .map(|(flow, _)| (crate::engine::host_of(flow), flow.port))
+            .collect()
+    }
+
+    pub fn steps(&self) -> Vec<Vec<ConnStep>> {
+        lock(&self.held)
+            .iter()
+            .map(|held| lock(&held.steps).clone())
             .collect()
     }
 
@@ -463,6 +476,7 @@ impl UpstreamDialer for TestDialer {
             let held = Arc::new(TestHeld {
                 conn: conn.clone(),
                 mark: Mutex::new(None),
+                steps: Mutex::default(),
             });
             lock(&self.held).push(held.clone());
             held as Arc<dyn HeldConn>
@@ -523,6 +537,7 @@ pub(crate) fn flow_of(kind: InboundKind, dst: Address) -> InterceptFlow {
         sniffed: false,
         dst_ip,
         port,
+        timing: ConnTiming::start(),
     }
 }
 

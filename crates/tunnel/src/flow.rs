@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use concord_common::addr::unmap;
 use concord_common::{
-    Address, CORE_NAME, ConnMeta, DnsMode, FlowKey, FlowMeta, Host, HttpFacts, InboundKind,
-    ProcessInfo, RouteState,
+    Address, CORE_NAME, ConnMeta, ConnTiming, DnsMode, FlowKey, FlowMeta, Host, HttpFacts,
+    InboundKind, ProcessInfo, RouteState,
 };
 use concord_dns::Resolver;
 use concord_rules::Observed;
@@ -33,6 +33,7 @@ pub(crate) struct FlowState {
     pub http: Option<Arc<HttpFacts>>,
     /// Every address the rules' lookup gave, of which `dst_ip` is one.
     pub resolved: Vec<IpAddr>,
+    pub timing: ConnTiming,
 }
 
 /// `netip.ParseAddr`: an IPv6 literal may carry a `%zone`, which the address drops.
@@ -55,6 +56,7 @@ impl FlowState {
         }
         state.dst_ip = flow.dst_ip;
         state.port = flow.port;
+        state.timing = flow.timing.clone();
         state
     }
 
@@ -66,6 +68,7 @@ impl FlowState {
             sniffed: self.sniff_host.is_some(),
             dst_ip: self.dst_ip,
             port: self.port,
+            timing: self.timing.clone(),
         }
     }
 
@@ -103,6 +106,7 @@ impl FlowState {
             observed: Observed::default(),
             http: None,
             resolved: Vec::new(),
+            timing: ConnTiming::start(),
         }
     }
 

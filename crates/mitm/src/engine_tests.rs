@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use concord_common::intercept::{ConnMark, Offer};
 use concord_common::sync::lock;
-use concord_common::{Address, InboundKind};
+use concord_common::{Address, ConnStep, InboundKind};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -737,6 +737,7 @@ async fn marks_and_keeps_what_decrypting_a_client_refused() {
         .unwrap();
     client.get("/").await;
     assert_eq!(rig.dialer.marks(), vec![Some(ConnMark::Decrypted)]);
+    assert_eq!(rig.dialer.steps(), vec![vec![ConnStep::TargetTls]]);
 
     let (near, offer) = offer_on(rig.mitm.interceptor(), flow("example.test", 443));
     let empty = rustls::RootCertStore::empty();

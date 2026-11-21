@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
-use concord_common::{Address, DialCx, Initiator, SockOpts, Tasks};
+use concord_common::{Address, ConnStep, DialCx, Initiator, SockOpts, Tasks};
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{AsyncUdpSocket, Endpoint, EndpointConfig, Runtime, TokioRuntime};
 use rand::Rng;
@@ -253,6 +253,7 @@ impl QuicLink {
         let conn = tokio::time::timeout(left, handshake)
             .await
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        cx.mark(ConnStep::Tls);
         close_on_stop(&self.tasks, conn.clone());
         Ok(QuicConn::new(conn, endpoint, self.tasks.clone()))
     }

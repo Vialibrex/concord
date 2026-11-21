@@ -3423,6 +3423,16 @@
             }
           ],
           "description": "Present only on a connection whose dial failed. It is never in `connection.list`;\n`connection.watch` sends it in `opened` and `closed` of the same delta, with zero\ntraffic. A route that could not be decided is not reported."
+        },
+        "timing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConnectionTiming"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -3473,6 +3483,98 @@
         "other"
       ],
       "description": "Why a dial failed. `dns`: the name had no usable address. `handshake`: the path\nto the target opened but the exchange over it failed, as when a proxy server\ncloses, resets or breaks its protocol. `other` takes the rest, a resolver's own\nerror among them."
+    },
+    "ConnectionTiming": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Unix milliseconds when the core accepted the client's flow, which is before `start`."
+        },
+        "dnsStart": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The rules' lookup of the destination, or DIRECT's own when the rules did not need one."
+        },
+        "dnsEnd": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "routed": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "dialStart": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "connected": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The first hop's TCP connection is up: the destination's for DIRECT, the node's for a proxy."
+        },
+        "tls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The outbound's own TLS or QUIC handshake with its server is done."
+        },
+        "dialEnd": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The outbound is ready to carry the connection; absent on a failed dial."
+        },
+        "targetTls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "For a MITM upstream: the TLS handshake with the destination is done."
+        },
+        "decrypted": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "For a MITM upstream: the client's handshake was answered and its requests are read."
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "description": "When each step of setting the connection up happened, in microseconds after `accepted`.\nA step the connection did not take is absent; all are fixed by the time it is opened."
     },
     "ConnectionDelta": {
       "type": "object",

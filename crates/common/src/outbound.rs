@@ -12,6 +12,7 @@ use crate::error::CoreError;
 use crate::event::{EventSink, Initiator};
 use crate::packet::PacketSession;
 use crate::stream::BoxStream;
+use crate::timing::{ConnStep, ConnTiming};
 
 /// `wire_name` is mihomo's `AdapterType.String()`, which Dart compares literally.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -240,6 +241,7 @@ pub struct DialCx<'a> {
     source: Option<SocketAddr>,
     parent: Option<&'a DialCx<'a>>,
     node: &'a str,
+    trace: Option<&'a ConnTiming>,
 }
 
 impl<'a> DialCx<'a> {
@@ -251,6 +253,22 @@ impl<'a> DialCx<'a> {
             source: None,
             parent: None,
             node: "",
+            trace: None,
+        }
+    }
+
+    pub fn with_trace(mut self, trace: Option<&'a ConnTiming>) -> Self {
+        self.trace = trace;
+        self
+    }
+
+    pub fn trace(&self) -> Option<&'a ConnTiming> {
+        self.trace
+    }
+
+    pub fn mark(&self, step: ConnStep) {
+        if let Some(trace) = self.trace {
+            trace.mark(step);
         }
     }
 
@@ -281,6 +299,7 @@ impl<'a> DialCx<'a> {
             source: self.source,
             parent: Some(self),
             node,
+            trace: self.trace,
         })
     }
 

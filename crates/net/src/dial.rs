@@ -4,7 +4,7 @@ use std::pin::pin;
 use std::time::Duration;
 
 use concord_common::{
-    Address, BoxStream, CoreError, DialCx, IpVersion, LookupIps, SockOpts, no_retry,
+    Address, BoxStream, ConnStep, CoreError, DialCx, IpVersion, LookupIps, SockOpts, no_retry,
 };
 use concord_platform::is_local_exhaustion;
 use futures_util::StreamExt;
@@ -172,7 +172,12 @@ pub(crate) async fn resolve(
             v4: Vec::new(),
             v6: vec![addr.ip()],
         },
-        Address::Domain(host, _) => cx.env.resolver.lookup(host, version, cx.initiator).await?,
+        Address::Domain(host, _) => {
+            cx.mark(ConnStep::DnsStart);
+            let found = cx.env.resolver.lookup(host, version, cx.initiator).await;
+            cx.mark(ConnStep::DnsEnd);
+            found?
+        }
     };
     arrange(found, target, version, ipv6_enabled)
 }

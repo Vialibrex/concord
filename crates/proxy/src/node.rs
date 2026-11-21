@@ -3,8 +3,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use concord_common::{
-    Address, BoxStream, DialCx, DialEnv, Initiator, IpVersion, OutboundInfo, OutboundKind,
-    SockOpts, Tasks,
+    Address, BoxStream, ConnStep, DialCx, DialEnv, Initiator, IpVersion, OutboundInfo,
+    OutboundKind, SockOpts, Tasks,
 };
 use concord_config::proxy::{CommonOpts, IpVersionPref, ProxyDef};
 use concord_net::dial_stream;
@@ -96,7 +96,9 @@ impl Egress {
             return cx.env.nodes.dial_via(via, &inner, server).await;
         }
         let proxy_cx = DialCx::new(cx.env, Initiator::Proxy, cx.deadline);
-        dial_stream(&proxy_cx, server, self.version, &self.sock_opts(cx.env)).await
+        let stream = dial_stream(&proxy_cx, server, self.version, &self.sock_opts(cx.env)).await?;
+        cx.mark(ConnStep::Connected);
+        Ok(stream)
     }
 }
 
@@ -196,7 +198,11 @@ impl Link {
         }
         let dial = || self.egress.dial(cx, &self.server);
         let secured: BoxStream = match &self.tls {
-            Some(tls) => Box::new(self.secure(tls, dial).await?),
+            Some(tls) => {
+                let secured = self.secure(tls, dial).await?;
+                cx.mark(ConnStep::Tls);
+                Box::new(secured)
+            }
             None => dial().await?,
         };
         self.stack.apply(secured, &self.transport_host).await
@@ -225,8 +231,11 @@ impl Link {
         if let Some(slot) = &self.env_slot {
             slot.store(Some(Arc::new(cx.env.clone())));
         }
-        tls.connect_dialing(|| self.egress.dial(cx, &self.server), &self.sni_fallback)
-            .await
+        let secured = tls
+            .connect_dialing(|| self.egress.dial(cx, &self.server), &self.sni_fallback)
+            .await?;
+        cx.mark(ConnStep::Tls);
+        Ok(secured)
     }
 }
 

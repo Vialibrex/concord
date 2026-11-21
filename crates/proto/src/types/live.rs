@@ -106,6 +106,39 @@ dto! {
         /// traffic. A route that could not be decided is not reported.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub failure: Option<ConnectionFailure>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub timing: Option<ConnectionTiming>,
+    }
+
+    /// When each step of setting the connection up happened, in microseconds after `accepted`.
+    /// A step the connection did not take is absent; all are fixed by the time it is opened.
+    pub struct ConnectionTiming {
+        /// Unix milliseconds when the core accepted the client's flow, which is before `start`.
+        pub accepted: i64,
+        /// The rules' lookup of the destination, or DIRECT's own when the rules did not need one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub dns_start: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub dns_end: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub routed: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub dial_start: Option<u32>,
+        /// The first hop's TCP connection is up: the destination's for DIRECT, the node's for a proxy.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub connected: Option<u32>,
+        /// The outbound's own TLS or QUIC handshake with its server is done.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub tls: Option<u32>,
+        /// The outbound is ready to carry the connection; absent on a failed dial.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub dial_end: Option<u32>,
+        /// For a MITM upstream: the TLS handshake with the destination is done.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub target_tls: Option<u32>,
+        /// For a MITM upstream: the client's handshake was answered and its requests are read.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub decrypted: Option<u32>,
     }
 
     pub struct ConnectionFailure {
