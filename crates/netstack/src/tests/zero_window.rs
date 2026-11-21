@@ -184,13 +184,19 @@ async fn an_ack_at_the_right_edge_of_a_filled_window_is_taken() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn a_retransmission_that_moves_the_ack_brings_its_window() {
+    // From u32::MAX - 500 the segment past the hole wraps, so SND.WL1 is past 2^32.
+    for peer in [u32::MAX - 2000, u32::MAX - 500] {
+        retransmission_with_window(peer).await;
+    }
+}
+
+async fn retransmission_with_window(peer: u32) {
     let mut stack = TcpStack::new(StackConfig::default());
     let mut out = Wire::default();
     let (local, remote) = addrs();
     let mut stream = stack.connect(local, remote, Congestion::Cubic).unwrap();
     stack.poll(&mut out);
     let start = segment(&out.packets.pop().unwrap()).seq.wrapping_add(1);
-    let peer = u32::MAX - 2000;
     let from = |seq: u32, ack: u32, window: u16| TcpHeader {
         src: remote,
         dst: local,
@@ -229,7 +235,90 @@ async fn a_retransmission_that_moves_the_ack_brings_its_window() {
         .map(|p| segment(p))
         .filter(|s| !s.payload.is_empty())
         .collect();
-    assert!(beyond.is_empty(), "the window closed with that ACK");
+    assert!(
+        beyond.is_empty(),
+        "the window closed with that ACK from {peer}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_smaller_window_on_the_same_seq_and_ack_is_ignored() {
+    let mut stack = TcpStack::new(StackConfig::default());
+    let mut out = Wire::default();
+    let (local, remote) = addrs();
+    let mut stream = stack.connect(local, remote, Congestion::Cubic).unwrap();
+    stack.poll(&mut out);
+    let start = segment(&out.packets.pop().unwrap()).seq.wrapping_add(1);
+    let peer = 1000;
+    let from = |seq: u32, window: u16| TcpHeader {
+        src: remote,
+        dst: local,
+        seq,
+        ack: start,
+        flags: FLAG_ACK,
+        window,
+    };
+    from_peer(
+        &mut stack,
+        &mut out,
+        TcpHeader {
+            flags: FLAG_SYN | FLAG_ACK,
+            ..from(peer - 1, 8000)
+        },
+        &[],
+    );
+    from_peer(&mut stack, &mut out, from(peer, 8000), &[]);
+    from_peer(&mut stack, &mut out, from(peer, 1000), &[]);
+    stack.poll(&mut out);
+    out.packets.clear();
+    stream.write_all(&[7; 8000]).await.unwrap();
+    stack.poll(&mut out);
+    let sent: usize = out.packets.iter().map(|p| segment(p).payload.len()).sum();
+    assert_eq!(sent, 8000, "an older ACK cannot shrink the window");
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_rejected_window_still_counts_as_a_duplicate_ack() {
+    let mut stack = TcpStack::new(StackConfig::default());
+    let mut out = Wire::default();
+    let (local, remote) = addrs();
+    let mut stream = stack.connect(local, remote, Congestion::Cubic).unwrap();
+    stack.poll(&mut out);
+    let start = segment(&out.packets.pop().unwrap()).seq.wrapping_add(1);
+    let peer = 1000;
+    let from = |seq: u32, window: u16| TcpHeader {
+        src: remote,
+        dst: local,
+        seq,
+        ack: start,
+        flags: FLAG_ACK,
+        window,
+    };
+    from_peer(
+        &mut stack,
+        &mut out,
+        TcpHeader {
+            flags: FLAG_SYN | FLAG_ACK,
+            ..from(peer - 1, 8000)
+        },
+        &[],
+    );
+    stack.poll(&mut out);
+    stream.write_all(&[7; 8000]).await.unwrap();
+    stack.poll(&mut out);
+    out.packets.clear();
+
+    for window in [8000, 4000, 1000] {
+        from_peer(&mut stack, &mut out, from(peer, window), &[]);
+    }
+    stack.poll(&mut out);
+    assert!(
+        out.packets
+            .iter()
+            .map(|p| segment(p))
+            .any(|s| s.seq == start && !s.payload.is_empty()),
+        "the third duplicate ACK retransmits SND.UNA"
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
