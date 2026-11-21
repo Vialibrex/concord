@@ -24,6 +24,7 @@ fn label_of(decision: &Decision) -> Option<RuleLabel> {
     decision.rule.as_ref().map(|rule| RuleLabel {
         name: rule.type_name.clone(),
         payload: rule.payload.clone(),
+        index: rule.index,
     })
 }
 
@@ -214,15 +215,9 @@ impl UpstreamDialer for TunnelUpstream {
             Some(rule) => (rule.name.clone(), rule.payload.clone()),
             None => (Arc::from(""), Arc::from("")),
         };
-        let record = Arc::new(ConnRecord::new(
-            meta,
-            chain.into(),
-            Box::new([]),
-            name,
-            payload,
-            false,
-            0,
-        ));
+        let mut record = ConnRecord::new(meta, chain.into(), Box::new([]), name, payload, false, 0);
+        record.rule_index = rule.and_then(|rule| rule.index);
+        let record = Arc::new(record);
         record.mitm.store(true, Ordering::Relaxed);
         let conn = ConnTag::of(&record);
         drop(inner.table.register(record, 0));

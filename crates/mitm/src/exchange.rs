@@ -282,6 +282,7 @@ impl Session {
         let rule = RuleLabel {
             name: rule.into(),
             payload: payload.into(),
+            index: None,
         };
         target.cap.routed(&chain, Some(&rule));
         if let Some(id) = self

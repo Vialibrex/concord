@@ -1376,6 +1376,63 @@ async fn a_failed_dial_is_watched_as_a_connection_that_opens_and_closes_with_why
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_connection_names_the_position_of_the_rule_that_decided_it() {
+    let rig = Rig::new().await;
+    let proxy = free_port();
+    let (by_port, by_match) = (free_port(), free_port());
+    rig.write_config(&format!(
+        "mixed-port: {proxy}\nrules:\n  - DOMAIN,never.test,REJECT\n  - DST-PORT,{by_port},DIRECT\n  - MATCH,DIRECT\n"
+    ));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let mut watch = rig
+        .control
+        .connection_watch(ConnectionWatchParams::default())
+        .await
+        .unwrap();
+
+    let mut streams = Vec::new();
+    for port in [by_port, by_match] {
+        let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+            .await
+            .unwrap();
+        stream
+            .write_all(format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let delta = eventually(&mut watch.events, |delta| {
+            delta
+                .opened
+                .iter()
+                .any(|conn| conn.destination_port == port)
+        })
+        .await;
+        let conn = delta
+            .opened
+            .iter()
+            .find(|conn| conn.destination_port == port)
+            .unwrap();
+        let expected = if port == by_port {
+            (1, "DstPort")
+        } else {
+            (2, "Match")
+        };
+        assert_eq!(
+            (conn.rule_index, conn.rule.as_str()),
+            (Some(expected.0), expected.1)
+        );
+        streams.push(stream);
+    }
+    let rules = rig.control.rule_list(Empty::default()).await.unwrap();
+    assert_eq!(
+        rules.rules[1].kind, "DstPort",
+        "the index points into rule.list"
+    );
+    drop((watch, streams));
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_smart_redial_that_fails_through_every_member_is_watched_as_one_failure() {
     let rig = Rig::new().await;
     let proxy = free_port();

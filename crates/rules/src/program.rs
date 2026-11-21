@@ -20,6 +20,11 @@ impl RuleRef {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    /// Its position in [`RouteProgram::rules`], unless matching started in a sub-rule list.
+    pub fn main_index(self) -> Option<u32> {
+        (self.1 == 0).then_some(self.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -365,7 +365,7 @@ pub(crate) fn new_record(
         Some(rule) => (rule.type_name.clone(), rule.payload.clone()),
         None => (Arc::from(""), Arc::from("")),
     };
-    Arc::new(ConnRecord::new(
+    let mut record = ConnRecord::new(
         flow.conn_meta(remote_destination),
         decision.chain.clone(),
         decision.provider_chain.clone(),
@@ -373,7 +373,9 @@ pub(crate) fn new_record(
         payload,
         decision.leaf.info().kind.is_direct(),
         0,
-    ))
+    );
+    record.rule_index = decision.rule.as_ref().and_then(|rule| rule.index);
+    Arc::new(record)
 }
 
 pub(crate) fn server_host(addr: &str) -> String {

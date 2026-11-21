@@ -167,6 +167,8 @@ impl ConnTag {
 pub struct RuleLabel {
     pub name: Arc<str>,
     pub payload: Arc<str>,
+    /// Its position in the main rule list, as `ConnRecord::rule_index`.
+    pub index: Option<u32>,
 }
 
 #[derive(Debug)]

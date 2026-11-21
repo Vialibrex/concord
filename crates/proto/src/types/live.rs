@@ -94,6 +94,11 @@ dto! {
         pub rule: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         pub rule_payload: String,
+        /// The deciding rule's position, from 0, in the list `rule.list` gave for the config
+        /// the connection was routed by. Absent when no rule decided (the final fallback, a
+        /// global or direct mode, a named proxy) or when matching started in a sub-rule list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub rule_index: Option<u32>,
         pub upload: u64,
         pub download: u64,
         /// Present only on a connection whose dial failed. It is never in `connection.list`;

@@ -394,6 +394,7 @@ impl UpstreamDialer for TestDialer {
             let rule = Some(RuleLabel {
                 name: Arc::from("URLRegex"),
                 payload: Arc::from(needle.as_str()),
+                index: None,
             });
             let reject = match (target, name.as_str()) {
                 (Some(_), _) => None,
@@ -414,6 +415,7 @@ impl UpstreamDialer for TestDialer {
             let rule = Some(RuleLabel {
                 name: Arc::from("DOMAIN"),
                 payload: Arc::from(host.as_str()),
+                index: None,
             });
             return Ok(Route::new(
                 Arc::from([Arc::from("REJECT")]),

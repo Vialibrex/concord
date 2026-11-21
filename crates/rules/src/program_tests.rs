@@ -921,6 +921,36 @@ fn rematch_restarts_a_named_list_and_keeps_its_rule_identity() {
     }
 }
 
+#[test]
+fn a_rule_has_a_main_position_only_when_matching_started_in_the_main_list() {
+    use crate::{MatchCtx, Step};
+    use concord_common::RouteState;
+    let kit = Kit::new();
+    let program = kit.compile_with(
+        &[
+            "DOMAIN,skip.com,A",
+            "SUB-RULE,(NETWORK,tcp),outer",
+            "MATCH,Z",
+        ],
+        &[("outer", &["DOMAIN-SUFFIX,a.com,OUTER"])],
+        8,
+    );
+    let ctx = MatchCtx::new(&kit.geo);
+    let first = |host: &'static str, list: Option<&str>| {
+        let meta = Flow::domain(host).meta();
+        let state = RouteState::seed(&meta.dst);
+        let mut run = program.start();
+        run.restart(list);
+        match run.step(&meta, &state, &ctx) {
+            Step::Candidate { target, rule } => (target.to_string(), rule.main_index()),
+            step => panic!("no candidate: {step:?}"),
+        }
+    };
+    assert_eq!(first("x.a.com", None), ("OUTER".to_string(), Some(1)));
+    assert_eq!(first("b.org", None), ("Z".to_string(), Some(2)));
+    assert_eq!(first("x.a.com", Some("outer")), ("OUTER".to_string(), None));
+}
+
 fn request(host: &'static str, url: &'static str, agent: Option<&'static str>) -> Flow {
     Flow {
         http: Some((url, agent)),

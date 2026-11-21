@@ -47,6 +47,9 @@ pub struct ConnRecord {
     pub provider_chains: Box<[Arc<str>]>,
     pub rule: Arc<str>,
     pub rule_payload: Arc<str>,
+    /// The deciding rule's position in the main rule list of the config it was routed by;
+    /// `None` when no rule decided or matching started in a sub-rule list.
+    pub rule_index: Option<u32>,
     /// Decided by the exit's kind, not its name.
     pub direct: bool,
     pub upload: AtomicU64,
@@ -137,6 +140,7 @@ impl ConnRecord {
             provider_chains,
             rule,
             rule_payload,
+            rule_index: None,
             direct,
             upload: AtomicU64::new(upload),
             download: AtomicU64::new(0),

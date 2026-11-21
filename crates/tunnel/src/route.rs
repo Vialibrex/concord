@@ -9,7 +9,7 @@ use concord_common::{
     TunnelMode,
 };
 use concord_group::{Outbounds, Resolved, Touch};
-use concord_rules::{MatchCtx, RuleInfo, Step};
+use concord_rules::{MatchCtx, RouteProgram, RuleRef, Step};
 use rand::seq::IndexedRandom;
 use tokio::time::timeout;
 
@@ -63,6 +63,7 @@ fn rule_request(flow: &FlowState, state: &RouteState) -> RuleScriptRequest {
 pub(crate) struct MatchedRule {
     pub type_name: Arc<str>,
     pub payload: Arc<str>,
+    pub index: Option<u32>,
 }
 
 pub(crate) struct Decision {
@@ -295,7 +296,7 @@ async fn match_rules(
                         return Ok(rematch_decision(
                             &name,
                             leaf,
-                            Some(matched_rule(runtime.program.rule_at(rule))),
+                            Some(matched_rule(&runtime.program, rule)),
                         )
                         .pending(run.http_pending()));
                     }
@@ -328,7 +329,7 @@ async fn match_rules(
                     candidate
                 };
                 flow.observed = run.take_observed();
-                let matched = matched_rule(runtime.program.rule_at(rule));
+                let matched = matched_rule(&runtime.program, rule);
                 return Decision::of(&runtime.outbounds, target, resolved, Some(matched))
                     .map(|decision| decision.pending(run.http_pending()));
             }
@@ -336,10 +337,12 @@ async fn match_rules(
     }
 }
 
-fn matched_rule(info: RuleInfo<'_>) -> MatchedRule {
+fn matched_rule(program: &RouteProgram, rule: RuleRef) -> MatchedRule {
+    let info = program.rule_at(rule);
     MatchedRule {
         type_name: Arc::from(info.type_name),
         payload: Arc::from(info.payload),
+        index: rule.main_index(),
     }
 }
 

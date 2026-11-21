@@ -145,6 +145,7 @@ pub fn connection_info(record: &ConnRecord) -> ConnectionInfo {
             .collect(),
         rule: record.rule.to_string(),
         rule_payload: record.rule_payload.to_string(),
+        rule_index: record.rule_index,
         upload: record.upload.load(Ordering::Relaxed),
         download: record.download.load(Ordering::Relaxed),
         failure: record.failure.get().map(connection_failure),

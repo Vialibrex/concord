@@ -3394,6 +3394,15 @@
         "rulePayload": {
           "type": "string"
         },
+        "ruleIndex": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "The deciding rule's position, from 0, in the list `rule.list` gave for the config\nthe connection was routed by. Absent when no rule decided (the final fallback, a\nglobal or direct mode, a named proxy) or when matching started in a sub-rule list."
+        },
         "upload": {
           "type": "integer",
           "format": "uint64",
