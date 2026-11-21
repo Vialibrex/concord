@@ -29,6 +29,7 @@ pub(super) async fn scan(inner: Arc<Inner>) {
             if let Some(session) = slot.value().get()
                 && idle(session.last_active.load(Ordering::Relaxed))
             {
+                session.end(ConnEnd::new(EndReason::Timeout));
                 session.close();
             }
         }

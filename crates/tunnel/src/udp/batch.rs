@@ -317,6 +317,7 @@ pub(super) fn send_batch(inner: &Arc<Inner>, session: &Arc<Session>, mut rest: &
                     tracing::debug!("[UDP] send to {} failed: {err}", datagram.dst);
                 }
                 if is_gone(&err) {
+                    session.end(ConnEnd::of_error(&err));
                     retire(inner, session);
                     return;
                 }

@@ -189,6 +189,7 @@ pub(super) fn send(
         Poll::Ready(Err(err)) => {
             tracing::debug!("[UDP] send to {target} failed: {err}");
             if is_gone(&err) {
+                session.end(ConnEnd::of_error(&err));
                 retire(inner, session);
             }
         }
@@ -261,6 +262,7 @@ pub(super) async fn drain_overflow(inner: Arc<Inner>, session: Arc<Session>) {
             Err(err) => {
                 tracing::debug!("[UDP] send to {target} failed: {err}");
                 if is_gone(&err) {
+                    session.end(ConnEnd::of_error(&err));
                     retire(&inner, &session);
                     return;
                 }

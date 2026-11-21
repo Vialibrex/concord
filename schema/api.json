@@ -3497,9 +3497,16 @@
             "$ref": "#/$defs/ConnectionCounter"
           },
           "description": "Totals since each connection opened. Every id in `closed` has an\nentry here with its final totals, whether or not the subscription\nasked for `counters`; the others are only sent when it did, for the\nconnections whose traffic moved."
+        },
+        "ended": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ConnectionEnd"
+          },
+          "description": "Every id in `closed` has an entry here with why it ended."
         }
       },
-      "description": "An `opened` entry that a client already has is a repeat and replaces it.\nA connection that opened and closed between two batches is in both lists,\nso apply `opened` first, then `counters`, then `closed`."
+      "description": "An `opened` entry that a client already has is a repeat and replaces it.\nA connection that opened and closed between two batches is in both lists,\nso apply `opened` first, then `counters` and `ended`, then `closed`."
     },
     "ConnectionCounter": {
       "type": "object",
@@ -3525,6 +3532,48 @@
         "upload",
         "download"
       ]
+    },
+    "ConnectionEnd": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reason": {
+          "$ref": "#/$defs/ConnectionEndReason"
+        },
+        "endedAt": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Unix milliseconds."
+        },
+        "message": {
+          "type": "string",
+          "description": "The error's text for `timeout`, `reset` and `error`, for display only."
+        }
+      },
+      "required": [
+        "id",
+        "reason",
+        "endedAt"
+      ],
+      "description": "Why a connection ended and when."
+    },
+    "ConnectionEndReason": {
+      "type": "string",
+      "enum": [
+        "local",
+        "remote",
+        "finished",
+        "timeout",
+        "reset",
+        "core",
+        "error",
+        "failed"
+      ],
+      "description": "Why a connection ended. `local`, `remote`: that side finished first. `finished`: both\ndid and nothing tells which first. `core`: the core closed it (`connection.close`, a\nconfig change, a full UDP table, a stop). `failed`: its dial failed, as `failure` says."
     },
     "ConnectionCloseParams": {
       "type": "object",

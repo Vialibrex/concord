@@ -3,8 +3,8 @@ use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use concord_common::{
-    Change, ConnFailure, ConnRecord, DnsRecord, FailureKind, GeneralChange as EngineChange,
-    LogLevel as EngineLevel, Origin, StateChange,
+    Change, ConnEnd, ConnFailure, ConnRecord, DnsRecord, EndReason, FailureKind,
+    GeneralChange as EngineChange, LogLevel as EngineLevel, Origin, StateChange,
 };
 use concord_engine::{
     DelayRecord as EngineDelay, Failure, GeneralView, GroupView, NodeStateView, NodeView,
@@ -12,11 +12,11 @@ use concord_engine::{
 };
 use concord_proto::ApiError;
 use concord_proto::types::{
-    Capabilities, ChangeOrigin, ConnectionFailure, ConnectionFailureKind, ConnectionInfo,
-    CoreEvent, DelayRecord, DnsEntry, DnsQueryResult, DnsQuestion, DnsRecord as WireRecord,
-    FaultReason, FaultService, Features, GeneralChange, GeneralState, GroupInfo, LogLevel, Network,
-    NodeInfo, ProviderInfo, ProviderKind, ProxyState, ServiceFault, StateChangeKind,
-    SubscriptionInfo, TunState, UrlHealth, Warning,
+    Capabilities, ChangeOrigin, ConnectionEnd, ConnectionEndReason, ConnectionFailure,
+    ConnectionFailureKind, ConnectionInfo, CoreEvent, DelayRecord, DnsEntry, DnsQueryResult,
+    DnsQuestion, DnsRecord as WireRecord, FaultReason, FaultService, Features, GeneralChange,
+    GeneralState, GroupInfo, LogLevel, Network, NodeInfo, ProviderInfo, ProviderKind, ProxyState,
+    ServiceFault, StateChangeKind, SubscriptionInfo, TunState, UrlHealth, Warning,
 };
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -149,6 +149,24 @@ pub fn connection_info(record: &ConnRecord) -> ConnectionInfo {
         upload: record.upload.load(Ordering::Relaxed),
         download: record.download.load(Ordering::Relaxed),
         failure: record.failure.get().map(connection_failure),
+    }
+}
+
+pub fn connection_end(id: u64, end: &ConnEnd) -> ConnectionEnd {
+    ConnectionEnd {
+        id,
+        reason: match end.reason {
+            EndReason::Local => ConnectionEndReason::Local,
+            EndReason::Remote => ConnectionEndReason::Remote,
+            EndReason::Finished => ConnectionEndReason::Finished,
+            EndReason::Timeout => ConnectionEndReason::Timeout,
+            EndReason::Reset => ConnectionEndReason::Reset,
+            EndReason::Core => ConnectionEndReason::Core,
+            EndReason::Error => ConnectionEndReason::Error,
+            EndReason::Failed => ConnectionEndReason::Failed,
+        },
+        ended_at: unix_millis(end.at),
+        message: end.message.clone(),
     }
 }
 

@@ -802,6 +802,7 @@ async fn resync_overflow_stops_the_stream_with_a_resync_and_never_drops_silently
             opened: vec![],
             closed: vec![id],
             counters: vec![],
+            ended: vec![],
         });
     }
     client
@@ -817,6 +818,7 @@ async fn resync_overflow_stops_the_stream_with_a_resync_and_never_drops_silently
         opened: vec![],
         closed: vec![99],
         counters: vec![],
+        ended: vec![],
     });
     client.quiet().await;
     assert_eq!(
@@ -834,6 +836,7 @@ async fn resync_overflow_stops_the_stream_with_a_resync_and_never_drops_silently
         opened: vec![],
         closed: vec![1],
         counters: vec![],
+        ended: vec![],
     });
     assert_eq!(client.event().await["params"]["data"][0]["closed"][0], 1);
     drop(client);

@@ -1376,6 +1376,71 @@ async fn a_failed_dial_is_watched_as_a_connection_that_opens_and_closes_with_why
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_connection_says_which_side_ended_it_or_that_the_core_did() {
+    let rig = Rig::new().await;
+    let proxy = free_port();
+    rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let mut watch = rig
+        .control
+        .connection_watch(ConnectionWatchParams::default())
+        .await
+        .unwrap();
+    let server = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = server.local_addr().unwrap().port();
+
+    for expected in [
+        ConnectionEndReason::Local,
+        ConnectionEndReason::Remote,
+        ConnectionEndReason::Core,
+    ] {
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+            .await
+            .unwrap();
+        client
+            .write_all(format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut answer = [0u8; 39];
+        client.read_exact(&mut answer).await.unwrap();
+        let (mut far, _) = server.accept().await.unwrap();
+        let delta = eventually(&mut watch.events, |delta| !delta.opened.is_empty()).await;
+        let id = delta.opened[0].id;
+        match expected {
+            ConnectionEndReason::Local => {
+                client.shutdown().await.unwrap();
+                let mut rest = Vec::new();
+                far.read_to_end(&mut rest).await.unwrap();
+                drop(far);
+            }
+            ConnectionEndReason::Remote => {
+                far.shutdown().await.unwrap();
+                let mut rest = Vec::new();
+                client.read_to_end(&mut rest).await.unwrap();
+                client.shutdown().await.unwrap();
+            }
+            _ => {
+                rig.control
+                    .connection_close(ConnectionCloseParams {
+                        ids: Some(vec![id]),
+                        all: false,
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+        let closed = eventually(&mut watch.events, |delta| delta.closed.contains(&id)).await;
+        let end = closed.ended.iter().find(|end| end.id == id).unwrap();
+        assert_eq!(end.reason, expected);
+        assert!(end.ended_at >= delta.opened[0].start);
+        drop(client);
+    }
+    drop(watch);
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_connection_names_the_position_of_the_rule_that_decided_it() {
     let rig = Rig::new().await;
     let proxy = free_port();

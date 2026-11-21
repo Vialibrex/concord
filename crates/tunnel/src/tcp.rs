@@ -8,11 +8,11 @@ use concord_common::packet::{PacketBuf, PacketSession};
 use concord_common::stream::PeekedStream;
 use concord_common::stream_buffer::{ReadBufferOptions, StreamBuffer};
 use concord_common::{
-    Address, BoxRead, BoxStream, BoxWrite, ConnFailure, ConnRecord, DialCx, FlowMeta, InboundInfo,
-    InboundKind, Initiator, Network, Stream,
+    Address, BoxRead, BoxStream, BoxWrite, ConnEnd, ConnFailure, ConnRecord, DialCx, EndReason,
+    FlowMeta, InboundInfo, InboundKind, Initiator, Network, Stream,
 };
 use concord_group::Touch;
-use concord_net::{Meter, relay};
+use concord_net::{Direction, Meter, RelayEnd, RelayOutcome, relay};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::WaitForCancellationFutureOwned;
@@ -77,7 +77,7 @@ pub(crate) async fn handle(inner: Arc<Inner>, meta: FlowMeta, stream: BoxStream)
         Box::new(PeekedStream::new(head, stream))
     };
     let cancel = tracked.record.cancel.clone();
-    match tap {
+    let outcome = match tap {
         Some(tap) => {
             let meter = SmartMeter {
                 tracked,
@@ -85,10 +85,22 @@ pub(crate) async fn handle(inner: Arc<Inner>, meta: FlowMeta, stream: BoxStream)
             };
             let outcome = relay(local, remote, &meter, &cancel).await;
             tap.finish(flow_end(&outcome));
+            outcome
         }
-        None => {
-            relay(local, remote, &TrackedMeter(tracked), &cancel).await;
-        }
+        None => relay(local, remote, &TrackedMeter(tracked), &cancel).await,
+    };
+    tracked.record.set_end(end_of(&outcome));
+}
+
+fn end_of(outcome: &RelayOutcome) -> ConnEnd {
+    match &outcome.end {
+        RelayEnd::Eof => ConnEnd::new(match outcome.first_finished {
+            Some(Direction::Upload) => EndReason::Local,
+            Some(Direction::Download) => EndReason::Remote,
+            None => EndReason::Finished,
+        }),
+        RelayEnd::Cancelled => ConnEnd::new(EndReason::Core),
+        RelayEnd::Error(err) => ConnEnd::of_error(err),
     }
 }
 

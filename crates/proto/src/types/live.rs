@@ -124,9 +124,20 @@ dto! {
         pub download: u64,
     }
 
+    /// Why a connection ended and when.
+    pub struct ConnectionEnd {
+        pub id: u64,
+        pub reason: ConnectionEndReason,
+        /// Unix milliseconds.
+        pub ended_at: i64,
+        /// The error's text for `timeout`, `reset` and `error`, for display only.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        pub message: String,
+    }
+
     /// An `opened` entry that a client already has is a repeat and replaces it.
     /// A connection that opened and closed between two batches is in both lists,
-    /// so apply `opened` first, then `counters`, then `closed`.
+    /// so apply `opened` first, then `counters` and `ended`, then `closed`.
     pub struct ConnectionDelta {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub opened: Vec<ConnectionInfo>,
@@ -138,6 +149,9 @@ dto! {
         /// connections whose traffic moved.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub counters: Vec<ConnectionCounter>,
+        /// Every id in `closed` has an entry here with why it ended.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pub ended: Vec<ConnectionEnd>,
     }
 
     pub struct ConnectionCloseParams {
@@ -301,6 +315,22 @@ pub enum ConnectionFailureKind {
     Dns,
     Handshake,
     Other,
+}
+
+/// Why a connection ended. `local`, `remote`: that side finished first. `finished`: both
+/// did and nothing tells which first. `core`: the core closed it (`connection.close`, a
+/// config change, a full UDP table, a stop). `failed`: its dial failed, as `failure` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionEndReason {
+    Local,
+    Remote,
+    Finished,
+    Timeout,
+    Reset,
+    Core,
+    Error,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

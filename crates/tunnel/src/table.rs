@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use concord_common::sync::lock;
-use concord_common::{ConnRecord, CoreEvent, EventSink, Tasks, TrafficDelta};
+use concord_common::{ConnEnd, ConnRecord, CoreEvent, EndReason, EventSink, Tasks, TrafficDelta};
 use dashmap::DashMap;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -152,6 +152,7 @@ impl Registration {
 
 impl Drop for Registration {
     fn drop(&mut self) {
+        self.tracked.record.settle_end();
         self.tracked.record.close();
         self.tracked.table.open.remove(&self.tracked.record.id);
         self.tracked.table.remember_closed(&self.tracked.record);
@@ -287,6 +288,7 @@ impl ConnTable {
             return;
         }
         let record = record();
+        record.set_end(ConnEnd::new(EndReason::Failed));
         record.close();
         self.events.publish(CoreEvent::Request(record.clone()));
         self.events.closed(&record);
@@ -472,6 +474,7 @@ mod tests {
         requests: AtomicUsize,
         traffic: StdMutex<Vec<Vec<TrafficDelta>>>,
         closed: StdMutex<Vec<(u64, u64, u64)>>,
+        ends: StdMutex<Vec<(u64, Option<EndReason>)>>,
         /// Counters and closes by sequence number, in the order the sink took them.
         heard: StdMutex<Vec<(&'static str, u64)>>,
         /// Runs inside the next accepted traffic offer.
@@ -507,6 +510,7 @@ mod tests {
         }
 
         fn closed(&self, record: &ConnRecord) {
+            lock(&self.ends).push((record.seq, record.end().map(|end| end.reason)));
             lock(&self.heard).push(("closed", record.seq));
             lock(&self.closed).push((
                 record.seq,
@@ -695,6 +699,32 @@ mod tests {
 
         let unheard = ConnTable::new(Arc::new(NullSink), Default::default());
         unheard.failed(|| panic!("nothing is built while no one listens"));
+    }
+
+    #[tokio::test]
+    async fn a_close_nobody_explained_says_whether_the_core_closed_it() {
+        let sink = Arc::new(Sink::default());
+        let table = ConnTable::new(sink.clone(), Default::default());
+        let let_go = table.register(record(false), 0);
+        let closed = table.register(record(false), 0);
+        let told = table.register(record(false), 0);
+        let seqs = [&let_go, &closed, &told].map(|reg| reg.tracked().record.seq);
+        table.close(&closed.tracked().record.id);
+        told.tracked()
+            .record
+            .set_end(ConnEnd::new(EndReason::Remote));
+        drop((let_go, closed, told));
+        let failed = record(false);
+        table.failed(|| failed.clone());
+        assert_eq!(
+            *lock(&sink.ends),
+            [
+                (seqs[0], Some(EndReason::Finished)),
+                (seqs[1], Some(EndReason::Core)),
+                (seqs[2], Some(EndReason::Remote)),
+                (failed.seq, Some(EndReason::Failed)),
+            ]
+        );
     }
 
     #[tokio::test]

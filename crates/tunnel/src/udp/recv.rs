@@ -21,7 +21,10 @@ pub(super) async fn receive_loop(inner: Arc<Inner>, session: Arc<Session>) {
                 () = cancel.cancelled() => break,
                 received = recv_packet(&*session.inner) => match received {
                     Ok(received) => received,
-                    Err(_) => break,
+                    Err(err) => {
+                        session.end(ConnEnd::of_error(&err));
+                        break;
+                    }
                 },
             };
             let from = arrived(
@@ -33,6 +36,9 @@ pub(super) async fn receive_loop(inner: Arc<Inner>, session: Arc<Session>) {
                 &from,
             );
             if !write_back(&session, &cancel, &packet, &from).await {
+                if !cancel.is_cancelled() {
+                    session.end(ConnEnd::new(EndReason::Local));
+                }
                 break;
             }
         }
@@ -61,6 +67,9 @@ pub(super) async fn receive_batches(
         };
         for (packet, from) in backlog {
             if !write_back(session, cancel, &packet, &from).await {
+                if !cancel.is_cancelled() {
+                    session.end(ConnEnd::new(EndReason::Local));
+                }
                 return;
             }
         }
@@ -78,7 +87,10 @@ pub(super) fn take_batch(
     RECEIVED.with_borrow_mut(|batch| {
         match session.inner.poll_recv_batch(cx, batch) {
             Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(_)) => return Poll::Ready(None),
+            Poll::Ready(Err(err)) => {
+                session.end(ConnEnd::of_error(&err));
+                return Poll::Ready(None);
+            }
             Poll::Ready(Ok(())) => {}
         }
         let reply = session.reply.load_full();
@@ -96,6 +108,7 @@ pub(super) fn take_batch(
                 match reply.poll_write_back(cx, payload, &from) {
                     Poll::Ready(result) => {
                         if !delivered(result) {
+                            session.end(ConnEnd::new(EndReason::Local));
                             return Poll::Ready(None);
                         }
                         continue;

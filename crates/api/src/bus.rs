@@ -6,7 +6,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use concord_common::sync::lock;
-use concord_common::{ConnRecord, CoreEvent as EngineEvent, EventSink, TrafficDelta};
+use concord_common::{ConnEnd, ConnRecord, CoreEvent as EngineEvent, EventSink, TrafficDelta};
 use concord_engine::Engine as EngineCore;
 use concord_proto::StreamPolicy;
 use concord_proto::types::{ConnectionDelta, CoreEvent, DnsEntry, LogEntry, LogLevel, RouteStamp};
@@ -119,10 +119,15 @@ fn unix_millis(at: SystemTime) -> i64 {
     })
 }
 
+struct Closed {
+    totals: (u64, u64),
+    end: ConnEnd,
+}
+
 #[derive(Default)]
 struct ConnPending {
     opened: Vec<Arc<ConnRecord>>,
-    closed: HashMap<u64, (u64, u64)>,
+    closed: HashMap<u64, Closed>,
     counters: HashMap<u64, (u64, u64)>,
     overflowed: bool,
     resync_sent: bool,
@@ -171,9 +176,15 @@ impl ConnSub {
         self.change(|pending| pending.opened.push(record));
     }
 
-    fn closed(&self, seq: u64, totals: (u64, u64)) {
+    fn closed(&self, seq: u64, totals: (u64, u64), end: &ConnEnd) {
         self.change(|pending| {
-            pending.closed.insert(seq, totals);
+            pending.closed.insert(
+                seq,
+                Closed {
+                    totals,
+                    end: end.clone(),
+                },
+            );
         });
     }
 
@@ -215,7 +226,12 @@ impl ConnSub {
         for record in &opened {
             counters.remove(&record.seq);
         }
-        counters.extend(&closed);
+        counters.extend(closed.iter().map(|(id, closed)| (*id, closed.totals)));
+        let mut ended: Vec<_> = closed
+            .iter()
+            .map(|(id, closed)| convert::connection_end(*id, &closed.end))
+            .collect();
+        ended.sort_unstable_by_key(|end| end.id);
         let mut closed: Vec<u64> = closed.into_keys().collect();
         closed.sort_unstable();
         let opened = opened
@@ -238,6 +254,7 @@ impl ConnSub {
                 opened,
                 closed,
                 counters,
+                ended,
             },
             dropped: 0,
         }))
@@ -462,7 +479,8 @@ impl EventSink for EventBus {
                 record.upload.load(Ordering::Relaxed),
                 record.download.load(Ordering::Relaxed),
             );
-            self.conn.each(|sub| sub.closed(record.seq, totals));
+            let end = record.settle_end();
+            self.conn.each(|sub| sub.closed(record.seq, totals, end));
         }
     }
 }
@@ -480,6 +498,7 @@ mod tests {
     use concord_common::{
         ConnMeta, DnsMode, Host, InboundInfo, InboundKind, Network as CommonNetwork,
     };
+    use concord_proto::types::ConnectionEndReason;
     use futures_util::{FutureExt, StreamExt};
 
     use super::*;
@@ -633,6 +652,39 @@ mod tests {
             [(second.seq, 3, 12)],
             "a connection opened in an earlier batch still closes with its totals"
         );
+    }
+
+    #[test]
+    fn every_close_says_why_the_connection_ended() {
+        let bus = EventBus::new();
+        let mut stream = bus.watch_connections(false);
+        let (told, closed, failed) = (record(), record(), record());
+        let mut remote = concord_common::ConnEnd::new(concord_common::EndReason::Remote);
+        remote.at = UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123);
+        told.set_end(remote);
+        closed.close();
+        failed.set_end(concord_common::ConnEnd::of_error(&std::io::Error::from(
+            std::io::ErrorKind::ConnectionReset,
+        )));
+        for record in [&told, &closed, &failed] {
+            bus.closed(record);
+        }
+        let data = pull_event(&mut stream);
+        assert_eq!(data.closed, [told.seq, closed.seq, failed.seq]);
+        let ended: Vec<_> = data
+            .ended
+            .iter()
+            .map(|end| (end.id, end.reason, end.message.is_empty()))
+            .collect();
+        assert_eq!(
+            ended,
+            [
+                (told.seq, ConnectionEndReason::Remote, true),
+                (closed.seq, ConnectionEndReason::Core, true),
+                (failed.seq, ConnectionEndReason::Reset, false),
+            ]
+        );
+        assert_eq!(data.ended[0].ended_at, 1_700_000_000_123);
     }
 
     #[test]

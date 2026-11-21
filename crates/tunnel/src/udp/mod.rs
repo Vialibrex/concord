@@ -15,7 +15,8 @@ use concord_common::addr::unmap;
 use concord_common::packet::{Datagram, PacketSession, RecvBatch, recv_packet, send_packet};
 use concord_common::sync::{lock, read, write};
 use concord_common::{
-    Address, DialCx, FlowMeta, Initiator, Outbound, PacketBuf, UdpFlow, UdpPayload, UdpReply,
+    Address, ConnEnd, DialCx, EndReason, FlowMeta, Initiator, Outbound, PacketBuf, UdpFlow,
+    UdpPayload, UdpReply,
 };
 use concord_group::Touch;
 use dashmap::DashMap;
@@ -162,6 +163,10 @@ impl Session {
 
     fn close(&self) {
         self.registration.tracked().record.close();
+    }
+
+    fn end(&self, end: ConnEnd) {
+        self.registration.tracked().record.set_end(end);
     }
 
     fn wake_replies(&self) {
