@@ -23,7 +23,7 @@ use rustls::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::ciphers::Tls12GcmSeal;
-use crate::record_io::{RECORD_HEADER_LEN, RecordIo};
+use crate::record_io::{RECORD_HEADER_LEN, ReadHalf, RecordIo, Socket};
 
 const MAX_PLAINTEXT: usize = 16 * 1024;
 /// RFC 5246 6.2.3 lets a TLS 1.2 record grow by 2048 bytes; TLS 1.3 by 256.
@@ -242,12 +242,10 @@ impl DerefMut for RecordBuffer {
 trait RecordReader: AsyncRead + Unpin {
     fn record_aligned(&self) -> bool;
 
-    fn tcp(&self) -> Option<&tokio::net::TcpStream> {
-        None
-    }
+    fn tcp(&self) -> Option<&tokio::net::TcpStream>;
 }
 
-impl RecordReader for RecordIo<BoxStream> {
+impl<S: Socket + AsyncRead + Unpin> RecordReader for RecordIo<S> {
     fn record_aligned(&self) -> bool {
         self.is_aligned()
     }
@@ -256,14 +254,8 @@ impl RecordReader for RecordIo<BoxStream> {
         if self.is_aligned() {
             None
         } else {
-            self.get_ref().tcp()
+            self.get_ref().socket()
         }
-    }
-}
-
-impl RecordReader for RecordIo<BoxRead> {
-    fn record_aligned(&self) -> bool {
-        self.is_aligned()
     }
 }
 
@@ -923,14 +915,14 @@ impl AsyncWrite for RecordStream {
 
 /// The read half of a connection on the record layer.
 pub struct TlsRead {
-    io: RecordIo<BoxRead>,
+    io: RecordIo<ReadHalf>,
     recv: Recv,
 }
 
 impl TlsRead {
     /// The transport under the records; only meaningful at a record boundary.
-    pub fn raw_mut(&mut self) -> &mut BoxRead {
-        self.io.get_mut()
+    pub fn raw_mut(&mut self) -> &mut (dyn AsyncRead + std::marker::Send + Unpin + 'static) {
+        self.io.get_mut().as_dyn()
     }
 
     pub fn at_record_boundary(&self) -> bool {

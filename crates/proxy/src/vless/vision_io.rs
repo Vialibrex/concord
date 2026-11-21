@@ -17,7 +17,7 @@ pub(crate) trait VisionWrite: AsyncWrite + Send + Unpin + 'static {
 }
 
 impl VisionRead for TlsRead {
-    type Raw = concord_common::BoxRead;
+    type Raw = dyn AsyncRead + Send + Unpin;
     fn raw_read(&mut self) -> &mut Self::Raw {
         self.raw_mut()
     }

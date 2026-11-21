@@ -78,7 +78,7 @@ pub use outbound::{
     SockOpts, SocketFactory,
 };
 #[cfg(feature = "io")]
-pub use owned_tcp::OwnedTcp;
+pub use owned_tcp::{OwnedTcp, TcpRead};
 #[cfg(feature = "io")]
 pub use packet::{
     Datagram, PacketBuf, PacketSession, RecvBatch, UdpPayload, recv_packet, send_packet,

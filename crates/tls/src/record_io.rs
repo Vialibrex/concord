@@ -3,7 +3,7 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
-use concord_common::{BoxRead, BoxStream, BoxWrite, Stream};
+use concord_common::{BoxRead, BoxStream, BoxWrite, Stream, TcpRead};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::error::invalid_data;
@@ -83,18 +83,85 @@ impl<S> RecordIo<S> {
     }
 }
 
+/// The read half of a split transport. A bare TCP socket keeps its type, so an unaligned reader
+/// can still finish a record and read what follows it in one vectored call.
+pub(crate) enum ReadHalf {
+    Tcp(TcpRead),
+    Other(BoxRead),
+}
+
+/// A transport that may be a bare TCP socket.
+pub(crate) trait Socket {
+    fn socket(&self) -> Option<&tokio::net::TcpStream>;
+}
+
+impl Socket for BoxStream {
+    fn socket(&self) -> Option<&tokio::net::TcpStream> {
+        self.tcp()
+    }
+}
+
+impl Socket for ReadHalf {
+    fn socket(&self) -> Option<&tokio::net::TcpStream> {
+        match self {
+            ReadHalf::Tcp(read) => Some(read.tcp()),
+            ReadHalf::Other(_) => None,
+        }
+    }
+}
+
+impl ReadHalf {
+    pub(crate) fn as_dyn(&mut self) -> &mut (dyn AsyncRead + Send + Unpin + 'static) {
+        match self {
+            ReadHalf::Tcp(read) => read,
+            ReadHalf::Other(read) => read,
+        }
+    }
+}
+
+impl AsyncRead for ReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(self.get_mut().as_dyn()).poll_read(cx, buf)
+    }
+}
+
 impl RecordIo<BoxStream> {
     /// The read half keeps the record position, so a split mid-record stays aligned.
-    pub(crate) fn into_split(self) -> (RecordIo<BoxRead>, BoxWrite) {
-        let (read, write) = self.inner.into_split();
+    pub(crate) fn into_split(self) -> (RecordIo<ReadHalf>, BoxWrite) {
+        let RecordIo {
+            inner,
+            header,
+            state,
+            aligned,
+        } = self;
+        let (read, write) = if !aligned && inner.tcp().is_some() {
+            match inner.into_tcp() {
+                Ok(tcp) => {
+                    let (read, write) = tcp.into_halves();
+                    (ReadHalf::Tcp(read), write)
+                }
+                Err(inner) => split_other(inner),
+            }
+        } else {
+            split_other(inner)
+        };
         let reader = RecordIo {
             inner: read,
-            header: self.header,
-            state: self.state,
-            aligned: self.aligned,
+            header,
+            state,
+            aligned,
         };
         (reader, write)
     }
+}
+
+fn split_other(inner: BoxStream) -> (ReadHalf, BoxWrite) {
+    let (read, write) = inner.into_split();
+    (ReadHalf::Other(read), write)
 }
 
 fn read_some<S: AsyncRead + Unpin>(
@@ -346,6 +413,21 @@ mod tests {
             let err = io.read(&mut buf).await.unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         }
+    }
+
+    #[tokio::test]
+    async fn an_unaligned_split_of_a_bare_socket_keeps_the_socket() {
+        let (near, _far) = concord_test_support::tcp_pair().await;
+        let (read, _) = RecordIo::unaligned(Box::new(near) as BoxStream).into_split();
+        assert!(read.get_ref().socket().is_some());
+
+        let (near, _far) = concord_test_support::tcp_pair().await;
+        let (read, _) = RecordIo::new(Box::new(near) as BoxStream).into_split();
+        assert!(read.get_ref().socket().is_none());
+
+        let (near, _far) = duplex(64);
+        let (read, _) = RecordIo::unaligned(Box::new(near) as BoxStream).into_split();
+        assert!(read.get_ref().socket().is_none());
     }
 
     #[tokio::test]

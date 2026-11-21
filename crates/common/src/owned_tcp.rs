@@ -6,6 +6,7 @@ use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::net::tcp::OwnedReadHalf;
 
 use crate::{BoxRead, BoxStream, BoxWrite, RawSocket, Stream};
 
@@ -40,6 +41,20 @@ impl OwnedTcp {
 
     pub fn into_std(self) -> io::Result<(std::net::TcpStream, Option<Arc<dyn Send + Sync>>)> {
         Ok((self.stream.into_std()?, self.guard))
+    }
+
+    pub fn into_halves(self) -> (TcpRead, BoxWrite) {
+        let (read, write) = self.stream.into_split();
+        (
+            TcpRead(Guarded {
+                inner: read,
+                _guard: self.guard.clone(),
+            }),
+            Box::new(Guarded {
+                inner: write,
+                _guard: self.guard,
+            }),
+        )
     }
 }
 
@@ -116,18 +131,28 @@ impl Stream for OwnedTcp {
     }
 
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
-        let OwnedTcp { stream, guard, .. } = *self;
-        let (read, write) = stream.into_split();
-        (
-            Box::new(Guarded {
-                inner: read,
-                _guard: guard.clone(),
-            }),
-            Box::new(Guarded {
-                inner: write,
-                _guard: guard,
-            }),
-        )
+        let (read, write) = self.into_halves();
+        (Box::new(read), write)
+    }
+}
+
+/// The read half of a split `OwnedTcp`, which still exposes its socket so a reader can wait
+/// for readiness and read vectored itself.
+pub struct TcpRead(Guarded<OwnedReadHalf>);
+
+impl TcpRead {
+    pub fn tcp(&self) -> &TcpStream {
+        self.0.inner.as_ref()
+    }
+}
+
+impl AsyncRead for TcpRead {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().0).poll_read(cx, buffer)
     }
 }
 
