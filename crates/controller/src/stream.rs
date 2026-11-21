@@ -242,14 +242,14 @@ impl Table {
                     for info in data.opened {
                         self.open.insert(info.id, info);
                     }
-                    for id in data.closed {
-                        self.open.remove(&id);
-                    }
                     for counter in data.counters {
                         if let Some(info) = self.open.get_mut(&counter.id) {
                             info.upload = counter.upload;
                             info.download = counter.download;
                         }
+                    }
+                    for id in data.closed {
+                        self.open.remove(&id);
                     }
                 }
                 Some(Delivery::Resync) | None => {

@@ -3148,7 +3148,7 @@
             "boolean",
             "null"
           ],
-          "description": "Send `counters` in the deltas. Default true; a client that shows no\ntraffic figures turns them off and the stream carries only opens and\ncloses."
+          "description": "Send the running `counters` in the deltas. Default true; a client\nthat shows no traffic figures turns them off and the stream carries\nonly opens and closes, each close still with its final totals."
         },
         "credit": {
           "type": [
@@ -3435,10 +3435,11 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/ConnectionCounter"
-          }
+          },
+          "description": "Totals since each connection opened. Every id in `closed` has an\nentry here with its final totals, whether or not the subscription\nasked for `counters`; the others are only sent when it did, for the\nconnections whose traffic moved."
         }
       },
-      "description": "An `opened` entry that a client already has is a repeat and replaces it.\nA connection that opened and closed between two batches is in both lists,\nso apply `opened` first and `closed` after."
+      "description": "An `opened` entry that a client already has is a repeat and replaces it.\nA connection that opened and closed between two batches is in both lists,\nso apply `opened` first, then `counters`, then `closed`."
     },
     "ConnectionCounter": {
       "type": "object",

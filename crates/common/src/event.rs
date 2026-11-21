@@ -247,8 +247,8 @@ pub trait EventSink: Send + Sync {
         true
     }
 
-    /// A listed connection ended. `seq` is the record's.
-    fn closed(&self, _seq: u64) {}
+    /// A listed connection ended; its counters no longer move.
+    fn closed(&self, _record: &ConnRecord) {}
 }
 
 pub struct NullSink;

@@ -1097,6 +1097,24 @@ async fn the_traffic_stream_ticks_on_its_interval_and_totals_start_at_the_snapsh
     rig.finish().await;
 }
 
+async fn echo_target() -> u16 {
+    let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = target.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = target.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = [0u8; 256];
+                while let Ok(count) = stream.read(&mut buffer).await {
+                    if count == 0 || stream.write_all(&buffer[..count]).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
 async fn through_the_proxy(proxy: u16, target: u16) -> TcpStream {
     let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
         .await
@@ -1129,20 +1147,7 @@ async fn connections_arrive_as_a_snapshot_then_opens_counters_and_closes() {
     rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
     rig.apply().await.unwrap();
     rig.control.engine_start(Empty::default()).await.unwrap();
-    let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let target_port = target.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        while let Ok((mut stream, _)) = target.accept().await {
-            tokio::spawn(async move {
-                let mut buffer = [0u8; 256];
-                while let Ok(count) = stream.read(&mut buffer).await {
-                    if count == 0 || stream.write_all(&buffer[..count]).await.is_err() {
-                        return;
-                    }
-                }
-            });
-        }
-    });
+    let target_port = echo_target().await;
 
     let mut first = through_the_proxy(proxy, target_port).await;
     for _ in 0..100 {
@@ -1216,6 +1221,102 @@ async fn connections_arrive_as_a_snapshot_then_opens_counters_and_closes() {
     );
     drop(watch);
     assert_eq!(rig.bus.subscribers(), 0);
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_connection_brings_its_final_totals_to_a_watch_without_counters() {
+    let rig = Rig::new().await;
+    let proxy = free_port();
+    rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let target_port = echo_target().await;
+    let mut watch = rig
+        .control
+        .connection_watch(ConnectionWatchParams {
+            counters: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let mut stream = through_the_proxy(proxy, target_port).await;
+    let opened = eventually(&mut watch.events, |delta| !delta.opened.is_empty()).await;
+    let id = opened.opened[0].id;
+    stream.write_all(b"ping-pong").await.unwrap();
+    let mut echoed = [0u8; 9];
+    stream.read_exact(&mut echoed).await.unwrap();
+    stream.shutdown().await.unwrap();
+    drop(stream);
+
+    let closed = eventually(&mut watch.events, |delta| delta.closed.contains(&id)).await;
+    let totals = closed
+        .counters
+        .iter()
+        .find(|counter| counter.id == id)
+        .expect("a close comes with its totals");
+    assert_eq!(
+        (totals.upload, totals.download),
+        (9, 9),
+        "the tunnelled bytes, the CONNECT exchange left out"
+    );
+    assert!(
+        closed
+            .counters
+            .iter()
+            .all(|counter| closed.closed.contains(&counter.id)),
+        "without counters only closes carry totals: {closed:?}"
+    );
+    drop(watch);
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_watch_with_counters_hears_none_for_a_connection_after_its_close() {
+    let rig = Rig::new().await;
+    let proxy = free_port();
+    rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let target_port = echo_target().await;
+    let mut watch = rig
+        .control
+        .connection_watch(ConnectionWatchParams::default())
+        .await
+        .unwrap();
+
+    let mut stream = through_the_proxy(proxy, target_port).await;
+    let opened = eventually(&mut watch.events, |delta| !delta.opened.is_empty()).await;
+    let id = opened.opened[0].id;
+    let mut echoed = [0u8; 9];
+    stream.write_all(b"ping-pong").await.unwrap();
+    stream.read_exact(&mut echoed).await.unwrap();
+    let counted = |delta: &ConnectionDelta, totals: (u64, u64)| {
+        delta
+            .counters
+            .iter()
+            .any(|counter| counter.id == id && (counter.upload, counter.download) == totals)
+    };
+    eventually(&mut watch.events, |delta| counted(delta, (9, 9))).await;
+    stream.write_all(b"more").await.unwrap();
+    stream.read_exact(&mut echoed[..4]).await.unwrap();
+    stream.shutdown().await.unwrap();
+    drop(stream);
+
+    let closed = eventually(&mut watch.events, |delta| delta.closed.contains(&id)).await;
+    assert!(counted(&closed, (13, 13)), "{closed:?}");
+    let after = timeout(Duration::from_millis(2500), async {
+        loop {
+            let delta = next(&mut watch.events).await;
+            if delta.counters.iter().any(|counter| counter.id == id) {
+                return delta;
+            }
+        }
+    })
+    .await;
+    assert!(after.is_err(), "counters after the close: {after:?}");
+    drop(watch);
     rig.finish().await;
 }
 

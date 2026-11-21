@@ -25,9 +25,9 @@ dto! {
 
     #[derive(Default)]
     pub struct ConnectionWatchParams {
-        /// Send `counters` in the deltas. Default true; a client that shows no
-        /// traffic figures turns them off and the stream carries only opens and
-        /// closes.
+        /// Send the running `counters` in the deltas. Default true; a client
+        /// that shows no traffic figures turns them off and the stream carries
+        /// only opens and closes, each close still with its final totals.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub counters: Option<bool>,
         #[serde(flatten)]
@@ -110,12 +110,16 @@ dto! {
 
     /// An `opened` entry that a client already has is a repeat and replaces it.
     /// A connection that opened and closed between two batches is in both lists,
-    /// so apply `opened` first and `closed` after.
+    /// so apply `opened` first, then `counters`, then `closed`.
     pub struct ConnectionDelta {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub opened: Vec<ConnectionInfo>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub closed: Vec<u64>,
+        /// Totals since each connection opened. Every id in `closed` has an
+        /// entry here with its final totals, whether or not the subscription
+        /// asked for `counters`; the others are only sent when it did, for the
+        /// connections whose traffic moved.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub counters: Vec<ConnectionCounter>,
     }

@@ -122,7 +122,7 @@ fn unix_millis(at: SystemTime) -> i64 {
 #[derive(Default)]
 struct ConnPending {
     opened: Vec<Arc<ConnRecord>>,
-    closed: Vec<u64>,
+    closed: HashMap<u64, (u64, u64)>,
     counters: HashMap<u64, (u64, u64)>,
     overflowed: bool,
     resync_sent: bool,
@@ -131,7 +131,8 @@ struct ConnPending {
 
 /// The changes to the connection table since a `connection.watch` last looked.
 /// Counters coalesce by id; opens and closes are queued up to a bound, past
-/// which the subscriber is told to resync rather than lose one silently.
+/// which the subscriber is told to resync rather than lose one silently. A
+/// close keeps the connection's final totals, which every subscriber gets.
 pub struct ConnSub {
     pending: Mutex<ConnPending>,
     counters: bool,
@@ -170,8 +171,10 @@ impl ConnSub {
         self.change(|pending| pending.opened.push(record));
     }
 
-    fn closed(&self, seq: u64) {
-        self.change(|pending| pending.closed.push(seq));
+    fn closed(&self, seq: u64, totals: (u64, u64)) {
+        self.change(|pending| {
+            pending.closed.insert(seq, totals);
+        });
     }
 
     fn counters(&self, deltas: &[TrafficDelta]) {
@@ -208,15 +211,13 @@ impl ConnSub {
                 std::mem::take(&mut pending.counters),
             )
         };
-        let (opened, mut closed, mut counters) = taken;
-        closed.sort_unstable();
-        closed.dedup();
-        for seq in &closed {
-            counters.remove(seq);
-        }
+        let (opened, closed, mut counters) = taken;
         for record in &opened {
             counters.remove(&record.seq);
         }
+        counters.extend(&closed);
+        let mut closed: Vec<u64> = closed.into_keys().collect();
+        closed.sort_unstable();
         let opened = opened
             .iter()
             .map(|record| convert::connection_info(record))
@@ -455,9 +456,13 @@ impl EventSink for EventBus {
         }
     }
 
-    fn closed(&self, seq: u64) {
+    fn closed(&self, record: &ConnRecord) {
         if self.conn.active() {
-            self.conn.each(|sub| sub.closed(seq));
+            let totals = (
+                record.upload.load(Ordering::Relaxed),
+                record.download.load(Ordering::Relaxed),
+            );
+            self.conn.each(|sub| sub.closed(record.seq, totals));
         }
     }
 }
@@ -549,7 +554,8 @@ mod tests {
             delta(second.seq, 5),
         ]));
         bus.publish(EngineEvent::RequestTraffic(vec![delta(first.seq, 40)]));
-        bus.closed(second.seq);
+        second.upload.store(7, Ordering::Relaxed);
+        bus.closed(&second);
 
         let Some(Delivery::Event { data, .. }) = pull(&mut stream) else {
             panic!("a change was pending");
@@ -564,9 +570,9 @@ mod tests {
         assert_eq!(data.opened[1].id, second.seq);
         assert_eq!(data.closed, [second.seq]);
         assert_eq!(
-            data.counters.len(),
-            0,
-            "an opened entry carries its counters and a closed one needs none"
+            totals(&data),
+            [(second.seq, 7, 0)],
+            "an opened entry carries its counters, and a closed one its final totals"
         );
         assert!(pull(&mut stream).is_none());
 
@@ -581,48 +587,105 @@ mod tests {
         assert_eq!(data.counters[0].upload, 91);
     }
 
+    fn totals(delta: &ConnectionDelta) -> Vec<(u64, u64, u64)> {
+        delta
+            .counters
+            .iter()
+            .map(|counter| (counter.id, counter.upload, counter.download))
+            .collect()
+    }
+
     #[test]
-    fn a_stream_without_counters_hears_of_opens_and_closes_only() {
+    fn a_stream_without_counters_hears_of_opens_and_closes_with_final_totals_only() {
         let bus = EventBus::new();
         let mut stream = bus.watch_connections(false);
-        let first = record();
+        let (first, second) = (record(), record());
         bus.publish(EngineEvent::RequestTraffic(vec![delta(first.seq, 10)]));
         assert!(
             pull(&mut stream).is_none(),
             "a counter alone does not wake it"
         );
         bus.publish(EngineEvent::Request(first.clone()));
+        bus.publish(EngineEvent::Request(second.clone()));
         bus.publish(EngineEvent::RequestTraffic(vec![delta(first.seq, 40)]));
-        bus.closed(first.seq);
+        first.upload.store(40, Ordering::Relaxed);
+        first.download.store(9, Ordering::Relaxed);
+        bus.closed(&first);
         let Some(Delivery::Event { data, .. }) = pull(&mut stream) else {
-            panic!("an open and a close were pending");
+            panic!("two opens and a close were pending");
         };
-        assert_eq!(data.opened.len(), 1);
+        assert_eq!(data.opened.len(), 2);
         assert_eq!(data.closed, [first.seq]);
-        assert!(data.counters.is_empty());
+        assert_eq!(totals(&data), [(first.seq, 40, 9)]);
+
+        bus.publish(EngineEvent::RequestTraffic(vec![delta(second.seq, 3)]));
+        assert!(pull(&mut stream).is_none());
+        second.upload.store(3, Ordering::Relaxed);
+        second.download.store(12, Ordering::Relaxed);
+        bus.closed(&second);
+        let Some(Delivery::Event { data, .. }) = pull(&mut stream) else {
+            panic!("a close was pending");
+        };
+        assert!(data.opened.is_empty());
+        assert_eq!(data.closed, [second.seq]);
+        assert_eq!(
+            totals(&data),
+            [(second.seq, 3, 12)],
+            "a connection opened in an earlier batch still closes with its totals"
+        );
+    }
+
+    #[test]
+    fn a_close_reports_what_moved_after_the_last_counter() {
+        let bus = EventBus::new();
+        let mut stream = bus.watch_connections(true);
+        let first = record();
+        bus.publish(EngineEvent::Request(first.clone()));
+        assert!(pull(&mut stream).is_some());
+        bus.publish(EngineEvent::RequestTraffic(vec![delta(first.seq, 10)]));
+        assert_eq!(totals(&pull_event(&mut stream)), [(first.seq, 10, 0)]);
+        bus.publish(EngineEvent::RequestTraffic(vec![delta(first.seq, 20)]));
+        first.upload.store(25, Ordering::Relaxed);
+        first.download.store(4, Ordering::Relaxed);
+        bus.closed(&first);
+        let data = pull_event(&mut stream);
+        assert_eq!(data.closed, [first.seq]);
+        assert_eq!(
+            totals(&data),
+            [(first.seq, 25, 4)],
+            "the close's totals replace the pending counter"
+        );
+    }
+
+    fn pull_event(stream: &mut ConnStream) -> ConnectionDelta {
+        match pull(stream) {
+            Some(Delivery::Event { data, .. }) => data,
+            _ => panic!("a change was pending"),
+        }
     }
 
     #[test]
     fn a_closed_id_that_repeats_is_sent_once() {
         let bus = EventBus::new();
         let mut stream = bus.watch_connections(true);
-        bus.closed(5);
-        bus.closed(5);
-        let Some(Delivery::Event { data, .. }) = pull(&mut stream) else {
-            panic!("a close was pending");
-        };
-        assert_eq!(data.closed, [5]);
+        let first = record();
+        bus.closed(&first);
+        first.upload.store(2, Ordering::Relaxed);
+        bus.closed(&first);
+        let data = pull_event(&mut stream);
+        assert_eq!(data.closed, [first.seq]);
+        assert_eq!(totals(&data), [(first.seq, 2, 0)]);
     }
 
     #[test]
     fn too_many_pending_changes_end_in_a_resync_and_nothing_is_dropped_silently() {
         let bus = EventBus::new();
         let mut stream = bus.watch_connections(true);
-        for seq in 0..=CONN_CAPACITY as u64 {
-            bus.closed(seq);
+        for _ in 0..=CONN_CAPACITY {
+            bus.closed(&record());
         }
         assert!(matches!(pull(&mut stream), Some(Delivery::Resync)));
-        bus.closed(1);
+        bus.closed(&record());
         assert!(
             pull(&mut stream).is_none(),
             "the stream ends after the resync"
