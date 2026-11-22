@@ -1752,11 +1752,12 @@ async fn a_udp_flow_names_the_dns_queries_its_direct_dial_made() {
     assert!(!named.is_empty(), "the DIRECT dial looked udp.test up");
     let mut seen: Vec<DnsEntry> = Vec::new();
     see_queries(&mut queries.events, &mut seen, &named).await;
-    let ids: Vec<u64> = seen
+    let mut ids: Vec<u64> = seen
         .iter()
         .filter(|entry| entry.domain == "udp.test")
         .map(|entry| entry.id)
         .collect();
+    ids.sort_unstable();
     assert_eq!(named, ids, "{seen:?}");
     drop((watch, control));
     answering.abort();
