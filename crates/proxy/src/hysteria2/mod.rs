@@ -259,10 +259,24 @@ fn hop_interval(text: &str) -> Result<(Duration, Duration), BuildError> {
     Ok((Duration::from_secs(start), Duration::from_secs(end)))
 }
 
+/// quinn holds one receive window where quic-go starts at the initial one and grows it up to the
+/// maximum, never below where it started: the window it ends up with is the larger of the two.
+fn window(initial: u64, max: u64, fallback: u64) -> u64 {
+    or_default(initial, fallback).max(or_default(max, fallback))
+}
+
 fn transport(opts: &Hysteria2Opts, controllers: Arc<SwitchFactory>) -> Arc<TransportConfig> {
     Transport {
-        stream_window: or_default(opts.max_stream_receive_window, DEFAULT_STREAM_WINDOW),
-        conn_window: or_default(opts.max_connection_receive_window, DEFAULT_CONN_WINDOW),
+        stream_window: window(
+            opts.initial_stream_receive_window,
+            opts.max_stream_receive_window,
+            DEFAULT_STREAM_WINDOW,
+        ),
+        conn_window: window(
+            opts.initial_connection_receive_window,
+            opts.max_connection_receive_window,
+            DEFAULT_CONN_WINDOW,
+        ),
         double_send_window: true,
         keep_alive: Some(KEEP_ALIVE),
         datagram_frame: DATAGRAM_FRAME,

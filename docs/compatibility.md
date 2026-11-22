@@ -73,6 +73,10 @@ neither the negotiated idle timeout nor a way to change keepalive after connecti
 shorter than twice the keepalive period, an idle connection can close despite keepalive; configure a
 shorter positive keepalive period for that peer. quic-go applies the cap to the negotiated timeout.
 
+Hysteria2's initial and maximum receive windows both apply, but quinn keeps one window per stream and per connection
+where quic-go starts at the initial window and grows it up to the maximum: Concord holds the larger of the two from
+the start.
+
 ## Routing
 
 `rematch` outbounds support `target-rematch-name` and `target-sub-rule`, including empty strings that clear a
