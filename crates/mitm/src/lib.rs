@@ -64,4 +64,8 @@ pub use script::{
     ScriptRequest, ScriptResponse, ScriptResult, ScriptRuntime,
 };
 pub use task::{ScriptOutput, ScriptRunError};
-pub use view::LineView;
+pub use view::{
+    BodyReplacementView, BodyRewriteView, HeaderAction, HeaderRewriteView, HeaderView,
+    HostEntryView, HostsView, LineView, MapLocalView, Phase, ScriptView, ScriptViewKind,
+    SourceEntryView, SourcesView, UrlRewriteView,
+};

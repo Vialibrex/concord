@@ -15,7 +15,7 @@ use crate::heads::{HeadConditions, Heads};
 use crate::jq::{Jq, JqOutcome};
 use crate::pattern::Pattern;
 use crate::script::{Script, ScriptKind};
-use crate::view::LineView;
+use crate::view::{HeaderAction, LineView};
 
 pub(crate) use concord_config::mitm::UrlAction;
 
@@ -171,13 +171,13 @@ pub(crate) fn compile_header_rewrite(def: &HeaderRewriteDef) -> Result<HeaderRew
 }
 
 impl HeaderEdit {
-    fn keyword(&self) -> &'static str {
+    fn action(&self) -> HeaderAction {
         match self {
-            HeaderEdit::Add(..) => "header-add",
-            HeaderEdit::Del(_) => "header-del",
-            HeaderEdit::Replace(..) => "header-replace",
-            HeaderEdit::ReplaceRegex(..) => "header-replace-regex",
-            HeaderEdit::Text(..) => "header-text-replace",
+            HeaderEdit::Add(..) => HeaderAction::Add,
+            HeaderEdit::Del(_) => HeaderAction::Del,
+            HeaderEdit::Replace(..) => HeaderAction::Replace,
+            HeaderEdit::ReplaceRegex(..) => HeaderAction::ReplaceRegex,
+            HeaderEdit::Text(..) => HeaderAction::TextReplace,
         }
     }
 }

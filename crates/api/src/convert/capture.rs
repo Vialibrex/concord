@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use base64::Engine as _;
 use concord_common::exchange_query::{ContentKind, StatusClass};
-use concord_engine::{
-    AnsweredBy, CertificateInfo, ConnectionExchanges, ExchangeSummary, MitmAction, MitmApp,
-    MitmBody as EngineBody, MitmExchange as EngineExchange, MitmFacets as EngineFacets,
+use concord_engine::mitm_types::{
+    Action as MitmAction, AnsweredBy, App as MitmApp, Body as EngineBody, CertificateInfo,
+    ConnectionExchanges, Exchange as EngineExchange, ExchangeSummary, Facets as EngineFacets,
     QueryAnswer, RateBucket, RouteNote, ScriptOutput,
 };
 use concord_proto::types::{
@@ -151,7 +151,7 @@ fn summaries(list: Vec<ExchangeSummary>) -> Vec<MitmExchangeSummary> {
 
 pub fn exchange_list(exchanges: ConnectionExchanges) -> MitmExchangeList {
     let ConnectionExchanges { list, closed } = exchanges;
-    let concord_engine::ExchangeList {
+    let concord_engine::mitm_types::ExchangeList {
         capturing,
         since,
         exchanges,
@@ -330,7 +330,7 @@ pub fn script_output(output: ScriptOutput) -> MitmScriptOutput {
 
 #[cfg(test)]
 mod tests {
-    use concord_engine::ExchangeList;
+    use concord_engine::mitm_types::ExchangeList;
     use serde::Serialize;
     use serde_json::{Value, json};
     use time::macros::datetime;

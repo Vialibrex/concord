@@ -47,7 +47,7 @@ impl Control {
         let validation = self
             .blocking(move |engine| engine.mitm().validate(params.config))
             .await?;
-        serde_json::from_value(validation).map_err(|err| ApiError::internal(err.to_string()))
+        Ok(convert::validation(validation))
     }
 
     pub(super) async fn mitm_read_module(
@@ -64,15 +64,15 @@ impl Control {
                 )
             })
             .await?;
-        serde_json::from_value(view).map_err(|err| ApiError::internal(err.to_string()))
+        Ok(convert::module_view(view))
     }
 
     pub(super) async fn mitm_module_status(
         &self,
         _params: Empty,
     ) -> Result<MitmModuleStatusList, ApiError> {
-        let status = self.engine.mitm().module_status().map_err(core_error)?;
-        serde_json::from_value(status).map_err(|err| ApiError::internal(err.to_string()))
+        let modules = self.engine.mitm().module_status().map_err(core_error)?;
+        Ok(convert::module_status(modules))
     }
 
     pub(super) async fn mitm_fetch_module(

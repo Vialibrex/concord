@@ -119,13 +119,33 @@ pub enum MapLocalBody {
     File { base64: bool },
 }
 
-impl MapLocalBody {
-    pub fn data_type(&self) -> &'static str {
+/// How a `map-local` line names where its body comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataType {
+    Text,
+    TinyGif,
+    Base64,
+    File,
+}
+
+impl DataType {
+    pub fn name(self) -> &'static str {
         match self {
-            MapLocalBody::Text => "text",
-            MapLocalBody::TinyGif => "tiny-gif",
-            MapLocalBody::Base64(_) => "base64",
-            MapLocalBody::File { .. } => "file",
+            DataType::Text => "text",
+            DataType::TinyGif => "tiny-gif",
+            DataType::Base64 => "base64",
+            DataType::File => "file",
+        }
+    }
+}
+
+impl MapLocalBody {
+    pub fn data_type(&self) -> DataType {
+        match self {
+            MapLocalBody::Text => DataType::Text,
+            MapLocalBody::TinyGif => DataType::TinyGif,
+            MapLocalBody::Base64(_) => DataType::Base64,
+            MapLocalBody::File { .. } => DataType::File,
         }
     }
 }

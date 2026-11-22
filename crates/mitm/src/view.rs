@@ -1,7 +1,8 @@
 //! How each line of the section reads once parsed, for a host that shows the lists; the
 //! wire types are `concord-proto`'s `MitmLineView` and its parts.
 
-use serde::Serialize;
+use concord_config::mitm::{DataType, UrlAction};
+use serde::{Serialize, Serializer};
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -32,11 +33,49 @@ impl Phase {
     }
 }
 
+/// What a `header-rewrite` line does to the header it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderAction {
+    Add,
+    Del,
+    Replace,
+    ReplaceRegex,
+    TextReplace,
+}
+
+impl HeaderAction {
+    pub fn name(self) -> &'static str {
+        match self {
+            HeaderAction::Add => "header-add",
+            HeaderAction::Del => "header-del",
+            HeaderAction::Replace => "header-replace",
+            HeaderAction::ReplaceRegex => "header-replace-regex",
+            HeaderAction::TextReplace => "header-text-replace",
+        }
+    }
+}
+
+fn url_action_name<S: Serializer>(action: &UrlAction, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(action.name())
+}
+
+fn header_action_name<S: Serializer>(
+    action: &HeaderAction,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(action.name())
+}
+
+fn data_type_name<S: Serializer>(data_type: &DataType, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(data_type.name())
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UrlRewriteView {
     pub pattern: String,
-    pub action: &'static str,
+    #[serde(serialize_with = "url_action_name")]
+    pub action: UrlAction,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replacement: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -52,7 +91,8 @@ pub struct HeaderRewriteView {
     pub request_head: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_head: Option<String>,
-    pub action: &'static str,
+    #[serde(serialize_with = "header_action_name")]
+    pub action: HeaderAction,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -89,7 +129,8 @@ pub struct MapLocalView {
     pub pattern: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_head: Option<String>,
-    pub data_type: &'static str,
+    #[serde(serialize_with = "data_type_name")]
+    pub data_type: DataType,
     pub data: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,

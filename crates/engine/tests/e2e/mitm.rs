@@ -485,20 +485,15 @@ async fn mitm_makes_its_certificate_on_request_and_its_leaves_verify() {
             "url-rewrite": ["^ok _ reject", "(broken _ reject", "# note"],
         }))
         .unwrap();
-    let issues = validation["issues"].as_object().unwrap();
+    let issues = &validation.issues;
     assert_eq!(issues.len(), 1, "{issues:?}");
-    let listed = issues["url-rewrite"].as_array().unwrap();
-    assert_eq!(
-        (listed.len(), &listed[0]["index"]),
-        (1, &serde_json::json!(1))
-    );
-    let read: Vec<&serde_json::Value> = validation["views"]["url-rewrite"]
-        .as_array()
-        .unwrap()
+    let listed = &issues["url-rewrite"];
+    assert_eq!((listed.len(), listed[0].index), (1, 1));
+    let read: Vec<usize> = validation.views["url-rewrite"]
         .iter()
-        .map(|entry| &entry["index"])
+        .map(|entry| entry.index)
         .collect();
-    assert_eq!(read, [&serde_json::json!(0)]);
+    assert_eq!(read, [0]);
 }
 
 async fn decrypting_rig(rules: &str, lines: &str, capture: bool) -> (Rig, SocketAddr, String) {

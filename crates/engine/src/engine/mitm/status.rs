@@ -4,48 +4,46 @@ use concord_config::mitm::module::{ModuleOff, NetworkDef, ResourceKind};
 use concord_config::mitm::modules::{AppliedModule, ModuleProblem, RefusedRule, host_network};
 use serde::Serialize;
 
-use super::store::{FetchFailure, ModuleResources, ResourceState};
+use super::store::ModuleResources;
+pub use super::store::{FailureReason, FetchFailure, ResourceState};
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ModuleStatus<'a> {
-    name: &'a str,
-    enabled: bool,
-    in_force: bool,
+pub struct ModuleStatus {
+    pub name: String,
+    pub enabled: bool,
+    pub in_force: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    problem: Option<&'a ModuleProblem>,
+    pub problem: Option<ModuleProblem>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    off: Option<&'a ModuleOff>,
-    resources: Vec<ResourceStatus<'a>>,
+    pub off: Option<ModuleOff>,
+    pub resources: Vec<ResourceStatus>,
     /// Rules left out of the profile, by the module line that wrote them.
-    refused_rules: &'a [RefusedRule],
+    pub refused_rules: Vec<RefusedRule>,
     /// What of the module's network requests the host carries out.
-    host_network: NetworkDef,
+    pub host_network: NetworkDef,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ResourceStatus<'a> {
-    url: &'a str,
-    kind: ResourceKind,
-    lines: &'a [u32],
+pub struct ResourceStatus {
+    pub url: String,
+    pub kind: ResourceKind,
+    pub lines: Vec<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    file: Option<String>,
-    state: ResourceState,
+    pub file: Option<String>,
+    pub state: ResourceState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<FetchFailure>,
+    pub error: Option<FetchFailure>,
 }
 
-pub(super) fn module_status<'a>(
-    module: &'a AppliedModule,
-    resources: &ModuleResources,
-) -> ModuleStatus<'a> {
+pub(super) fn module_status(module: &AppliedModule, resources: &ModuleResources) -> ModuleStatus {
     ModuleStatus {
-        name: &module.spec.name,
+        name: module.spec.name.clone(),
         enabled: module.spec.enabled,
         in_force: module.in_force(),
-        problem: module.problem.as_ref(),
-        off: module.def.off.as_ref(),
+        problem: module.problem.clone(),
+        off: module.def.off.clone(),
         resources: module
             .def
             .resources
@@ -53,16 +51,16 @@ pub(super) fn module_status<'a>(
             .map(|resource| {
                 let (state, error) = resources.state(&resource.url);
                 ResourceStatus {
-                    url: &resource.url,
+                    url: resource.url.clone(),
                     kind: resource.kind,
-                    lines: &resource.lines,
+                    lines: resource.lines.clone(),
                     file: resources.stored(&resource.url),
                     state,
                     error,
                 }
             })
             .collect(),
-        refused_rules: &module.refused_rules,
+        refused_rules: module.refused_rules.clone(),
         host_network: host_network(std::slice::from_ref(module)),
     }
 }

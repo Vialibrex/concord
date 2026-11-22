@@ -13,7 +13,7 @@ use concord_config::mitm::modules::{AppliedModule, compose};
 use concord_group::Fetcher;
 use concord_mitm::{
     Body, CaError, CertificateInfo, EVENT_NETWORK_CHANGED, Exchange, ExchangeList, LocalClock,
-    Mitm, MitmEnv, QueryAnswer, RawConfig as MitmConfig, ScriptOutput,
+    Mitm, MitmEnv, ModuleView, QueryAnswer, RawConfig as MitmConfig, ScriptOutput, Validation,
 };
 use concord_platform::HomeDir;
 use concord_tls::TrustStore;
@@ -26,6 +26,8 @@ use crate::error::Failure;
 
 mod status;
 mod store;
+
+pub use self::status::{FailureReason, FetchFailure, ModuleStatus, ResourceState, ResourceStatus};
 
 /// The exchanges of one connection, and whether it had closed when they were read.
 pub struct ConnectionExchanges {
@@ -218,11 +220,10 @@ impl MitmService {
         self.started()?.issue_certificate(host).map_err(ca_failure)
     }
 
-    pub fn validate(&self, raw: Value) -> Result<Value, Failure> {
+    pub fn validate(&self, raw: Value) -> Result<Validation, Failure> {
         let raw: MitmConfig = serde_json::from_value(raw)
             .map_err(|err| Failure::InvalidArguments(err.to_string()))?;
-        let validation = self.started()?.validate(&raw);
-        Ok(serde_json::to_value(validation).unwrap_or(Value::Null))
+        Ok(self.started()?.validate(&raw))
     }
 
     /// How `text` reads as a module with these argument values and attachments, on this system
@@ -233,15 +234,14 @@ impl MitmService {
         arguments: &BTreeMap<String, String>,
         attachments: &BTreeMap<String, String>,
         language: String,
-    ) -> Result<Value, Failure> {
+    ) -> Result<ModuleView, Failure> {
         let environment = Environment::current(language);
         let input = ModuleInput {
             arguments,
             attachments,
             environment: &environment,
         };
-        let view = self.started()?.read_module(text, &input);
-        Ok(serde_json::to_value(view).unwrap_or(Value::Null))
+        Ok(self.started()?.read_module(text, &input))
     }
 
     pub async fn run_script(&self, name: &str) -> Result<ScriptOutput, Failure> {
@@ -303,18 +303,17 @@ impl MitmService {
     }
 
     /// `mitm.moduleStatus`: the modules of the profile in force, in the order it names them.
-    pub fn module_status(&self) -> Result<Value, Failure> {
+    pub fn module_status(&self) -> Result<Vec<ModuleStatus>, Failure> {
         let store = self
             .modules
             .load_full()
             .ok_or_else(|| Failure::core(NOT_INITIALIZED))?;
         let applied = store.applied.load_full();
-        let modules: Vec<_> = applied
+        Ok(applied
             .iter()
             .flat_map(|applied| &applied.modules)
             .map(|module| status::module_status(module, &store.resources))
-            .collect();
-        Ok(serde_json::json!({ "modules": modules }))
+            .collect())
     }
 
     /// Fetches again the remote files of the module `name`, or of every module.

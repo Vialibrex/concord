@@ -1,6 +1,6 @@
 use concord_common::ResourceKind;
 use concord_config::mitm::modules::{RESOURCES_DIR, stored_name};
-use serde_json::{Value, json};
+use concord_engine::mitm_types::{FailureReason, ModuleStatus, ResourceState};
 use tokio::time::{Instant, sleep};
 
 use super::http_rules::{Io, ask, body_of, plain_echo_server, read_head};
@@ -102,19 +102,19 @@ async fn answered_locally(rig: &Rig, origin: u16) {
     }
 }
 
-async fn module(rig: &Rig) -> Value {
-    rig.engine.mitm().module_status().unwrap()["modules"][0].clone()
+async fn module(rig: &Rig) -> ModuleStatus {
+    rig.engine.mitm().module_status().unwrap().remove(0)
 }
 
 /// Waits until the module's file reaches `state`.
-async fn until(rig: &Rig, state: &str) -> Value {
+async fn until(rig: &Rig, state: ResourceState) -> ModuleStatus {
     let deadline = Instant::now() + PATIENCE;
     loop {
         let status = module(rig).await;
-        if status["resources"][0]["state"] == state {
+        if status.resources[0].state == state {
             return status;
         }
-        assert!(Instant::now() < deadline, "never {state}: {status}");
+        assert!(Instant::now() < deadline, "never {state:?}: {status:?}");
         sleep(Duration::from_millis(20)).await;
     }
 }
@@ -130,7 +130,7 @@ async fn a_module_rule_goes_ahead_of_the_profiles_through_the_mapped_policy() {
         .await
         .unwrap();
     rig.engine.start_listeners().await;
-    until(&rig, "ok").await;
+    until(&rig, ResourceState::Ok).await;
     let mut stream = open(&rig, origin).await;
     assert_eq!(
         body_of(&mut stream, origin, "/viaproxy").await,
@@ -140,7 +140,7 @@ async fn a_module_rule_goes_ahead_of_the_profiles_through_the_mapped_policy() {
     assert_eq!(lock(&b).len(), 1);
     assert!(!lock(&a).is_empty());
     let status = module(&rig).await;
-    assert_eq!(status["refusedRules"][0]["line"], 4, "{status}");
+    assert_eq!(status.refused_rules[0].line, 4, "{status:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -152,8 +152,8 @@ async fn a_file_never_fetched_is_fetched_on_apply_and_takes_effect() {
     let config = config(origin, files.port, a_port, a_port);
     rig.apply(&config).await.unwrap();
     rig.engine.start_listeners().await;
-    let status = until(&rig, "ok").await;
-    let file = status["resources"][0]["file"].as_str().unwrap().to_string();
+    let status = until(&rig, ResourceState::Ok).await;
+    let file = status.resources[0].file.clone().unwrap();
     let stored = rig.home.path().join("mitm/resources").join(&file);
     assert_eq!(std::fs::read_to_string(stored).unwrap(), "{\"local\":1}");
     answered_locally(&rig, origin).await;
@@ -173,7 +173,7 @@ async fn a_file_never_fetched_is_fetched_on_apply_and_takes_effect() {
     rig.apply(&config).await.unwrap();
     sleep(Duration::from_millis(200)).await;
     assert_eq!(files.asked.load(Ordering::SeqCst), 1);
-    assert_eq!(module(&rig).await["resources"][0]["state"], "ok");
+    assert_eq!(module(&rig).await.resources[0].state, ResourceState::Ok);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -186,13 +186,13 @@ async fn a_file_that_failed_to_fetch_takes_effect_once_fetched_again() {
         .await
         .unwrap();
     rig.engine.start_listeners().await;
-    let status = until(&rig, "failed").await;
-    let error = &status["resources"][0]["error"];
+    let status = until(&rig, ResourceState::Failed).await;
+    let error = status.resources[0].error.as_ref().unwrap();
     assert_eq!(
-        (&error["reason"], &error["status"]),
-        (&json!("http"), &json!(404))
+        (error.reason, error.status),
+        (FailureReason::Http, Some(404))
     );
-    assert!(status["resources"][0]["file"].is_null());
+    assert!(status.resources[0].file.is_none());
     let mut stream = open(&rig, origin).await;
     assert_eq!(
         body_of(&mut stream, origin, "/local").await,
@@ -204,7 +204,7 @@ async fn a_file_that_failed_to_fetch_takes_effect_once_fetched_again() {
         .mitm()
         .fetch_module(Some("local".into()))
         .unwrap();
-    until(&rig, "ok").await;
+    until(&rig, ResourceState::Ok).await;
     answered_locally(&rig, origin).await;
 }
 
@@ -225,7 +225,7 @@ async fn a_stash_script_carried_in_the_text_is_written_out_on_apply() {
     .await
     .unwrap();
     let status = module(&rig).await;
-    assert_eq!(status["inForce"], true, "{status}");
+    assert!(status.in_force, "{status:?}");
     let file = rig
         .home
         .path()
@@ -250,16 +250,19 @@ async fn a_module_turned_off_keeps_its_file_until_the_host_no_longer_lists_it() 
     rig.engine.start_listeners().await;
     sleep(Duration::from_millis(200)).await;
     let status = module(&rig).await;
-    assert_eq!(status["enabled"], false, "{status}");
-    assert_eq!(status["inForce"], false, "{status}");
-    assert_eq!(status["resources"][0]["state"], "missing", "{status}");
+    assert!(!status.enabled && !status.in_force, "{status:?}");
+    assert_eq!(
+        status.resources[0].state,
+        ResourceState::Missing,
+        "{status:?}"
+    );
     assert_eq!(files.asked.load(Ordering::SeqCst), 0);
 
     rig.apply(&on).await.unwrap();
-    let file = until(&rig, "ok").await["resources"][0]["file"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let file = until(&rig, ResourceState::Ok).await.resources[0]
+        .file
+        .clone()
+        .unwrap();
     let stored = rig.home.path().join(RESOURCES_DIR).join(file);
     rig.apply(&off).await.unwrap();
     assert!(stored.is_file());

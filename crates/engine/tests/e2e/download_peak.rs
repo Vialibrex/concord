@@ -1,6 +1,7 @@
 //! The peak memory of fetching a large module file, run by hand on Linux:
 //! `cargo test -p concord-engine --release --test e2e download_peak -- --ignored --nocapture`.
 
+use concord_engine::mitm_types::ResourceState;
 use tokio::time::Instant;
 
 use super::*;
@@ -75,11 +76,10 @@ async fn download_peak() {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let status = rig.engine.mitm().module_status().unwrap();
-        let state = status["modules"][0]["resources"][0]["state"].clone();
-        if state == "ok" {
+        if status[0].resources[0].state == ResourceState::Ok {
             break;
         }
-        assert!(Instant::now() < deadline, "never fetched: {status}");
+        assert!(Instant::now() < deadline, "never fetched: {status:?}");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     tokio::time::sleep(Duration::from_millis(500)).await;

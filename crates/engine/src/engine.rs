@@ -57,9 +57,11 @@ mod tun;
 mod update;
 mod views;
 
-#[cfg(feature = "mitm")]
-pub use mitm::ConnectionExchanges;
 pub use mitm::MitmService;
+#[cfg(feature = "mitm")]
+pub use mitm::{
+    ConnectionExchanges, FailureReason, FetchFailure, ModuleStatus, ResourceState, ResourceStatus,
+};
 pub use providers::Providers;
 
 pub struct EngineConfig {

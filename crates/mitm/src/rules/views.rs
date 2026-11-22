@@ -1,5 +1,5 @@
-use concord_config::mitm::MULTILINE;
 use concord_config::mitm::text::canonical_header;
+use concord_config::mitm::{DataType, MULTILINE};
 use http::header::HeaderMap;
 
 use super::{BodyAction, BodyRewrite, HeaderEdit, HeaderRewrite, MapLocal, UrlRewrite};
@@ -38,7 +38,7 @@ impl UrlRewrite {
     pub(crate) fn view(&self) -> LineView {
         LineView::UrlRewrite(UrlRewriteView {
             pattern: source(&self.pattern),
-            action: self.action.name(),
+            action: self.action,
             replacement: (!self.action.rejects()).then(|| self.replacement.clone()),
             request_head: self.head.as_ref().map(source),
         })
@@ -53,13 +53,12 @@ impl HeaderRewrite {
             pattern: source(&self.pattern),
             request_head,
             response_head,
-            action: "",
+            action: self.edit.action(),
             name: None,
             value: None,
             regex: None,
             replacement: None,
         };
-        view.action = self.edit.keyword();
         match &self.edit {
             HeaderEdit::Add(name, text) | HeaderEdit::Replace(name, text) => {
                 view.name = Some(canonical_header(name.as_str()));
@@ -81,7 +80,7 @@ impl HeaderRewrite {
 
     /// The edit as its line writes it after the URL pattern, for the capture's action detail.
     pub(crate) fn note(&self) -> String {
-        let keyword = self.edit.keyword();
+        let keyword = self.edit.action().name();
         match &self.edit {
             HeaderEdit::Add(name, text) | HeaderEdit::Replace(name, text) => format!(
                 "{keyword} {} {}",
@@ -145,7 +144,7 @@ impl BodyRewrite {
 /// the content type the data implies.
 pub(super) fn map_local_view(
     rule: &MapLocal,
-    data_type: &'static str,
+    data_type: DataType,
     data: &str,
     request: bool,
     header: &HeaderMap,

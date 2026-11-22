@@ -26,9 +26,9 @@ pub use issue::{IssueKind, LineError};
 pub use pattern::{MULTILINE, check_multiline, check_pattern, multiline, parses, regex_source};
 pub use relax::relax;
 pub use rules::{
-    BodyActionDef, BodyRewriteDef, HeaderEditDef, HeaderRewriteDef, MapLocalBody, MapLocalDef,
-    UrlAction, UrlRewriteDef, parse_body_rewrite, parse_header_rewrite, parse_map_local,
-    parse_url_rewrite,
+    BodyActionDef, BodyRewriteDef, DataType, HeaderEditDef, HeaderRewriteDef, MapLocalBody,
+    MapLocalDef, UrlAction, UrlRewriteDef, parse_body_rewrite, parse_header_rewrite,
+    parse_map_local, parse_url_rewrite,
 };
 pub use script::{
     EVENT_ENGINE_STARTED, EVENT_NETWORK_CHANGED, EVENT_PROFILE_RELOADED, ScriptDef, ScriptKind,

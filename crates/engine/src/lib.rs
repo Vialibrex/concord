@@ -7,6 +7,8 @@ mod error;
 mod fake_ip_store;
 mod faults;
 mod lan;
+#[cfg(feature = "mitm")]
+pub mod mitm_types;
 mod ntp;
 pub mod ops;
 pub mod probe;
@@ -24,15 +26,7 @@ pub use concord_group::{
     DelayRecord, GroupView, HealthSnapshot, NodeStateView, NodeView, ProxyView, ProxyViews,
     StatusRanges, UrlHealth,
 };
-#[cfg(feature = "mitm")]
-pub use concord_mitm::{
-    Action as MitmAction, AnsweredBy, App as MitmApp, Body as MitmBody, CertificateInfo,
-    Exchange as MitmExchange, ExchangeList, ExchangeSummary, Facets as MitmFacets, QueryAnswer,
-    RateBucket, RouteNote, ScriptOutput,
-};
 pub use concord_platform::{HomeDir, local_utc_offset};
-#[cfg(feature = "mitm")]
-pub use engine::ConnectionExchanges;
 pub use engine::{
     Engine, EngineConfig, MitmService, Providers, SetupRequest, TunPatch, UpdateRequest,
 };
