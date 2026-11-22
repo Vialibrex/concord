@@ -138,12 +138,13 @@ pub struct StackOptions {
 
 impl Default for StackOptions {
     fn default() -> Self {
+        let stack = concord_netstack::StackConfig::default();
         StackOptions {
             mtu: 1500,
-            max_tcp_flows: 32_768,
-            max_half_open_tcp: 1024,
+            max_tcp_flows: stack.max_connections,
+            max_half_open_tcp: stack.max_half_open,
             broadcast: None,
-            udp_timeout: Duration::from_secs(300),
+            udp_timeout: crate::options::UDP_TIMEOUT,
             disable_icmp_forwarding: false,
             congestion: Congestion::Cubic,
             dns: None,

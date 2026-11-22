@@ -158,6 +158,8 @@ pub struct TunOptions {
     pub wintun_path: Option<PathBuf>,
 }
 
+pub(crate) const UDP_TIMEOUT: Duration = Duration::from_secs(300);
+
 impl Default for TunOptions {
     fn default() -> Self {
         TunOptions {
@@ -176,12 +178,12 @@ impl Default for TunOptions {
             exclude_src_port: Vec::new(),
             exclude_dst_port: Vec::new(),
             dns_hijack: Vec::new(),
-            udp_timeout: Duration::from_secs(300),
+            udp_timeout: UDP_TIMEOUT,
             disable_icmp_forwarding: false,
             inbound_name: "DEFAULT-TUN".to_owned(),
             iproute2_table_index: 2022,
             iproute2_rule_index: 9000,
-            max_tcp_flows: 32_768,
+            max_tcp_flows: concord_netstack::StackConfig::default().max_connections,
             wintun_path: None,
         }
     }
