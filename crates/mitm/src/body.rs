@@ -265,8 +265,8 @@ pub(crate) async fn buffer_body(
     Ok(Buffered::Whole(out, trailers))
 }
 
-type DataHook = Box<dyn FnMut(&Bytes) + Send>;
-type EndHook = Box<dyn FnOnce() + Send>;
+pub(crate) type DataHook = Box<dyn FnMut(&Bytes) + Send>;
+pub(crate) type EndHook = Box<dyn FnOnce() + Send>;
 
 /// Watches the data of a body as it passes, and tells once when it ends, however it ends.
 pub(crate) struct Tap {

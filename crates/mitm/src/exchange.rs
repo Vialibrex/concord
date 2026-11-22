@@ -13,7 +13,7 @@ use hyper_util::rt::TokioIo;
 use rand::RngCore;
 use tokio::sync::OwnedSemaphorePermit;
 
-use crate::body::{Body, Tap, empty, file_body, from_incoming, full};
+use crate::body::{Body, DataHook, EndHook, Tap, empty, file_body, from_incoming, full};
 use crate::capture::{AnsweredBy, Cap};
 use crate::forward::request_text;
 use crate::headers::{remove_hop_by_hop, text, to_list, version_text, with_host};
@@ -170,24 +170,45 @@ async fn answer_local(
         }
     };
     headers.insert(CONTENT_LENGTH, HeaderValue::from(len));
-    cap.responded(status.as_u16(), to_list(&headers));
-    let counter = cap.clone();
-    let finisher = cap.clone();
-    let tapped = Tap::new(
-        body,
-        Some(Box::new(move |data| {
-            counter.add_response_size(data.len());
-            counter.keep_response(data);
-        })),
-        Some(Box::new(move || {
-            finisher.finish();
-            drop(guard);
-        })),
-    );
-    let mut response = Response::new(tapped.boxed_unsync());
+    let mut response = Response::new(body);
     *response.status_mut() = status;
     *response.headers_mut() = headers;
+    tap_response(cap, response, move || drop(guard))
+}
+
+/// Records the answer's head and counts and keeps its body as it passes; `done` runs after the
+/// exchange finishes, once the body ends however it ends.
+fn tap_response(
+    cap: &Cap,
+    response: Response<Body>,
+    done: impl FnOnce() + Send + 'static,
+) -> Response<Body> {
+    cap.responded(response.status().as_u16(), to_list(response.headers()));
+    let counter = cap.clone();
+    let on_data: DataHook = Box::new(move |data: &Bytes| {
+        counter.add_response_size(data.len());
+        counter.keep_response(data);
+    });
+    let finisher = cap.clone();
+    response.map(|body| {
+        let on_end: EndHook = Box::new(move || {
+            finisher.finish();
+            done();
+        });
+        Tap::new(body, Some(on_data), Some(on_end)).boxed_unsync()
+    })
+}
+
+fn bare(status: StatusCode) -> Response<Body> {
+    let mut response = Response::new(empty());
+    *response.status_mut() = status;
     response
+}
+
+fn aborted(cap: &Cap, error: &str) -> Abort {
+    cap.fail(error);
+    cap.finish();
+    Abort
 }
 
 fn local(
@@ -389,11 +410,7 @@ impl Session {
     ) -> Result<Response<Body>, Abort> {
         match unsent {
             Unsent::Answer(status, headers, data) => Ok(local(cap, status, headers, data, guard)),
-            Unsent::Drop => {
-                cap.fail("rejected by the rules");
-                cap.finish();
-                Err(Abort)
-            }
+            Unsent::Drop => Err(aborted(cap, "rejected by the rules")),
             Unsent::Failed(message) => self.proxy_error(cap, &message, guard),
         }
     }
@@ -503,18 +520,14 @@ impl Session {
     ) -> Result<Response<Body>, Abort> {
         let guard = self.begin_request();
         if request.method() == Method::CONNECT {
-            let mut response = Response::new(empty());
-            *response.status_mut() = StatusCode::METHOD_NOT_ALLOWED;
-            return Ok(response);
+            return Ok(bare(StatusCode::METHOD_NOT_ALLOWED));
         }
         let upgrading = !text(request.headers(), UPGRADE).is_empty();
         let client_upgrade = upgrading.then(|| hyper::upgrade::on(&mut request));
         let (mut parts, incoming) = request.into_parts();
         let in_host = request_host(&parts);
         let Some(url) = self.request_url(&parts, &in_host) else {
-            let mut response = Response::new(empty());
-            *response.status_mut() = StatusCode::BAD_REQUEST;
-            return Ok(response);
+            return Ok(bare(StatusCode::BAD_REQUEST));
         };
         let cap = self.core.shared.captures.begin(
             parts.method.as_str(),
@@ -564,9 +577,7 @@ impl Session {
         tracing::debug!("[MITM] {} {}", out.method, target.url.raw);
         self.rewrite_request(&mut out, &mut target).await;
         if target.abort {
-            cap.fail("aborted by a script");
-            cap.finish();
-            return Err(Abort);
+            return Err(aborted(&cap, "aborted by a script"));
         }
         let sent = Sent {
             method: out.method.clone(),
@@ -593,11 +604,7 @@ impl Session {
                     .await
                 {
                     Ok(()) => {}
-                    Err(ReplyError::Abort) => {
-                        cap.fail("aborted by a script");
-                        cap.finish();
-                        return Err(Abort);
-                    }
+                    Err(ReplyError::Abort) => return Err(aborted(&cap, "aborted by a script")),
                     Err(ReplyError::Failed(message)) => {
                         return self.proxy_error(&cap, &message, guard);
                     }
@@ -617,23 +624,12 @@ impl Session {
         }
         head.version = Version::HTTP_11;
         head.extensions = Extensions::new();
-        cap.responded(head.status.as_u16(), to_list(&head.headers));
         let permits = std::mem::take(&mut target.reserved);
-        let counter = cap.clone();
-        let finisher = cap;
-        let tapped = Tap::new(
-            body,
-            Some(Box::new(move |data| {
-                counter.add_response_size(data.len());
-                counter.keep_response(data);
-            })),
-            Some(Box::new(move || {
-                finisher.finish();
-                drop(permits);
-                drop(guard);
-            })),
-        );
-        Ok(Response::from_parts(head, tapped.boxed_unsync()))
+        let response = Response::from_parts(head, body);
+        Ok(tap_response(&cap, response, move || {
+            drop(permits);
+            drop(guard);
+        }))
     }
 
     fn proxy_error(

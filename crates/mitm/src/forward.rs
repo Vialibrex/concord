@@ -67,16 +67,13 @@ impl Session {
                 .rules
                 .header_rewrites_for(&out.url.raw, false, &heads)
         };
-        let mut rewritten = false;
-        for rule in header_rules {
-            if match rule.whole_head() {
+        let rewritten =
+            apply_header_rules(header_rules, &target.cap, PHASE_REQUEST, |rule| match rule
+                .whole_head()
+            {
                 Some((pattern, with)) => replace_request_head(out, target.version, pattern, with),
                 None => rule.apply(&mut out.headers),
-            } {
-                rewritten = true;
-                note_header(&target.cap, PHASE_REQUEST, rule);
-            }
-        }
+            });
         if rewritten {
             tracing::info!("[MITM] rewrite request headers of {}", out.url.raw);
         }
@@ -201,11 +198,13 @@ impl Session {
         let address = sent.url.raw.clone();
         let (header_rules, body_rules, script) = {
             let request = || {
-                let line = format!(
-                    "{} {} {}",
-                    sent.method, sent.url.path_and_query, target.version
-                );
-                head_text(&line, &sent.host, &sent.headers)
+                request_head_text(
+                    &sent.method,
+                    &sent.url,
+                    target.version,
+                    &sent.host,
+                    &sent.headers,
+                )
             };
             let response = || response_head(head.status, version_text(head.version), &head.headers);
             let heads = Heads::new(Some(&request), Some(&response));
@@ -215,16 +214,13 @@ impl Session {
                 rules.script_for(&address, true, &heads),
             )
         };
-        let mut rewritten = false;
-        for rule in header_rules {
-            if match rule.whole_head() {
+        let rewritten =
+            apply_header_rules(header_rules, &target.cap, PHASE_RESPONSE, |rule| match rule
+                .whole_head()
+            {
                 Some((pattern, with)) => replace_response_head(head, pattern, with),
                 None => rule.apply(&mut head.headers),
-            } {
-                rewritten = true;
-                note_header(&target.cap, PHASE_RESPONSE, rule);
-            }
-        }
+            });
         if rewritten {
             tracing::info!("[MITM] rewrite response headers of {address}");
         }
@@ -354,8 +350,24 @@ async fn mock_body(out: &mut OutRequest, header: &HeaderMap, body: &LocalBody) {
 /// The head of a request as Quantumult X's `url-and-header` reads it: the request line, the
 /// host, then every header as `Name: value`, each line ending in CRLF, and the blank line.
 pub(crate) fn request_text(out: &OutRequest, version: &str) -> String {
-    let line = format!("{} {} {version}", out.method, out.url.path_and_query);
-    head_text(&line, &out.host_header(), &out.headers)
+    request_head_text(
+        &out.method,
+        &out.url,
+        version,
+        &out.host_header(),
+        &out.headers,
+    )
+}
+
+fn request_head_text(
+    method: &Method,
+    url: &TargetUrl,
+    version: &str,
+    host: &str,
+    headers: &HeaderMap,
+) -> String {
+    let line = format!("{method} {} {version}", url.path_and_query);
+    head_text(&line, host, headers)
 }
 
 /// The rewritten request line moves the request to another method and path on the same
@@ -486,15 +498,28 @@ fn adapt(
     Ok(())
 }
 
-fn note_header(cap: &Cap, phase: &str, rule: &HeaderRewrite) {
-    if cap.is_some() {
-        cap.note(
-            "header-rewrite",
-            phase,
-            &rule.note(),
-            rule.module.as_deref(),
-        );
+/// Applies each rule with `apply`, noting the ones that changed the head; true if any did.
+fn apply_header_rules(
+    rules: Vec<&HeaderRewrite>,
+    cap: &Cap,
+    phase: &str,
+    mut apply: impl FnMut(&HeaderRewrite) -> bool,
+) -> bool {
+    let mut rewritten = false;
+    for rule in rules {
+        if apply(rule) {
+            rewritten = true;
+            if cap.is_some() {
+                cap.note(
+                    "header-rewrite",
+                    phase,
+                    &rule.note(),
+                    rule.module.as_deref(),
+                );
+            }
+        }
     }
+    rewritten
 }
 
 /// Read before the rules go to the rewrite, and only while capture is on.
