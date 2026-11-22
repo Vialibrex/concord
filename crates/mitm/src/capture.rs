@@ -211,11 +211,12 @@ impl CaptureStore {
         method: &str,
         url: &str,
         proto: &str,
-        request_header: HeaderList,
+        request_header: impl FnOnce() -> HeaderList,
     ) -> Cap {
         if !self.is_on() {
             return Cap::default();
         }
+        let request_header = request_header();
         let mut inner = lock(&self.inner);
         if !self.is_on() {
             return Cap::default();
@@ -521,9 +522,10 @@ impl Cap {
         }
     }
 
-    pub fn sent(&self, url: &str, header: HeaderList) {
+    pub fn sent(&self, url: &str, header: impl FnOnce() -> HeaderList) {
         if let Some(c) = &self.capture {
             let url = url.to_string();
+            let header = header();
             c.update(|e| {
                 if url != e.summary.url && e.original_url.is_empty() {
                     e.original_url = e.summary.url.clone();
@@ -547,8 +549,9 @@ impl Cap {
         }
     }
 
-    pub fn responded(&self, status: u16, header: HeaderList) {
+    pub fn responded(&self, status: u16, header: impl FnOnce() -> HeaderList) {
         if let Some(c) = &self.capture {
+            let header = header();
             let ttfb = millis(c.started);
             if let Some(length) = header
                 .get("Content-Length")
@@ -685,7 +688,7 @@ mod tests {
     }
 
     fn begin(store: &Arc<CaptureStore>, url: &str) -> Cap {
-        store.begin("GET", url, "HTTP/1.1", HeaderList::new())
+        store.begin("GET", url, "HTTP/1.1", HeaderList::new)
     }
 
     #[test]
@@ -710,7 +713,7 @@ mod tests {
     fn a_sent_request_keeps_the_original_url() {
         let (_, store) = store();
         let cap = begin(&store, "https://a.test/old");
-        cap.sent("https://a.test/new", HeaderList::new());
+        cap.sent("https://a.test/new", HeaderList::new);
         let exchange = store.find(cap.id().unwrap()).unwrap();
         assert_eq!(exchange.summary.url, "https://a.test/new");
         assert_eq!(exchange.original_url, "https://a.test/old");
@@ -801,10 +804,9 @@ mod tests {
     fn json_matches_the_wire_names() {
         let (_, store) = store();
         let cap = begin(&store, "https://a.test/");
-        cap.responded(
-            200,
-            HeaderList::from([("Content-Length".to_string(), vec!["3".to_string()])]),
-        );
+        cap.responded(200, || {
+            HeaderList::from([("Content-Length".to_string(), vec!["3".to_string()])])
+        });
         cap.note("header-rewrite", PHASE_REQUEST, "", None);
         cap.note("script", PHASE_RESPONSE, "Sample", Some("Sample note"));
         cap.note("header-rewrite", PHASE_REQUEST, "", Some("Sample note"));
@@ -832,7 +834,7 @@ mod tests {
         assert_eq!(json["reason"], "OK");
         let pending = begin(&store, "https://a.test/pending");
         let unnamed = begin(&store, "https://a.test/unnamed");
-        unnamed.responded(599, HeaderList::new());
+        unnamed.responded(599, HeaderList::new);
         for cap in [pending, unnamed] {
             let json = serde_json::to_value(store.find(cap.id().unwrap()).unwrap()).unwrap();
             assert!(json.get("reason").is_none(), "{json}");

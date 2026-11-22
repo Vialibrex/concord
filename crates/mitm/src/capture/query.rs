@@ -413,11 +413,11 @@ mod tests {
         status: u16,
         mime: &str,
     ) -> Cap {
-        let cap = store.begin(method, url, "HTTP/1.1", HeaderList::new());
+        let cap = store.begin(method, url, "HTTP/1.1", HeaderList::new);
         if status == 0 {
             cap.fail("connection reset");
         } else {
-            cap.responded(status, header(mime));
+            cap.responded(status, || header(mime));
         }
         cap.finish();
         cap
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn since_brings_what_was_added_or_finished_and_what_stopped_matching() {
         let store = store();
-        let pending = store.begin("GET", "https://a.test/slow", "HTTP/1.1", HeaderList::new());
+        let pending = store.begin("GET", "https://a.test/slow", "HTTP/1.1", HeaderList::new);
         exchange(
             &store,
             "GET",
@@ -519,7 +519,7 @@ mod tests {
         );
         assert_eq!(urls(&unchanged), ["/slow"], "only the one in progress");
 
-        pending.responded(503, header("text/plain"));
+        pending.responded(503, || header("text/plain"));
         pending.finish();
         exchange(
             &store,
@@ -847,8 +847,8 @@ mod tests {
     #[test]
     fn a_follow_brings_every_exchange_still_in_progress_with_its_sizes() {
         let store = store();
-        let pending = store.begin("GET", "https://a.test/big", "HTTP/1.1", HeaderList::new());
-        pending.responded(200, header("video/mp4"));
+        let pending = store.begin("GET", "https://a.test/big", "HTTP/1.1", HeaderList::new);
+        pending.responded(200, || header("video/mp4"));
         exchange(&store, "GET", "https://a.test/done", 200, "text/html");
         let before = query(&store, ExchangeQuery::default());
         pending.add_response_size(4096);
@@ -881,12 +881,7 @@ mod tests {
         );
         let slow = exchange(&store, "GET", "https://a.test/slow", 200, "text/html");
         took(&slow, 1500);
-        let waiting = store.begin(
-            "GET",
-            "https://a.test/waiting",
-            "HTTP/1.1",
-            HeaderList::new(),
-        );
+        let waiting = store.begin("GET", "https://a.test/waiting", "HTTP/1.1", HeaderList::new);
         std::thread::sleep(Duration::from_millis(30));
         let paths = |filter: ExchangeFilter| {
             urls(&query(&store, filtered(filter)))

@@ -54,7 +54,7 @@ impl Session {
             )
             .boxed_unsync();
         }
-        cap.sent(&out.url.raw, with_host(&out.headers, &out.host_header()));
+        cap.sent(&out.url.raw, || with_host(&out.headers, &out.host_header()));
     }
 
     /// Header Rewrite comes first, as in Surge, so a URL rewrite and Map Local see its result.

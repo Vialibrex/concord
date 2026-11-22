@@ -183,11 +183,13 @@ fn tap_response(
     response: Response<Body>,
     done: impl FnOnce() + Send + 'static,
 ) -> Response<Body> {
-    cap.responded(response.status().as_u16(), to_list(response.headers()));
-    let counter = cap.clone();
-    let on_data: DataHook = Box::new(move |data: &Bytes| {
-        counter.add_response_size(data.len());
-        counter.keep_response(data);
+    cap.responded(response.status().as_u16(), || to_list(response.headers()));
+    let on_data = cap.is_some().then(|| {
+        let counter = cap.clone();
+        Box::new(move |data: &Bytes| {
+            counter.add_response_size(data.len());
+            counter.keep_response(data);
+        }) as DataHook
     });
     let finisher = cap.clone();
     response.map(|body| {
@@ -195,7 +197,7 @@ fn tap_response(
             finisher.finish();
             done();
         });
-        Tap::new(body, Some(on_data), Some(on_end)).boxed_unsync()
+        Tap::new(body, on_data, Some(on_end)).boxed_unsync()
     })
 }
 
@@ -220,7 +222,7 @@ fn local(
 ) -> Response<Body> {
     let body = body.into();
     headers.insert(CONTENT_LENGTH, HeaderValue::from(body.len()));
-    cap.responded(status.as_u16(), to_list(&headers));
+    cap.responded(status.as_u16(), || to_list(&headers));
     cap.add_response_size(body.len());
     cap.keep_response(&body);
     cap.finish();
@@ -533,7 +535,7 @@ impl Session {
             parts.method.as_str(),
             &url.raw,
             version_text(parts.version),
-            with_host(&parts.headers, &in_host),
+            || with_host(&parts.headers, &in_host),
         );
         let has_body = !incoming.is_end_stream();
         let length = incoming.size_hint().exact();
