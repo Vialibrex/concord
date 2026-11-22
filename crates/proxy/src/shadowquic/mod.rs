@@ -64,8 +64,7 @@ struct Settings {
     over_stream: bool,
     up: u64,
     down: u64,
-    /// The BBR initial window in bytes.
-    window: u64,
+    bbr_window: u64,
     profile: BbrProfile,
 }
 
@@ -122,7 +121,7 @@ async fn negotiate(
         switch.replace(Box::new(Brutal::new(rate, BRUTAL_MTU, Instant::now())));
     } else {
         switch.replace(
-            bbr_factory(settings.profile, settings.window).build(Instant::now(), BRUTAL_MTU),
+            bbr_factory(settings.profile, settings.bbr_window).build(Instant::now(), BRUTAL_MTU),
         );
     }
 }
@@ -340,7 +339,7 @@ pub(crate) fn build(
             over_stream: opts.udp_over_stream,
             up: parse_bps(&opts.up),
             down: parse_bps(&opts.down),
-            window,
+            bbr_window: window,
             profile: BbrProfile::parse(&opts.bbr_profile),
         },
         controllers,

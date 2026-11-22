@@ -7,12 +7,10 @@ use concord_common::Address;
 use concord_common::sync::lock;
 use tokio::sync::mpsc;
 
-/// sing-quic's received-message queue per UDP session, dropping when full.
 const QUEUE: usize = 64;
-/// How long the fragments of one datagram wait for the rest.
 const DEFRAG_TTL: Duration = Duration::from_secs(10);
 
-/// One piece of a relayed datagram. `addr` is read from the first piece only.
+/// `addr` counts only on the first piece of a datagram.
 pub struct Fragment<A> {
     pub packet: u16,
     pub index: u8,
@@ -103,7 +101,6 @@ struct Entry<A> {
     defrag: Mutex<Defrag<A>>,
 }
 
-/// The UDP sessions of one connection, each with its queue of received datagrams.
 pub struct Sessions<A> {
     entries: Mutex<HashMap<u32, Arc<Entry<A>>>>,
 }
@@ -143,8 +140,6 @@ impl<A> Sessions<A> {
         lock(&self.entries).clear();
     }
 
-    /// Hands a datagram to session `id` once its fragments are complete and `resolve` reads
-    /// its address.
     pub fn deliver(&self, id: u32, part: Fragment<A>, resolve: impl FnOnce(A) -> Option<Address>) {
         let Some(entry) = lock(&self.entries).get(&id).cloned() else {
             return;

@@ -6,16 +6,11 @@ use quinn::{IdleTimeout, TransportConfig, VarInt};
 
 use crate::{INITIAL_PACKET_SIZE, datagram_buffer, transport_config};
 
-/// quic-go's `DefaultIdleTimeout`, which mihomo's QUIC clients and sing-quic's Hysteria2 keep.
 pub const MAX_IDLE: Duration = Duration::from_secs(30);
-/// mihomo's `DefaultStreamReceiveWindow` for its TUIC, ShadowQUIC and Hysteria clients.
 pub const STREAM_WINDOW: u64 = 15_728_640;
-/// mihomo's `DefaultConnectionReceiveWindow` for the same clients.
 pub const CONN_WINDOW: u64 = 67_108_864;
-/// mihomo's BBR initial window when a node sets no `cwnd`, in packets.
 pub const DEFAULT_CWND: u64 = 32;
 
-/// `value`, or `fallback` when the profile left it at zero.
 pub fn or_default(value: impl Into<u64>, fallback: u64) -> u64 {
     match value.into() {
         0 => fallback,
@@ -28,7 +23,6 @@ pub fn bbr_window(cwnd: u32) -> u64 {
     or_default(cwnd, DEFAULT_CWND) * INITIAL_PACKET_SIZE
 }
 
-/// What a QUIC outbound sets on top of [`transport_config`].
 pub struct Transport {
     pub stream_window: u64,
     pub conn_window: u64,

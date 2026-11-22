@@ -149,10 +149,9 @@ impl<T> SessionSlot<T> {
         self.adopt(ticket, establish().await?, discard)
     }
 
-    /// Like `offer`, but the dial runs on a task of its own, which `start` spawns with the
-    /// [`Dial`] it then settles. A caller that stops waiting after `wait` leaves the dial running
-    /// for the callers after it, as sing-quic's offer does; a reset detaches it, so the callers that
-    /// come after the reset start their own and the ones already waiting get its failure.
+    /// Like `offer`, but `start` spawns the dial with the [`Dial`] it then settles, so a caller that
+    /// stops waiting after `wait` leaves it running for the next, as sing-quic's offer does. A reset
+    /// detaches it: later callers start their own and the waiting ones get its failure.
     pub(crate) async fn offer_detached(
         &self,
         usable: impl Fn(&T) -> bool,
@@ -196,8 +195,7 @@ impl<T> SessionSlot<T> {
         }
     }
 
-    /// Ends `dial` with what it `made`, kept as `offer` keeps a connection, and hands the
-    /// outcome to its waiting callers.
+    /// Keeps what `dial` made as `offer` would and hands the outcome to its callers.
     pub(crate) fn settle(
         &self,
         dial: Dial<T>,

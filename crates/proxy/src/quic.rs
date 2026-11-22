@@ -175,7 +175,6 @@ impl QuicLink {
         self.connect_endpoint(cx, EndpointConfig::default()).await
     }
 
-    /// Like `connect`, with an endpoint of its own configuration.
     pub(crate) async fn connect_endpoint(
         &self,
         cx: &DialCx<'_>,

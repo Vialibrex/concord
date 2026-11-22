@@ -278,7 +278,7 @@ fn plain() -> Settings {
         over_stream: false,
         up: 0,
         down: 0,
-        window: concord_quic::bbr_window(0),
+        bbr_window: concord_quic::bbr_window(0),
         profile: BbrProfile::Standard,
     }
 }
