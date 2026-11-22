@@ -246,11 +246,11 @@ fn stream_options_ride_along_with_the_stream_parameters() {
 
 #[test]
 fn a_service_item_carries_the_address_only_when_its_check_read_one() {
-    let engine_item = json!({
+    let item: ServiceItem = serde_json::from_value(json!({
         "name": "claude", "status": "available", "region": "US", "ip": "198.51.100.9",
-        "checked-at": 5, "core-epoch": 1, "route-version": 2,
-    });
-    let item: ServiceItem = serde_json::from_value(engine_item).unwrap();
+        "checkedAt": 5, "epoch": 1, "version": 2,
+    }))
+    .unwrap();
     assert_eq!(item.ip, "198.51.100.9");
     assert_eq!(serde_json::to_value(&item).unwrap()["ip"], "198.51.100.9");
 
