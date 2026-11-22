@@ -555,6 +555,10 @@ MiB, GiB, ns, µs, ms, s, min, h), or as the source text in backticks; `cfg` var
 | `proxy::hysteria::PROTOCOL_TIMEOUT` | 10 s | B | Handshake/control stream timeout 10 s: mihomo `transport/hysteria/core/protocol.go:13` (`protocolTimeout = 10 * time.Second`), used at `core/client.go:81`. |
 | `proxy::hysteria::QUIC_STREAM_WINDOW` | 6291456 | B | Stream window 6 MiB when only recv-window is set: mihomo then leaves MaxStreamReceiveWindow 0 and quic-go uses `internal/protocol/params.go:31` (`DefaultMaxReceiveStreamFlowControlWindow = 6 * (1 << 20)`). |
 | `proxy::hysteria::udp::QUEUE` | 64 | B | sing-quic's Hysteria session queue `make(chan *udpMessage, 64)` (`hysteria/packet.go:142`), dropping when full (`:271-275`); same value. |
+| `proxy::masque::config::DATAGRAM_FRAME` | 16383 | B | mihomo's MASQUE client enables datagrams on quic-go (`adapter/outbound/masque.go:210-211`), which advertises MaxDatagramSize = 16383 as max_datagram_frame_size (metacubex/quic-go `2548683b76f4` `internal/wire/datagram_frame.go:14`); same value. |
+| `proxy::masque::config::INITIAL_PACKET_SIZE` | 1242 | B | mihomo MASQUE InitialPacketSize: 1242 (`adapter/outbound/masque.go:212`); same value. |
+| `proxy::masque::config::INITIAL_WINDOW` | 39744 | B | quic-go starts Cubic and NewReno at initialCongestionWindow = 32 packets of the connection's InitialPacketSize (metacubex/quic-go `2548683b76f4` `internal/congestion/cubic_sender.go:20`, `:84`; `connection.go:315`), 1242 for mihomo's MASQUE (`adapter/outbound/masque.go:212`); same value. |
+| `proxy::masque::config::KEEP_ALIVE` | 30 s | B | mihomo MASQUE KeepAlivePeriod: 30 * time.Second (`adapter/outbound/masque.go:213`); same value. |
 | `proxy::mieru::MTU` | 1400 | B | Packet underlay MTU 1400: mieru `pkg/common/mtu.go:19` (`DefaultMTU = 1400`), applied in `pkg/appctl/appctlcommon/client.go:224`. |
 | `proxy::mieru::congestion::CUBIC_BETA` | 0.7 | B | CUBIC multiplicative decrease 0.7: mieru `pkg/congestion/cubic.go:32` (`cubicBeta float64 = 0.7`). |
 | `proxy::mieru::congestion::CUBIC_C` | 0.4 | B | CUBIC scaling constant 0.4: mieru `pkg/congestion/cubic.go:33` (`cubicC float64 = 0.4`). |

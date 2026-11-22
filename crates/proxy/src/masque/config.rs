@@ -12,6 +12,11 @@ use crate::node::Egress;
 use crate::quic::{Crypto, QuicLink};
 use crate::wireguard::config::{DnsServer, dns_server};
 
+const INITIAL_PACKET_SIZE: u16 = 1242;
+const INITIAL_WINDOW: u64 = 32 * INITIAL_PACKET_SIZE as u64;
+const KEEP_ALIVE: Duration = Duration::from_secs(30);
+const DATAGRAM_FRAME: u64 = 16_383;
+
 pub(super) struct Config {
     pub(super) link: QuicLink,
     pub(super) tls: Arc<rustls::ClientConfig>,
@@ -167,17 +172,17 @@ fn remote_dns(opts: &MasqueOpts, l4: bool) -> Result<Vec<DnsServer>, BuildError>
 fn transport(opts: &MasqueOpts) -> quinn::TransportConfig {
     let mut transport = concord_quic::transport_config();
     let mut cubic = quinn::congestion::CubicConfig::default();
-    cubic.initial_window(32 * 1242);
+    cubic.initial_window(INITIAL_WINDOW);
     transport.congestion_controller_factory(Arc::new(cubic));
     transport
-        .initial_mtu(1242)
-        .keep_alive_interval(Some(Duration::from_secs(30)))
-        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(16_383)));
-    let cwnd = u64::from(if opts.cwnd == 0 { 32 } else { opts.cwnd });
+        .initial_mtu(INITIAL_PACKET_SIZE)
+        .keep_alive_interval(Some(KEEP_ALIVE))
+        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(DATAGRAM_FRAME)));
+    let cwnd = concord_quic::or_default(opts.cwnd, concord_quic::DEFAULT_CWND);
     match opts.congestion_controller.as_str() {
         "new_reno" => {
             let mut reno = quinn::congestion::NewRenoConfig::default();
-            reno.initial_window(32 * 1242);
+            reno.initial_window(INITIAL_WINDOW);
             transport.congestion_controller_factory(Arc::new(reno));
         }
         "bbr" | "bbr_meta_v1" | "bbr_meta_v2" => {
@@ -186,7 +191,7 @@ fn transport(opts: &MasqueOpts) -> quinn::TransportConfig {
                 cwnd * if opts.congestion_controller == "bbr_meta_v1" {
                     concord_quic::INITIAL_PACKET_SIZE
                 } else {
-                    1242
+                    u64::from(INITIAL_PACKET_SIZE)
                 },
             ));
         }
