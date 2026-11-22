@@ -184,13 +184,7 @@ impl Control {
                 Err(error)
             }
         };
-        if self.configured.load(Ordering::SeqCst) {
-            self.adopt_host_controller(
-                host.external_controller,
-                host.secret,
-                host.external_controller_cors,
-            );
-        }
+        self.adopt_host_controller(host);
         applied
     }
 
@@ -250,30 +244,40 @@ impl Control {
         &self,
         params: ConfigPatchParams,
     ) -> Result<ChangeSeq, ApiError> {
-        let (address, secret) = (params.external_controller.clone(), params.secret.clone());
-        let cors = params.external_controller_cors.clone();
+        let host = HostSettings {
+            external_controller: params.external_controller.clone(),
+            secret: params.secret.clone(),
+            external_controller_cors: params.external_controller_cors.clone(),
+            ..HostSettings::default()
+        };
         let patched = self.config_patch_as(Origin::Host, params).await?;
-        self.adopt_host_controller(address, secret, cors);
+        self.adopt_host_controller(host);
         Ok(patched)
     }
 
-    fn adopt_host_controller(
-        &self,
-        address: Option<String>,
-        secret: Option<String>,
-        cors: Option<ControllerCorsPatch>,
-    ) {
-        if !self.host_owned() || (address.is_none() && secret.is_none() && cors.is_none()) {
+    fn adopt_host_controller(&self, host: HostSettings) {
+        let HostSettings {
+            external_controller,
+            secret,
+            external_controller_cors,
+            ..
+        } = host;
+        if !self.host_owned()
+            || !self.configured.load(Ordering::SeqCst)
+            || (external_controller.is_none()
+                && secret.is_none()
+                && external_controller_cors.is_none())
+        {
             return;
         }
         let mut next = self.controller.borrow().clone();
-        if let Some(address) = address {
+        if let Some(address) = external_controller {
             next.address = address;
         }
         if let Some(secret) = secret {
             next.secret = secret;
         }
-        if let Some(cors) = cors {
+        if let Some(cors) = external_controller_cors {
             next.cors = ControllerCors::or_defaults(cors.allow_origins, cors.allow_private_network);
         }
         self.set_external_controller(next);
