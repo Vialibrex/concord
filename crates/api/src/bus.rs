@@ -385,14 +385,6 @@ impl EventBus {
         }
     }
 
-    pub fn publish_fatal(&self, message: String) {
-        self.events.each(|sub| {
-            sub.push(CoreEvent::Fatal {
-                message: message.clone(),
-            })
-        });
-    }
-
     pub fn topic_counts(&self) -> [usize; 5] {
         [
             self.log.subscribers(),
@@ -753,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn an_events_subscriber_without_delays_gets_the_rest_and_a_fatal_reaches_everyone() {
+    fn an_events_subscriber_without_delays_gets_the_rest() {
         let bus = EventBus::new();
         let mut plain = bus.watch_events(false, false);
         let mut full = bus.watch_events(true, false);
@@ -767,7 +759,6 @@ mod tests {
             name: Arc::from("p"),
             phase: concord_common::ResourcePhase::Updated,
         }));
-        bus.publish_fatal("down".into());
 
         let kinds = |stream: &mut QueueStream<CoreEvent, Membership<QueueSub<CoreEvent>>>| {
             let mut out = Vec::new();
@@ -775,14 +766,13 @@ mod tests {
                 out.push(match data {
                     CoreEvent::Delay { .. } => "delay",
                     CoreEvent::ResourceUpdate { .. } => "loaded",
-                    CoreEvent::Fatal { .. } => "fatal",
                     _ => "other",
                 });
             }
             out
         };
-        assert_eq!(kinds(&mut plain), ["loaded", "fatal"]);
-        assert_eq!(kinds(&mut full), ["delay", "loaded", "fatal"]);
+        assert_eq!(kinds(&mut plain), ["loaded"]);
+        assert_eq!(kinds(&mut full), ["delay", "loaded"]);
     }
 
     #[test]

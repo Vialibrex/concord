@@ -470,9 +470,6 @@ pub enum CoreEvent {
         url: String,
         value: i32,
     },
-    Fatal {
-        message: String,
-    },
     /// What a MITM script posted with `$notification.post`, sent as it posts.
     /// None is kept for a watch that comes later, and one a watch has no room
     /// for ends in a resync like any other event.
