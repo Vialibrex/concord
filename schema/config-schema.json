@@ -113,6 +113,25 @@
       "proxy-providers": null,
       "rule-providers": null,
       "sub-rules": null
+    },
+    "values": {
+      "mode": [
+        "rule",
+        "global",
+        "direct"
+      ],
+      "log-level": [
+        "debug",
+        "info",
+        "warning",
+        "error",
+        "silent"
+      ],
+      "find-process-mode": [
+        "always",
+        "strict",
+        "off"
+      ]
     }
   },
   "dns": {
@@ -196,6 +215,22 @@
       "proxy-server-nameserver-policy": null,
       "direct-nameserver": null,
       "direct-nameserver-follow-policy": false
+    },
+    "values": {
+      "enhanced-mode": [
+        "normal",
+        "fake-ip",
+        "redir-host"
+      ],
+      "fake-ip-filter-mode": [
+        "blacklist",
+        "whitelist",
+        "rule"
+      ],
+      "cache-algorithm": [
+        "lru",
+        "arc"
+      ]
     }
   },
   "dns.fallback-filter": {
@@ -286,6 +321,17 @@
       ],
       "auto-route": true,
       "auto-detect-interface": true
+    },
+    "values": {
+      "stack": [
+        "gvisor",
+        "mips"
+      ],
+      "congestion-controller": [
+        "cubic",
+        "reno",
+        "bbr"
+      ]
     }
   },
   "sniffer": {
@@ -373,6 +419,18 @@
       "store-selected": true,
       "store-fake-ip": false
     }
+  },
+  "proxy-values": {
+    "ip-stack.mode": [
+      "auto",
+      "gvisor",
+      "mips"
+    ],
+    "ip-stack.congestion-controller": [
+      "cubic",
+      "reno",
+      "bbr"
+    ]
   },
   "rule-types": {
     "t0": [

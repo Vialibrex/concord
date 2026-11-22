@@ -53,14 +53,19 @@ fn narrow<T: TryFrom<i128>>(values: Vec<i128>) -> Vec<T> {
         .collect()
 }
 
+pub const TUN_STACKS: [&str; 2] = ["gvisor", "mips"];
+/// Accepted, but run as the userspace stack.
+pub const TUN_STACK_FALLBACKS: [&str; 2] = ["mixed", "system"];
+
 impl TunConfig {
     pub fn from_map(map: &Map) -> Result<TunConfig> {
         let mut f = Fields::new(map, "tun", false);
         let stack_name = f.string("stack")?;
-        if !matches!(
-            stack_name.to_ascii_lowercase().as_str(),
-            "" | "gvisor" | "mips" | "mixed" | "system"
-        ) {
+        let lowered = stack_name.to_ascii_lowercase();
+        if !(lowered.is_empty()
+            || TUN_STACKS.contains(&lowered.as_str())
+            || TUN_STACK_FALLBACKS.contains(&lowered.as_str()))
+        {
             return Err(ConfigError::new("invalid tun stack"));
         }
         Ok(TunConfig {

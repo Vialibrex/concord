@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use concord_common::query_trail;
 use concord_common::sync::lock;
 use concord_common::{CoreError, EventSink, Initiator, LookupIps, Tasks};
+use concord_config::dns::CacheAlgorithm;
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
 use hickory_proto::op::{Message, ResponseCode};
@@ -188,12 +189,12 @@ enum Cache {
 }
 
 impl Cache {
-    fn new(algorithm: &str, size: i32) -> Self {
+    fn new(algorithm: CacheAlgorithm, size: i32) -> Self {
         let size = usize::try_from(size)
             .ok()
             .filter(|size| *size > 0)
             .unwrap_or(DEFAULT_CACHE_SIZE);
-        if algorithm == "arc" {
+        if algorithm == CacheAlgorithm::Arc {
             Cache::Arc(ArcCache::new(size))
         } else {
             Cache::Lru(LruCache::new(size))
@@ -234,7 +235,7 @@ pub(crate) struct GroupParts {
     pub fallback_ip: Vec<Arc<dyn IpMatch>>,
     pub fallback_lazy: bool,
     pub policy: Arc<Vec<PolicyItem>>,
-    pub cache_algorithm: String,
+    pub cache_algorithm: CacheAlgorithm,
     pub cache_size: i32,
     pub ipv6_timeout: Duration,
     pub tasks: Tasks,
@@ -251,7 +252,7 @@ pub(crate) struct Group {
 impl Group {
     pub(crate) fn new(parts: GroupParts, events: Arc<dyn EventSink>) -> Arc<Self> {
         Arc::new(Group {
-            cache: Mutex::new(Cache::new(&parts.cache_algorithm, parts.cache_size)),
+            cache: Mutex::new(Cache::new(parts.cache_algorithm, parts.cache_size)),
             flights: Mutex::new(HashMap::new()),
             parts,
             events,

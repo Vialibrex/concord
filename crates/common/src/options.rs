@@ -27,13 +27,12 @@ pub enum TunnelMode {
 }
 
 impl TunnelMode {
+    pub const ALL: [Self; 3] = [TunnelMode::Rule, TunnelMode::Global, TunnelMode::Direct];
+
     pub fn parse(text: &str) -> Option<Self> {
-        match text.to_ascii_lowercase().as_str() {
-            "rule" => Some(TunnelMode::Rule),
-            "global" => Some(TunnelMode::Global),
-            "direct" => Some(TunnelMode::Direct),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.as_str().eq_ignore_ascii_case(text))
     }
 
     pub fn as_str(self) -> &'static str {
@@ -59,15 +58,18 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
+    pub const ALL: [Self; 5] = [
+        LogLevel::Debug,
+        LogLevel::Info,
+        LogLevel::Warning,
+        LogLevel::Error,
+        LogLevel::Silent,
+    ];
+
     pub fn parse(text: &str) -> Option<Self> {
-        match text.to_ascii_lowercase().as_str() {
-            "debug" => Some(LogLevel::Debug),
-            "info" => Some(LogLevel::Info),
-            "warning" => Some(LogLevel::Warning),
-            "error" => Some(LogLevel::Error),
-            "silent" => Some(LogLevel::Silent),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.as_str().eq_ignore_ascii_case(text))
     }
 
     pub fn as_str(self) -> &'static str {
@@ -92,13 +94,16 @@ pub enum FindProcessMode {
 }
 
 impl FindProcessMode {
+    pub const ALL: [Self; 3] = [
+        FindProcessMode::Always,
+        FindProcessMode::Strict,
+        FindProcessMode::Off,
+    ];
+
     pub fn parse(text: &str) -> Option<Self> {
-        match text.to_ascii_lowercase().as_str() {
-            "always" => Some(FindProcessMode::Always),
-            "strict" => Some(FindProcessMode::Strict),
-            "off" => Some(FindProcessMode::Off),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.as_str().eq_ignore_ascii_case(text))
     }
 
     pub fn as_str(self) -> &'static str {
@@ -109,3 +114,5 @@ impl FindProcessMode {
         }
     }
 }
+
+pub const CONGESTION_CONTROLLERS: [&str; 3] = ["cubic", "reno", "bbr"];

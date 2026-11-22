@@ -1,3 +1,5 @@
+use concord_common::options::CONGESTION_CONTROLLERS;
+
 use crate::bbr::{Bbr, Flow, RateSample, Window};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -9,7 +11,7 @@ pub enum Congestion {
 }
 
 impl Congestion {
-    pub const NAMES: &'static [&'static str] = &["cubic", "reno", "bbr"];
+    pub const NAMES: &'static [&'static str] = &CONGESTION_CONTROLLERS;
 
     /// `bbr3` is not implemented; it runs as CUBIC and reports `false`, as any unknown name does.
     pub fn parse(name: &str) -> (Self, bool) {
@@ -300,6 +302,17 @@ impl Rtt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_listed_name_parses_as_implemented_to_its_own_variant() {
+        let mut seen = Vec::new();
+        for name in Congestion::NAMES {
+            let (kind, implemented) = Congestion::parse(name);
+            assert!(implemented, "{name}");
+            assert!(!seen.contains(&kind), "{name} repeats a variant");
+            seen.push(kind);
+        }
+    }
 
     #[test]
     fn slow_start_doubles_then_loss_cuts_by_beta() {

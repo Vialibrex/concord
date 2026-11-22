@@ -317,7 +317,7 @@ impl Resolver {
                 fallback_ip: filters.ip,
                 fallback_lazy: lazy,
                 policy: Arc::new(policy),
-                cache_algorithm: config.cache_algorithm.clone(),
+                cache_algorithm: config.cache_algorithm,
                 cache_size: config.cache_max_size,
                 ipv6_timeout: timeout,
                 tasks: tasks.clone(),

@@ -103,7 +103,7 @@ async fn a_cache_hit_reads_the_shared_message() {
             fallback_ip: Vec::new(),
             fallback_lazy: false,
             policy: Arc::new(Vec::new()),
-            cache_algorithm: String::new(),
+            cache_algorithm: Default::default(),
             cache_size: 16,
             ipv6_timeout: Duration::ZERO,
             tasks: Default::default(),

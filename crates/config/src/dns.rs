@@ -341,6 +341,8 @@ pub enum EnhancedMode {
 }
 
 impl EnhancedMode {
+    pub const ALL: [Self; 3] = [Self::Normal, Self::FakeIp, Self::RedirHost];
+
     pub fn as_str(self) -> &'static str {
         match self {
             EnhancedMode::Normal => "normal",
@@ -356,6 +358,45 @@ pub enum FakeIpFilterMode {
     Blacklist,
     Whitelist,
     Rule,
+}
+
+impl FakeIpFilterMode {
+    pub const ALL: [Self; 3] = [Self::Blacklist, Self::Whitelist, Self::Rule];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FakeIpFilterMode::Blacklist => "blacklist",
+            FakeIpFilterMode::Whitelist => "whitelist",
+            FakeIpFilterMode::Rule => "rule",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CacheAlgorithm {
+    #[default]
+    Lru,
+    Arc,
+}
+
+impl CacheAlgorithm {
+    pub const ALL: [Self; 2] = [Self::Lru, Self::Arc];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CacheAlgorithm::Lru => "lru",
+            CacheAlgorithm::Arc => "arc",
+        }
+    }
+
+    /// Only the exact name `arc` selects ARC; anything else, including an empty value, is LRU.
+    pub fn parse(text: &str) -> Self {
+        if text == Self::Arc.as_str() {
+            Self::Arc
+        } else {
+            Self::Lru
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -391,7 +432,7 @@ pub struct DnsConfig {
     pub fallback_filter: FallbackFilter,
     pub ipv6_timeout: u32,
     pub prefer_h3: bool,
-    pub cache_algorithm: String,
+    pub cache_algorithm: CacheAlgorithm,
     pub cache_max_size: i32,
     pub fake_ip_range6: Option<IpCidr>,
     pub proxy_server_nameserver_policy: Vec<PolicyEntry>,
@@ -399,26 +440,26 @@ pub struct DnsConfig {
     pub listen_routing_mark: u32,
 }
 
-fn parse_enhanced(text: &str) -> Result<EnhancedMode> {
-    match text.to_ascii_lowercase().as_str() {
-        "normal" => Ok(EnhancedMode::Normal),
-        "fake-ip" => Ok(EnhancedMode::FakeIp),
-        "redir-host" | "" => Ok(EnhancedMode::RedirHost),
-        _ => Err(ConfigError::new(format!(
-            "dns.enhanced-mode: invalid mode \"{text}\""
-        ))),
+pub(crate) fn parse_enhanced(text: &str) -> Result<EnhancedMode> {
+    if text.is_empty() {
+        return Ok(EnhancedMode::default());
     }
+    EnhancedMode::ALL
+        .into_iter()
+        .find(|mode| mode.as_str().eq_ignore_ascii_case(text))
+        .ok_or_else(|| ConfigError::new(format!("dns.enhanced-mode: invalid mode \"{text}\"")))
 }
 
-fn parse_filter_mode(text: &str) -> Result<FakeIpFilterMode> {
-    match text.to_ascii_lowercase().as_str() {
-        "blacklist" | "" => Ok(FakeIpFilterMode::Blacklist),
-        "whitelist" => Ok(FakeIpFilterMode::Whitelist),
-        "rule" => Ok(FakeIpFilterMode::Rule),
-        _ => Err(ConfigError::new(format!(
-            "dns.fake-ip-filter-mode: invalid mode \"{text}\""
-        ))),
+pub(crate) fn parse_filter_mode(text: &str) -> Result<FakeIpFilterMode> {
+    if text.is_empty() {
+        return Ok(FakeIpFilterMode::default());
     }
+    FakeIpFilterMode::ALL
+        .into_iter()
+        .find(|mode| mode.as_str().eq_ignore_ascii_case(text))
+        .ok_or_else(|| {
+            ConfigError::new(format!("dns.fake-ip-filter-mode: invalid mode \"{text}\""))
+        })
 }
 
 fn domain_rule(cond: &Cond) -> bool {
@@ -551,7 +592,7 @@ impl DnsConfig {
             fake_ip_filter_mode: parse_filter_mode(&f.string("fake-ip-filter-mode")?)?,
             fallback_lazy_query: f.boolean("fallback-lazy-query")?,
             direct_nameserver_follow_policy: f.boolean("direct-nameserver-follow-policy")?,
-            cache_algorithm: f.string("cache-algorithm")?,
+            cache_algorithm: CacheAlgorithm::parse(&f.string("cache-algorithm")?),
             cache_max_size: f.loose("cache-max-size", 0)?,
             listen: f.string("listen")?,
             listen_routing_mark: f.mark("listen-routing-mark")?,

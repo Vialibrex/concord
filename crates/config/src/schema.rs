@@ -1,8 +1,12 @@
 use serde_json::{Map, Value, json};
 
+use concord_common::options::{CONGESTION_CONTROLLERS, FindProcessMode, LogLevel, TunnelMode};
+
+use crate::dns::{CacheAlgorithm, EnhancedMode, FakeIpFilterMode};
 use crate::keys;
-use crate::proxy::{T0_PROXY_TYPES, T1_PROXY_TYPES, T2_PROXY_TYPES};
+use crate::proxy::{IP_STACK_MODES, T0_PROXY_TYPES, T1_PROXY_TYPES, T2_PROXY_TYPES};
 use crate::rule::{T0_RULE_TYPES, T1_RULE_TYPES};
+use crate::tun::TUN_STACKS;
 
 fn tiers(t0: &[&str], t1: &[&str], t2: &[&str]) -> Value {
     json!({"t0": t0, "t1": t1, "t2": t2})
@@ -31,13 +35,51 @@ fn section_defaults(section: &str) -> Value {
     })
 }
 
+fn names<T: Copy>(all: &[T], name: fn(T) -> &'static str) -> Value {
+    json!(all.iter().map(|value| name(*value)).collect::<Vec<_>>())
+}
+
+fn section_values(section: &str) -> Value {
+    match section {
+        "" => json!({
+            "mode": names(&TunnelMode::ALL, TunnelMode::as_str),
+            "log-level": names(&LogLevel::ALL, LogLevel::as_str),
+            "find-process-mode": names(&FindProcessMode::ALL, FindProcessMode::as_str),
+        }),
+        "dns" => json!({
+            "enhanced-mode": names(&EnhancedMode::ALL, EnhancedMode::as_str),
+            "fake-ip-filter-mode": names(&FakeIpFilterMode::ALL, FakeIpFilterMode::as_str),
+            "cache-algorithm": names(&CacheAlgorithm::ALL, CacheAlgorithm::as_str),
+        }),
+        "tun" => json!({
+            "stack": TUN_STACKS,
+            "congestion-controller": CONGESTION_CONTROLLERS,
+        }),
+        _ => json!({}),
+    }
+}
+
 pub fn config_schema() -> Value {
     let mut schema = Map::new();
     schema.insert("version".into(), json!(1));
     for (section, tiers) in keys::SECTIONS {
         let name = if section.is_empty() { "keys" } else { section };
-        schema.insert(name.into(), key_tiers(tiers, section_defaults(section)));
+        let mut entry = key_tiers(tiers, section_defaults(section));
+        if let (Some(entry), Value::Object(values)) =
+            (entry.as_object_mut(), section_values(section))
+            && !values.is_empty()
+        {
+            entry.insert("values".into(), Value::Object(values));
+        }
+        schema.insert(name.into(), entry);
     }
+    schema.insert(
+        "proxy-values".into(),
+        json!({
+            "ip-stack.mode": IP_STACK_MODES,
+            "ip-stack.congestion-controller": CONGESTION_CONTROLLERS,
+        }),
+    );
     schema.insert(
         "rule-types".into(),
         tiers(T0_RULE_TYPES, T1_RULE_TYPES, &[]),
@@ -97,6 +139,63 @@ mod tests {
             schema["proxy-types"]["t2"]
                 .as_array()
                 .is_some_and(|a| a.iter().any(|v| v == "tailscale"))
+        );
+    }
+
+    fn listed(section: &str, key: &str) -> Vec<String> {
+        config_schema()[section]["values"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{section}.{key}"))
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn every_listed_value_is_accepted_by_its_parser() {
+        use crate::dns::{DnsConfig, parse_enhanced, parse_filter_mode};
+        use crate::tun::TunConfig;
+
+        for stack in listed("tun", "stack") {
+            let mut map = keys::tun_defaults();
+            map.insert("stack".into(), json!(stack));
+            assert!(TunConfig::from_map(&map).is_ok(), "{stack}");
+        }
+        for mode in listed("dns", "enhanced-mode") {
+            assert_eq!(parse_enhanced(&mode).unwrap().as_str(), mode);
+            let mut map = keys::dns_defaults();
+            map.insert("enhanced-mode".into(), json!(mode));
+            assert!(DnsConfig::from_map(&map, true).is_ok(), "{mode}");
+        }
+        for mode in listed("dns", "fake-ip-filter-mode") {
+            assert_eq!(parse_filter_mode(&mode).unwrap().as_str(), mode);
+        }
+        for algorithm in listed("dns", "cache-algorithm") {
+            assert_eq!(CacheAlgorithm::parse(&algorithm).as_str(), algorithm);
+        }
+        for mode in listed("keys", "mode") {
+            assert_eq!(
+                TunnelMode::parse(&mode).map(TunnelMode::as_str),
+                Some(mode.as_str())
+            );
+        }
+        for level in listed("keys", "log-level") {
+            assert_eq!(
+                LogLevel::parse(&level).map(LogLevel::as_str),
+                Some(level.as_str())
+            );
+        }
+        for mode in listed("keys", "find-process-mode") {
+            assert_eq!(
+                FindProcessMode::parse(&mode).map(FindProcessMode::as_str),
+                Some(mode.as_str())
+            );
+        }
+        let schema = config_schema();
+        assert!(
+            schema["proxy-values"]["ip-stack.mode"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
         );
     }
 }

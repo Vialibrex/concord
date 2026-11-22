@@ -492,6 +492,8 @@ pub struct AmneziaWgOpts {
     pub disable_cookies: bool,
 }
 
+pub const IP_STACK_MODES: [&str; 3] = ["auto", "gvisor", "mips"];
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MasqueOpts {
     pub server: String,

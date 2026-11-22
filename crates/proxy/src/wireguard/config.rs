@@ -6,7 +6,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use concord_common::Address;
-use concord_config::proxy::{WgPeer, WireGuardOpts, wireguard_dns};
+use concord_config::proxy::{IP_STACK_MODES, WgPeer, WireGuardOpts, wireguard_dns};
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 
 use super::amnezia::Settings;
@@ -173,26 +173,18 @@ pub(super) fn parse(opts: &WireGuardOpts) -> Result<WgConfig, BuildError> {
         0 => DEFAULT_MTU,
         value => usize::try_from(value).unwrap_or(DEFAULT_MTU),
     };
-    let congestion = match opts
-        .ip_stack_congestion_controller
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "reno" => Congestion::Reno,
-        "" | "cubic" => Congestion::Cubic,
-        "bbr" => Congestion::Bbr,
-        other @ "bbr3" => {
-            tracing::warn!("wireguard congestion-controller {other} is not available, using cubic");
-            Congestion::Cubic
-        }
-        other => {
+    let name = opts.ip_stack_congestion_controller.to_ascii_lowercase();
+    let (congestion, implemented) = Congestion::parse(&name);
+    if !implemented {
+        if name != "bbr3" {
             return Err(BuildError::invalid(format!(
-                "invalid IP stack congestion controller {other:?}; expected cubic, reno, bbr, or bbr3"
+                "invalid IP stack congestion controller {name:?}; expected cubic, reno, bbr, or bbr3"
             )));
         }
-    };
+        tracing::warn!("wireguard congestion-controller {name} is not available, using cubic");
+    }
     let mode = opts.ip_stack_mode.to_ascii_lowercase();
-    if !matches!(mode.as_str(), "" | "auto" | "mips" | "gvisor") {
+    if !mode.is_empty() && !IP_STACK_MODES.contains(&mode.as_str()) {
         return Err(BuildError::invalid(format!(
             "invalid IP stack mode {mode:?}; expected auto, gvisor, or mips"
         )));
