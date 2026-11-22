@@ -53,8 +53,16 @@ struct Core {
     closed: AtomicBool,
     bucket: AtomicI64,
     bucket_notify: Notify,
-    fin_queued: Option<AtomicBool>,
+    mode: Mode,
     tasks: Tasks,
+}
+
+enum Mode {
+    /// Each stream queues its own FIN, and a dropped session stops its tasks at once.
+    Shared,
+    /// A dropped session lets the writer drain the queue and end the one stream with a FIN
+    /// unless it already queued one.
+    Single { fin_queued: AtomicBool },
 }
 
 impl Core {
@@ -85,21 +93,25 @@ pub(super) struct SmuxSession {
 
 impl SmuxSession {
     pub fn new(io: BoxStream, tasks: &Tasks) -> Self {
-        Self::start(io, FIRST_STREAM_ID, false, tasks)
+        Self::start(io, FIRST_STREAM_ID, Mode::Shared, tasks)
     }
 
     pub(super) fn with_first_id(io: BoxStream, first_id: u32, tasks: &Tasks) -> Self {
-        Self::start(io, first_id, true, tasks)
+        let mode = Mode::Single {
+            fin_queued: AtomicBool::new(false),
+        };
+        Self::start(io, first_id, mode, tasks)
     }
 
-    fn start(io: BoxStream, first_id: u32, drain_on_drop: bool, tasks: &Tasks) -> Self {
+    fn start(io: BoxStream, first_id: u32, mode: Mode, tasks: &Tasks) -> Self {
         let (read, write) = Box::new(io).into_split();
         let (tx, rx) = mpsc::channel(QUEUE);
-        let (stop, stopped) = if drain_on_drop {
-            let (tx, rx) = oneshot::channel();
-            (Some(tx), Some(rx))
-        } else {
-            (None, None)
+        let (stop, stopped) = match mode {
+            Mode::Shared => (None, None),
+            Mode::Single { .. } => {
+                let (tx, rx) = oneshot::channel();
+                (Some(tx), Some(rx))
+            }
         };
         let core = Arc::new(Core {
             streams: Mutex::new(HashMap::new()),
@@ -108,7 +120,7 @@ impl SmuxSession {
             closed: AtomicBool::new(false),
             bucket: AtomicI64::new(MAX_RECEIVE_BUFFER),
             bucket_notify: Notify::new(),
-            fin_queued: drain_on_drop.then(|| AtomicBool::new(false)),
+            mode,
             tasks: tasks.clone(),
         });
         let reader = {
@@ -157,10 +169,8 @@ async fn write_frames_draining(
     while let Some(frame) = rx.recv().await {
         write.write_all(&frame).await?;
     }
-    if core
-        .fin_queued
-        .as_ref()
-        .is_some_and(|fin| !fin.load(Ordering::Relaxed))
+    if let Mode::Single { fin_queued } = &core.mode
+        && !fin_queued.load(Ordering::Relaxed)
     {
         write.write_all(&frame(CMD_FIN, stream_id, &[])).await?;
     }
@@ -408,7 +418,7 @@ impl AsyncWrite for SmuxWrite {
             this.sender
                 .send_item(frame(CMD_FIN, shared.id, &[]))
                 .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
-            if let Some(fin_queued) = &shared.core.fin_queued {
+            if let Mode::Single { fin_queued } = &shared.core.mode {
                 fin_queued.store(true, Ordering::Relaxed);
             }
             shared.closed.store(true, Ordering::Relaxed);
@@ -423,7 +433,7 @@ impl Drop for SmuxWrite {
     fn drop(&mut self) {
         let shared = &*self.shared;
         if !shared.closed.swap(true, Ordering::Relaxed) {
-            if shared.core.fin_queued.is_none() {
+            if let Mode::Shared = shared.core.mode {
                 send_detached(
                     &shared.core.tasks,
                     &shared.core.tx,
