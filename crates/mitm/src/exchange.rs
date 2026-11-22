@@ -3,6 +3,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use concord_common::HttpFacts;
 use concord_common::intercept::{Reject, Route, RuleLabel, UpstreamRequest};
+use concord_config::builtin::Reject as RejectPolicy;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION, UPGRADE, USER_AGENT};
 use http::{Extensions, HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Version};
 use http_body_util::BodyExt;
@@ -211,12 +212,18 @@ fn local(
 
 /// The reply a REJECT variant asks for, by the name it leaves in the chain.
 fn reject_action(route: &Route) -> UrlAction {
-    match route.chain.first().map(|exit| &**exit) {
-        Some("REJECT-TINYGIF" | "REJECT-IMG") => UrlAction::RejectImg,
-        Some("REJECT-DICT") => UrlAction::RejectDict,
-        Some("REJECT-ARRAY") => UrlAction::RejectArray,
-        Some("REJECT-200" | "REJECT-VIDEO") => UrlAction::Reject200,
-        _ => UrlAction::Reject,
+    match route
+        .chain
+        .first()
+        .and_then(|exit| RejectPolicy::named(exit))
+    {
+        Some(RejectPolicy::TinyGif) => UrlAction::RejectImg,
+        Some(RejectPolicy::Dict) => UrlAction::RejectDict,
+        Some(RejectPolicy::Array) => UrlAction::RejectArray,
+        Some(RejectPolicy::Ok200) => UrlAction::Reject200,
+        Some(RejectPolicy::Reject | RejectPolicy::Drop | RejectPolicy::NoDrop) | None => {
+            UrlAction::Reject
+        }
     }
 }
 

@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use super::IgnoreReason;
 use super::resource::is_url;
 use super::source::{split_commas, unquote};
+use crate::builtin::Reject;
 use crate::rule::REQUIRES_RESOLVE;
 
 /// A built-in policy in its Surge name, or one the host maps to an outbound.
@@ -455,16 +456,11 @@ fn set_name(key: &str) -> String {
 /// A built-in policy, or a name the host maps; Quantumult X writes Loon's `PROXY` as `proxy`.
 /// An argument left unexpanded names nothing.
 pub(super) fn policy_of(policy: &str) -> Result<Policy, Refusal> {
-    let builtin = match policy.to_ascii_uppercase().as_str() {
-        "DIRECT" => "DIRECT",
-        "REJECT" => "REJECT",
-        "REJECT-DROP" => "REJECT-DROP",
-        "REJECT-NO-DROP" => "REJECT-NO-DROP",
-        "REJECT-TINYGIF" | "REJECT-IMG" => "REJECT-TINYGIF",
-        "REJECT-DICT" => "REJECT-DICT",
-        "REJECT-ARRAY" => "REJECT-ARRAY",
-        "REJECT-200" | "REJECT-VIDEO" => "REJECT-200",
-        _ if policy.is_empty() || policy.contains("${") || policy.contains("{{{") => {
+    let upper = policy.to_ascii_uppercase();
+    let builtin = match Reject::named(&upper) {
+        Some(reject) => reject.name(),
+        None if upper == "DIRECT" => "DIRECT",
+        None if policy.is_empty() || policy.contains("${") || policy.contains("{{{") => {
             return Err((IgnoreReason::Policy, Some(policy.to_string())));
         }
         _ if policy == "proxy" => return Ok(Policy::Named("PROXY".to_string())),
