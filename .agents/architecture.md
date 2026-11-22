@@ -76,9 +76,17 @@ A config apply builds a new `tunnel::Runtime` and swaps it in; flows already run
 The route decision and the outbound socket are two tables (`tunnel/src/udp/`): flows keyed by (source,
 destination) are routed once, and sessions keyed by (source, outbound) are shared, so each destination follows its
 own rule while the external mapping stays endpoint-independent. A protocol that can reach only one destination per
-session (plain vmess) adds the destination to the session key. One connection record per session; idle sessions are
-swept on a coarse timer; the flow table is capped. Sending tries `poll_send` inline and falls back to a bounded
-per-session queue; each session has one receive task.
+session (plain vmess) adds the destination to the session key. One connection record per session. A task that runs
+only while there is UDP traffic sweeps idle flows and sessions once a second, and the NAT clock counts its ticks. A
+full flow table evicts its oldest sixteenth at once, so a port scan does not rescan it for every new flow.
+
+The TUN driver hands each receive round to the tunnel as one batch (`udp/batch.rs`). Inside a `BatchRound`, datagrams
+for sessions that send in batches are copied into a per-thread buffer, chained per session, and each session's run is
+sent when the round ends. The round also keeps its last flow, so a run of datagrams to one flow skips the flow table,
+as sing-tun's `packetFlows` does; a flow this thread removes is forgotten at once, and another thread's removal
+reaches the round at the next round. Outside a round, sending tries `poll_send` inline and falls back to a bounded
+per-session queue. Each session has one receive task, unless its reply writer adopts it (`UdpReply::adopt`): the TUN
+driver then polls the session's replies in its own rounds, and a task only waits for the session to be closed.
 
 UDP inbound loops charge tokio's cooperative budget per receive (`consume_budget`), because a socket that reports
 spurious readiness (Windows AFD) would otherwise hold a worker indefinitely.
@@ -113,6 +121,17 @@ fallback. Vision's explicit record-boundary connection and REALITY already own t
 `concord-tun` opens the device (Linux with offload and one queue per worker, utun, wintun), installs routes and runs
 the stack driver over `concord-netstack`, Concord's own TCP stack. Flows go to the tunnel through `FlowHandler`
 like any inbound. Receive rings are owned mmaps that opt out of transparent huge pages.
+
+The driver is one Tokio task per queue (`tun/src/stack/driver.rs`). Each poll runs rounds of device reads, stack
+input, timers and transmit until nothing is left or `MAX_ROUNDS` have run, and a poll that still has work wakes
+itself, which puts it behind the worker's other tasks. A round reads at most `RX_BATCH` packets; on macOS, the one
+device that returns more than one packet per read, a read asks for `RX_BATCH_START` at first, twice as many after a
+full read and half as many after one under half full. Before each pass it drains its own poller under `OwnWake`
+(`stack/own_wake.rs`), so the wakes that drain raises for the driver itself do not send it back through the
+scheduler. On Linux and Android the device and the sockets of adopted sessions sit on a queue poller
+(`tun/src/reactor.rs`): while the driver is busy they stay there, and when it goes idle `Reactor::set_busy` parks on
+that poller until the waits have cost what moving each descriptor back to Tokio would, then moves them. The
+trade-offs against sing-tun's engine goroutine are under "TUN driver scheduling" in `reference-choices.md`.
 
 ## Engine And Control Plane
 
