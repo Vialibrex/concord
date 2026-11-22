@@ -25,10 +25,7 @@ fn non_empty(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn script_answer(answer: ScriptResponse) -> Answer {
-    let status = StatusCode::from_u16(answer.status)
-        .ok()
-        .filter(|_| (100..=999).contains(&answer.status))
-        .unwrap_or(StatusCode::OK);
+    let status = StatusCode::from_u16(answer.status).unwrap_or(StatusCode::OK);
     let mut headers = script_header(&answer.header);
     let body = answer.body.unwrap_or_default();
     headers.insert(
@@ -241,10 +238,7 @@ impl Session {
         }
         let mut changed = false;
         if result.status != 0 {
-            match StatusCode::from_u16(result.status)
-                .ok()
-                .filter(|_| (100..=999).contains(&result.status))
-            {
+            match StatusCode::from_u16(result.status).ok() {
                 Some(status) => {
                     head.status = status;
                     changed = true;

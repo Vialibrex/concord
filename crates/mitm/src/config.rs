@@ -55,7 +55,6 @@ struct LineRead {
     unread: bool,
 }
 
-/// The list's key, the line's index in it and its text.
 /// The list, then the line's index, text and module.
 type Visit<'a> = dyn FnMut(&'static str, usize, &str, Option<&str>, LineRead) + 'a;
 

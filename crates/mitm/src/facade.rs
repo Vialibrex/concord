@@ -126,10 +126,6 @@ impl Mitm {
         &self.shared.authority
     }
 
-    pub fn scripts(&self) -> &Arc<ScriptHost> {
-        &self.shared.scripts
-    }
-
     fn parse_env(&self) -> ParseEnv {
         ParseEnv {
             resources: self.shared.authority.resources_dir(),
@@ -304,10 +300,6 @@ impl Mitm {
         if let Some(quickjs) = &self.quickjs {
             quickjs.flush();
         }
-    }
-
-    pub fn pressure_level(&self) -> u8 {
-        self.shared.pressure.level()
     }
 
     #[cfg(test)]

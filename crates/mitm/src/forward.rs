@@ -256,8 +256,6 @@ impl Session {
         Ok(())
     }
 
-    /// Sends the request to its server on a connection from the pool, a fresh
-    /// one if a reused one turns out to be gone.
     /// Sends a request upstream by its own route when it needs one.
     pub(crate) async fn round_trip(
         &self,
@@ -270,6 +268,8 @@ impl Session {
             .map_err(|err| Unsent::Failed(err.to_string()))
     }
 
+    /// Sends the request to its server on a connection from the pool, a fresh
+    /// one if a reused one turns out to be gone.
     async fn send_upstream(
         &self,
         out: OutRequest,
