@@ -68,7 +68,6 @@ proxy::mieru::underlay::OUT_QUEUE 32  # Stream underlay outgoing frame queue 32;
 proxy::shadowquic::BRUTAL_MTU 1200  # Datagram size handed to the Brutal/BBR controller at switch; equals Quinn INITIAL_MTU 1200 (`vendor/quinn-proto/src/lib.rs:332`) but mihomo Brutal starts at quic-go InitialPacketSize 1280 (`transport/tuic/congestion_v2/brutal.go:39`, quic-go `internal/protocol/params.go:12`).
 rpc::server::OUTBOX_DEPTH 16  # mihomo writes push frames inline with no queue (`hub/route/server.go:530-561`); depth one with backpressure changes how replies wait on each other. Needs a host-side measurement.
 rules::runs::KEYWORD_AUTOMATON_FROM 16  # Either drop is possible (always automaton, as aho-corasick advises, or always linear, as mihomo and sing-box do); needs a rule-matching measurement.
-tun::device::linux::TunDevice::try_send_parts::MAX_PARTS 10  # Bound on iovecs (vnet header + parts) for one vectored TUN write; no reference found.
 tun::stack::driver::DNS_CONCURRENCY 256  # In-flight hijacked DNS queries. Concord's own value with no reference or measurement behind it; sing-tun has no DNS in-flight cap.
 tun::stack::driver::MAX_ROUNDS 8  # Driver rounds per wake. Concord's own value with no reference or measurement behind it; sing-tun bounds a burst by goEngineBurstBytes 1 MiB (`stack_go_engine.go:642`).
 tun::stack::driver::RX_BUFFER 65552  # sing-tun slot is virtioNetHdrLen(10) + gsoMaxSize + headroom (stack_go_io_linux.go:275); Concord 64 KiB + 16

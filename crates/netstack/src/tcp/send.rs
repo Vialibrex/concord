@@ -9,7 +9,8 @@ use crate::wire::{
 
 use super::{Egress, Phase, Sent, State, Tcb, mss_for};
 
-const PAYLOAD_SLICES: usize = 8;
+/// The most payload slices one [`Egress::send_in_place`] is handed.
+pub const PAYLOAD_SLICES: usize = 8;
 const MAX_HEAD: usize = IPV6_HEADER + TCP_HEADER + 40;
 const MIN_SEND_BUFFER: usize = 64 * 1024;
 

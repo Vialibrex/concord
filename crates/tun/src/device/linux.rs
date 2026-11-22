@@ -1,3 +1,5 @@
+use concord_netstack::PAYLOAD_SLICES;
+
 use super::*;
 
 impl DeviceIo {
@@ -176,7 +178,7 @@ impl Device for TunDevice {
     }
 
     fn try_send_parts(&self, parts: &[IoSlice<'_>], segment: u16) -> io::Result<usize> {
-        const MAX_PARTS: usize = 10;
+        const MAX_PARTS: usize = PAYLOAD_SLICES + 2;
         let Some(head) = parts
             .first()
             .filter(|_| self.offload.vnet && parts.len() < MAX_PARTS)

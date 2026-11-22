@@ -4,6 +4,8 @@ mod recv;
 mod send;
 mod timers;
 
+pub use send::PAYLOAD_SLICES;
+
 use std::collections::VecDeque;
 use std::io::{self, IoSlice};
 use std::net::SocketAddr;

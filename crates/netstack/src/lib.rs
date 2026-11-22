@@ -17,7 +17,7 @@ pub use cc::Congestion;
 pub use engine::{Accepted, Admit, FlowOwner, StackConfig, TcpInput, TcpStack};
 pub use readiness::{SocketOwner, SocketReady};
 pub use stream::{NetReadHalf, NetStream, NetWriteHalf};
-pub use tcp::{Egress, TcpConfig};
+pub use tcp::{Egress, PAYLOAD_SLICES, TcpConfig};
 
 #[cfg(test)]
 mod tests;

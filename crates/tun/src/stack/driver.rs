@@ -250,7 +250,7 @@ impl<D: Device> Egress for PoolEgress<'_, D> {
         if !self.direct {
             return false;
         }
-        let mut parts = [IoSlice::new(&[]); 9];
+        let mut parts = [IoSlice::new(&[]); 1 + concord_netstack::PAYLOAD_SLICES];
         let Some((first, rest)) = parts.split_first_mut() else {
             return false;
         };
