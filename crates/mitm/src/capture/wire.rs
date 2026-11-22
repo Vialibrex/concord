@@ -64,6 +64,10 @@ pub struct Exchange {
     #[serde(rename = "original-url", skip_serializing_if = "is_empty")]
     pub original_url: String,
     pub proto: String,
+    /// The response's reason phrase as the client got it: the standard one for its status,
+    /// the only one Concord sends; none for a status without one.
+    #[serde(skip_serializing_if = "is_empty")]
+    pub reason: &'static str,
     pub ttfb: i64,
     #[serde(rename = "request-header")]
     pub request_header: HeaderList,

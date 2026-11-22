@@ -251,6 +251,7 @@ impl CaptureStore {
             connection: String::new(),
             original_url: String::new(),
             proto: proto.to_string(),
+            reason: "",
             ttfb: 0,
             request_header,
             response_header: None,
@@ -409,6 +410,11 @@ impl Capture {
             let mut exchange = view.exchange.clone();
             exchange.summary = self.summary_of(view);
             exchange.connection = view.conn.map(|conn| conn.id.clone()).unwrap_or_default();
+            exchange.reason = u16::try_from(exchange.summary.status)
+                .ok()
+                .and_then(|status| http::StatusCode::from_u16(status).ok())
+                .and_then(|status| status.canonical_reason())
+                .unwrap_or_default();
             exchange
         })
     }
@@ -834,6 +840,14 @@ mod tests {
             assert!(json.get(key).is_some(), "{key} in {json}");
         }
         assert!(json.get("error").is_none() && json.get("connection").is_none());
+        assert_eq!(json["reason"], "OK");
+        let pending = begin(&store, "https://a.test/pending");
+        let unnamed = begin(&store, "https://a.test/unnamed");
+        unnamed.responded(599, HeaderList::new());
+        for cap in [pending, unnamed] {
+            let json = serde_json::to_value(store.find(cap.id().unwrap()).unwrap()).unwrap();
+            assert!(json.get("reason").is_none(), "{json}");
+        }
         assert_eq!(json["actions"][1]["kind"], "script");
         assert_eq!(
             json["action-kinds"],
