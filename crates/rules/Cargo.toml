@@ -22,7 +22,7 @@ prost = { workspace = true }
 ruzstd = { workspace = true }
 arc-swap = { workspace = true }
 serde = { workspace = true }
-serde-saphyr = { workspace = true }
+serde_json = { workspace = true }
 indexmap = { workspace = true }
 smallvec = { workspace = true }
 

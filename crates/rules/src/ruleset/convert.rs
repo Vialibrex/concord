@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use serde::Deserialize;
+use serde_json::Value;
 
 use super::{Behavior, Format, lines};
 use crate::cidr_set::{IpCidrSet, parse_prefix};
@@ -51,25 +51,47 @@ impl fmt::Display for CompileSetError {
 
 impl std::error::Error for CompileSetError {}
 
-#[derive(Deserialize)]
-struct Schema {
-    payload: Option<Vec<String>>,
-    rules: Option<Vec<String>>,
+fn yaml_string_list(value: &Value) -> Option<Option<Vec<String>>> {
+    match value {
+        Value::Null => Some(None),
+        Value::Array(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::String(text) => Some(text.clone()),
+                Value::Number(num) => Some(num.to_string()),
+                Value::Bool(flag) => Some(flag.to_string()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(Some),
+        _ => None,
+    }
 }
 
 fn rule_set_entries(buf: &[u8]) -> (Format, Vec<String>) {
     if let Ok(text) = std::str::from_utf8(buf)
-        && let Ok(schema) = serde_saphyr::from_str::<Schema>(text)
-        && (schema.payload.is_some() || schema.rules.is_some())
+        && let Ok(parsed) = concord_config::yaml::parse_document_slow(text)
     {
-        let entries = [schema.payload, schema.rules]
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|entry| entry.trim().to_string())
-            .filter(|entry| !entry.is_empty())
-            .collect();
-        return (Format::Yaml, entries);
+        let payload = match parsed.root.get("payload") {
+            Some(value) => yaml_string_list(value),
+            None => Some(None),
+        };
+        let rules = match parsed.root.get("rules") {
+            Some(value) => yaml_string_list(value),
+            None => Some(None),
+        };
+        if let (Some(payload), Some(rules)) = (payload, rules)
+            && (payload.is_some() || rules.is_some())
+        {
+            let entries = [payload, rules]
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.trim().to_string())
+                .filter(|entry| !entry.is_empty())
+                .collect();
+            return (Format::Yaml, entries);
+        }
     }
     (Format::Text, lines::text_items(buf))
 }
