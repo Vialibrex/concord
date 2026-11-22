@@ -2,12 +2,12 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use concord_common::BoxStream;
 use concord_common::sync::lock;
-use concord_tls::TlsOptions;
+use concord_tls::{TlsConnector, TlsOptions};
 use hickory_proto::op::Message;
-use rustls_pki_types::ServerName;
 
-use crate::client::{BoxIo, Client, Params, exchange_framed, with_random_id, with_timeout};
+use crate::client::{Client, Params, exchange_framed, with_random_id, with_timeout};
 use crate::dialer::{Connector, Cx};
 use crate::resets::{Resets, Ticket};
 
@@ -17,21 +17,14 @@ pub(crate) fn tls_connector(
     connector: &Connector,
     params: &Params<'_>,
     alpn: &[&str],
-) -> io::Result<tokio_rustls::TlsConnector> {
+) -> io::Result<TlsConnector> {
     let options = TlsOptions {
         skip_cert_verify: params.is_true("skip-cert-verify"),
         name_cert_verify: params.get("name-cert-verify").map(str::to_string),
+        alpn: alpn.iter().map(|proto| (*proto).to_string()).collect(),
         ..TlsOptions::default()
     };
-    let config =
-        concord_tls::http_client_config_for(&options, Arc::clone(&connector.shared().trust), alpn)
-            .map_err(io::Error::other)?;
-    Ok(tokio_rustls::TlsConnector::from(config))
-}
-
-pub(crate) fn server_name(host: &str) -> io::Result<ServerName<'static>> {
-    ServerName::try_from(host.trim_matches(['[', ']']).to_owned())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid TLS server name"))
+    TlsConnector::new(options, Arc::clone(&connector.shared().trust)).map_err(io::Error::other)
 }
 
 /// `tls://`: connections stay open between queries, newest first.
@@ -39,9 +32,9 @@ pub(crate) struct DotClient {
     host: String,
     port: u16,
     connector: Arc<Connector>,
-    tls: tokio_rustls::TlsConnector,
+    tls: TlsConnector,
     reuse: bool,
-    idle: Mutex<Vec<BoxIo>>,
+    idle: Mutex<Vec<BoxStream>>,
     resets: Resets,
 }
 
@@ -64,14 +57,14 @@ impl DotClient {
         })
     }
 
-    fn take_idle(&self) -> Option<BoxIo> {
+    fn take_idle(&self) -> Option<BoxStream> {
         if !self.reuse {
             return None;
         }
         lock(&self.idle).pop()
     }
 
-    fn put_idle(&self, conn: BoxIo, ticket: Ticket) {
+    fn put_idle(&self, conn: BoxStream, ticket: Ticket) {
         if !self.reuse {
             return;
         }
@@ -87,10 +80,9 @@ impl DotClient {
         }
     }
 
-    async fn dial(&self, cx: Cx) -> io::Result<BoxIo> {
+    async fn dial(&self, cx: Cx) -> io::Result<BoxStream> {
         let tcp = self.connector.tcp(&self.host, self.port, cx).await?;
-        let name = server_name(&self.host)?;
-        let tls = self.tls.connect(name, tcp).await?;
+        let tls = self.tls.connect_unaligned(tcp, &self.host).await?;
         Ok(Box::new(tls))
     }
 }

@@ -18,11 +18,9 @@ concord-tls = { workspace = true }
 concord-quic = { workspace = true }
 concord-platform = { workspace = true }
 tokio = { workspace = true, features = ["net", "time", "io-util", "macros", "rt", "sync"] }
-tokio-rustls = { workspace = true }
 quinn = { workspace = true }
 h3 = { workspace = true }
 h3-quinn = { workspace = true }
-rustls-pki-types = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
 hickory-proto = { workspace = true }
@@ -41,6 +39,7 @@ tracing = { workspace = true }
 concord-net = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
+tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 rcgen = { workspace = true }
 

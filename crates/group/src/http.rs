@@ -129,7 +129,7 @@ pub async fn connect(
     tasks: &Tasks,
 ) -> Result<Connection, HttpError> {
     if !target.tls {
-        return handshake(TokioIo::new(io), target, false, tasks).await;
+        return handshake(io, target, false, tasks).await;
     }
     let alpn = if tls.offer_h2 {
         vec!["h2".to_string(), "http/1.1".to_string()]
@@ -150,18 +150,16 @@ pub async fn connect(
         .await
         .map_err(|err| HttpError::Tls(err.to_string()))?;
     let h2 = stream.negotiated_alpn() == Some(b"h2".as_slice());
-    handshake(TokioIo::new(stream), target, h2, tasks).await
+    handshake(Box::new(stream), target, h2, tasks).await
 }
 
-async fn handshake<I>(
-    io: TokioIo<I>,
+async fn handshake(
+    io: BoxStream,
     target: &Target,
     h2: bool,
     tasks: &Tasks,
-) -> Result<Connection, HttpError>
-where
-    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-{
+) -> Result<Connection, HttpError> {
+    let io = TokioIo::new(io);
     let sender = if h2 {
         let (sender, conn) = http2::handshake(tasks.clone(), io)
             .await
@@ -287,7 +285,7 @@ mod tests {
             }
         });
         let target = Target::parse("http://probe.test/generate_204").unwrap();
-        let mut conn = handshake(TokioIo::new(client), &target, false, &Default::default())
+        let mut conn = handshake(Box::new(client), &target, false, &Default::default())
             .await
             .unwrap();
         for _ in 0..2 {
@@ -316,7 +314,7 @@ mod tests {
             }
         });
         let target = Target::parse("http://files.test/big").unwrap();
-        let mut conn = handshake(TokioIo::new(client), &target, false, &Default::default())
+        let mut conn = handshake(Box::new(client), &target, false, &Default::default())
             .await
             .unwrap();
         let mut whole = conn.open(Method::GET, &[], Bytes::new(), 10).await.unwrap();

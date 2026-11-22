@@ -6,17 +6,19 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
+use concord_common::BoxStream;
 use concord_common::sync::lock;
+use concord_tls::TlsConnector;
 use hickory_proto::op::Message;
 use http::{Request, StatusCode, header};
-use http_body_util::{BodyExt, Empty, Limited};
+use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
 use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioIo, TokioTimer};
 
-use crate::client::{BoxIo, Client, Params, checked, decode, encode, with_random_id, with_timeout};
+use crate::client::{Client, Params, checked, decode, encode, with_random_id, with_timeout};
 use crate::dialer::{Connector, Cx};
-use crate::dot::{server_name, tls_connector};
+use crate::dot::tls_connector;
 use crate::resets::{Resets, Ticket, overtaken};
 use crate::shared_dial::Got;
 
@@ -67,7 +69,7 @@ impl DohTarget {
             builder.uri(path).header(header::HOST, self.authority())
         };
         builder
-            .body(Empty::new())
+            .body(Full::new(Bytes::new()))
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))
     }
 
@@ -76,7 +78,7 @@ impl DohTarget {
     }
 }
 
-pub(crate) type Body = Empty<Bytes>;
+pub(crate) type Body = Full<Bytes>;
 
 /// `https://` and `http://` upstreams over HTTP/2, or HTTP/1.1 when the server
 /// does not negotiate h2. The connection is dialed through the `Connector`, so
@@ -84,7 +86,7 @@ pub(crate) type Body = Empty<Bytes>;
 pub(crate) struct DohClient {
     target: DohTarget,
     connector: Arc<Connector>,
-    tls: Option<tokio_rustls::TlsConnector>,
+    tls: Option<TlsConnector>,
     h2: Mutex<Option<http2::SendRequest<Body>>>,
     h1: Mutex<Vec<http1::SendRequest<Body>>>,
     resets: Resets,
@@ -166,11 +168,11 @@ impl DohClient {
                 .tcp(&self.target.host, self.target.port, cx)
                 .await?;
             let Some(tls) = &self.tls else {
-                return Ok((Box::new(tcp) as BoxIo, false));
+                return Ok((tcp, false));
             };
-            let stream = tls.connect(server_name(&self.target.host)?, tcp).await?;
-            let h2 = stream.get_ref().1.alpn_protocol() == Some(b"h2");
-            Ok::<_, io::Error>((Box::new(stream) as BoxIo, h2))
+            let stream = tls.connect_unaligned(tcp, &self.target.host).await?;
+            let h2 = stream.negotiated_alpn() == Some(b"h2".as_slice());
+            Ok::<_, io::Error>((Box::new(stream) as BoxStream, h2))
         };
         let (io, h2) = tokio::time::timeout(DIAL_TIMEOUT, dial)
             .await

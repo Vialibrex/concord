@@ -16,10 +16,6 @@ use crate::msg;
 
 pub(crate) const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
-impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
-pub(crate) type BoxIo = Box<dyn Io>;
-
 #[async_trait]
 pub(crate) trait Client: Send + Sync {
     async fn exchange(&self, req: &Message, cx: Cx) -> io::Result<Message>;
