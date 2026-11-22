@@ -2,11 +2,10 @@ use std::collections::HashSet;
 use std::io;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
-use concord_common::sync::lock;
 use concord_common::{
     Address, BoxStream, ClockOffset, CoreOptions, DialEnv, EventSink, HostResolver, NodeDialer,
     PacketSession, SockOpts,
@@ -31,11 +30,10 @@ use concord_platform::{HomeDir, Platform};
 use concord_proxy::BuildCtx;
 use concord_rules::geo::{GeoError, GeoFile, GeoStore};
 use concord_rules::{CompileEnv, CompileError, RouteProgram, RuleSetStore};
-use concord_tls::{SystemRoots, TrustStore, parse_certificates};
+use concord_tls::TrustStore;
 use concord_tun::Prefix;
 use concord_tunnel::sniff::{Dispatcher, DispatcherConfig, SnifferEntry, SnifferKind};
 use concord_tunnel::{Runtime, Tunnel};
-use rustls_pki_types::CertificateDer;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{Failure, GeoUpdateError, RuleLoadError};
@@ -44,6 +42,7 @@ use crate::lan;
 use crate::ops::on_parse_stack;
 use crate::resources::{GeoUpdater, GeoUrls, Identity, RuleProviders, TunnelFetcher};
 use crate::route::RouteCounters;
+use crate::trust::TrustCache;
 use crate::views::{WarningView, log_warnings, warning_views};
 
 pub(crate) struct Options {
@@ -372,48 +371,6 @@ impl Globals {
             .options
             .unified_delay
             .store(self.unified_delay, Ordering::Relaxed);
-    }
-}
-
-const CA_BUNDLE: &[u8] = include_bytes!("../../../assets/ca-certificates.crt");
-
-pub(crate) struct TrustCache {
-    system: Arc<SystemRoots>,
-    current: Mutex<Option<(Vec<String>, Arc<TrustStore>)>>,
-    clock: Arc<ClockOffset>,
-}
-
-impl TrustCache {
-    pub fn new(clock: Arc<ClockOffset>) -> Self {
-        TrustCache {
-            system: Arc::default(),
-            current: Mutex::new(None),
-            clock,
-        }
-    }
-
-    pub fn for_custom(&self, custom: Vec<String>) -> Arc<TrustStore> {
-        let mut current = lock(&self.current);
-        if let Some((held, store)) = current.as_ref()
-            && *held == custom
-        {
-            return store.clone();
-        }
-        let mut certs = Vec::new();
-        for text in &custom {
-            let parsed = parse_certificates(text);
-            if parsed.is_empty() {
-                tracing::warn!("{text}\nadd error: add certificate failed");
-            }
-            certs.extend(parsed);
-        }
-        let store = self.store(certs);
-        *current = Some((custom, store.clone()));
-        store
-    }
-
-    fn store(&self, custom: Vec<CertificateDer<'static>>) -> Arc<TrustStore> {
-        TrustStore::with_system_roots(self.clock.clone(), self.system.clone(), CA_BUNDLE, custom)
     }
 }
 

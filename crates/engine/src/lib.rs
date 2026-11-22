@@ -14,6 +14,7 @@ mod probe_env;
 mod proxy_tasks;
 mod resources;
 mod route;
+mod trust;
 mod tun;
 mod views;
 
