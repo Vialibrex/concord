@@ -45,7 +45,7 @@ async fn connect(
     let client = wrap(client);
     let connecting = async {
         if whole {
-            connector.connect_whole(client, "node.test").await
+            super::support::connect_whole(&connector, client, "node.test").await
         } else {
             connector.connect_unaligned(client, "node.test").await
         }

@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 
-use super::support::{Ca, Leaf, ServerSpec, server_config};
+use super::support::{Ca, Leaf, ServerSpec, connect_whole, server_config};
 use crate::{ClientFingerprint, TlsConnector, TlsOptions};
 
 const TOTAL: usize = 4 << 20;
@@ -328,7 +328,7 @@ async fn a_whole_connection_reads_ahead_on_the_native_engine() {
     let connector = TlsConnector::new(options, ca.trust()).unwrap();
     let (client, server) = tcp_pair().await;
     let (client, server) = tokio::join!(
-        connector.connect_whole(Box::new(client), "node.test"),
+        connect_whole(&connector, Box::new(client), "node.test"),
         tokio_rustls::TlsAcceptor::from(server_config(&leaf, &ServerSpec::default()))
             .accept(server)
     );
@@ -359,7 +359,7 @@ async fn a_whole_connection_split_after_a_read_keeps_what_it_read_ahead() {
     let connector = TlsConnector::new(options, ca.trust()).unwrap();
     let (client, server) = tcp_pair().await;
     let (client, server) = tokio::join!(
-        connector.connect_whole(Box::new(client), "node.test"),
+        connect_whole(&connector, Box::new(client), "node.test"),
         tokio_rustls::TlsAcceptor::from(server_config(&leaf, &ServerSpec::default()))
             .accept(server)
     );

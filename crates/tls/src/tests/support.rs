@@ -12,7 +12,22 @@ use time::{Duration, OffsetDateTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 use tokio::task::JoinHandle;
 
-use crate::TrustStore;
+use crate::{TlsConn, TlsConnector, TrustStore};
+
+pub async fn connect_whole(
+    connector: &TlsConnector,
+    io: BoxStream,
+    sni_fallback: &str,
+) -> std::io::Result<TlsConn> {
+    let mut io = Some(io);
+    let dial = || {
+        std::future::ready(
+            io.take()
+                .ok_or_else(|| std::io::Error::other("dialed twice")),
+        )
+    };
+    connector.connect_whole_dialing(dial, sni_fallback).await
+}
 
 pub struct Ca {
     pub der: CertificateDer<'static>,

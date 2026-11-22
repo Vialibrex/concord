@@ -101,7 +101,7 @@ Shadowsocks, ShadowsocksR) `UdpRelay` pairs it with an `Opener` that unframes ea
 TLS has two backends: rustls with aws-lc-rs by default, BoringSSL where a `client-fingerprint` needs a browser
 ClientHello; REALITY and ECH are implemented in `concord-tls`.
 rustls runs on the native record engine as soon as the handshake ends. A node's own TLS (`Link::open`) and the
-HTTP/2 carriers (Gun, XHTTP) use `connect_whole`: a read takes the rest of the current record and up to a copy
+HTTP/2 carriers (Gun, XHTTP) use `connect_whole_dialing`: a read takes the rest of the current record and up to a copy
 buffer of the next off the socket. `connect`, for Vision and the handshakes that hand the transport back, reads to
 record boundaries. `into_split` hands each half its direction's keys, sequences, KeyUpdate schedule and what was
 read ahead. BoringSSL keeps its own object and moves to the engine at a quiescent `into_split` when the suite

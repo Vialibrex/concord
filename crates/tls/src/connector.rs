@@ -285,13 +285,6 @@ impl TlsConnector {
         self.connect_as(io, sni_fallback, Reads::Buffered).await
     }
 
-    /// Like `connect_unaligned`, with rustls on the native record engine from the start: for
-    /// a caller that keeps the connection as its data path, whole like an HTTP/2 client or
-    /// split, where each half then owns its direction's records and what was read ahead.
-    pub async fn connect_whole(&self, io: BoxStream, sni_fallback: &str) -> io::Result<TlsConn> {
-        self.connect_as(io, sni_fallback, Reads::Whole).await
-    }
-
     /// Dials a transport connection and secures it. A server that rejects ECH and answers with a
     /// list to retry gets one more connection from `dial` with that list, which stays the
     /// connector's list for later connections; a second rejection is the error.
@@ -303,7 +296,9 @@ impl TlsConnector {
         self.dialing_as(dial, sni_fallback, Reads::Aligned).await
     }
 
-    /// `connect_dialing` for a caller that keeps the connection whole, like `connect_whole`.
+    /// Like `connect_dialing`, with rustls on the native record engine from the start: for a
+    /// caller that keeps the connection as its data path, whole like an HTTP/2 client or split,
+    /// where each half then owns its direction's records and what was read ahead.
     pub async fn connect_whole_dialing<D, F>(
         &self,
         dial: D,
