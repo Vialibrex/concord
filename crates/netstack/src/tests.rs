@@ -912,21 +912,17 @@ async fn run_for(link: &mut Link, time: Duration) {
     }
 }
 
-async fn socket_pair(buffer: Option<usize>) -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+async fn small_buffer_pair(size: usize) -> (tokio::net::TcpStream, tokio::net::TcpStream) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    if let Some(size) = buffer {
-        socket2::SockRef::from(&listener)
-            .set_recv_buffer_size(size)
-            .unwrap();
-    }
+    socket2::SockRef::from(&listener)
+        .set_recv_buffer_size(size)
+        .unwrap();
     #[allow(clippy::disallowed_methods, reason = "a loopback test pair")]
     let connecting = tokio::net::TcpStream::connect(listener.local_addr().unwrap());
     let (near, (far, _)) = tokio::try_join!(connecting, listener.accept()).unwrap();
-    if let Some(size) = buffer {
-        socket2::SockRef::from(&near)
-            .set_send_buffer_size(size)
-            .unwrap();
-    }
+    socket2::SockRef::from(&near)
+        .set_send_buffer_size(size)
+        .unwrap();
     (near, far)
 }
 
@@ -1025,7 +1021,7 @@ async fn an_owned_attachment_keeps_its_ticket_until_the_engine_closes_the_socket
         .unwrap();
     drive(&mut link, |l| !l.accepted.is_empty(), 10).await;
     let mut server = link.accepted.pop().unwrap();
-    let (near, mut far) = socket_pair(None).await;
+    let (near, mut far) = concord_test_support::tcp_pair().await;
     let dropped = Arc::<AtomicUsize>::default();
     let mut socket = Some(OwnedTcp::new(
         near,
@@ -1058,7 +1054,7 @@ async fn refusing_an_owned_socket_after_reset_preserves_its_ticket_and_payload()
     drive(&mut link, |l| !l.accepted.is_empty(), 10).await;
     let mut server = link.accepted.pop().unwrap();
     link.server.shutdown();
-    let (near, mut far) = socket_pair(None).await;
+    let (near, mut far) = concord_test_support::tcp_pair().await;
     let dropped = Arc::<AtomicUsize>::default();
     let mut socket = Some(OwnedTcp::new(
         near,
@@ -1094,7 +1090,7 @@ async fn a_socket_handed_over_as_the_connection_resets_is_released() {
     for _ in 0..20 {
         link.step();
     }
-    let (near, _far) = socket_pair(None).await;
+    let (near, _far) = concord_test_support::tcp_pair().await;
     let mut attached = server.attach_owned(&mut Some(near.into())).unwrap();
     drop(client);
     link.client.poll(&mut link.to_server);
@@ -1131,7 +1127,7 @@ async fn closed_still_delivers(batched: bool) {
         .unwrap();
     drive(&mut link, |l| !l.accepted.is_empty(), 10).await;
     let mut server = link.accepted.pop().unwrap();
-    let (near, mut far) = socket_pair(Some(4096)).await;
+    let (near, mut far) = small_buffer_pair(4096).await;
     let mut attached = server.attach_owned(&mut Some(near.into())).unwrap();
     let up = pattern(250_000, 7);
     let (sent_tx, mut sent) = tokio::sync::oneshot::channel();
@@ -1422,7 +1418,7 @@ async fn a_fin_batched_with_payload_reaches_the_socket_after_it() {
         .unwrap();
     drive(&mut link, |l| !l.accepted.is_empty(), 10).await;
     let mut server = link.accepted.pop().unwrap();
-    let (near, mut far) = socket_pair(None).await;
+    let (near, mut far) = concord_test_support::tcp_pair().await;
     let _attached = server.attach_owned(&mut Some(near.into())).unwrap();
     link.server.poll(&mut link.to_client);
     let up = pattern(3000, 9);
@@ -1450,7 +1446,7 @@ async fn a_fin_batched_with_payload_reaches_the_socket_after_it() {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[tokio::test(flavor = "current_thread")]
 async fn a_gather_holds_no_more_than_its_socket_can_take() {
-    let (near, _far) = socket_pair(Some(32 * 1024)).await;
+    let (near, _far) = small_buffer_pair(32 * 1024).await;
     let room = concord_platform::send_space(&near).unwrap();
     let near = crate::attach::Socket::Tokio(near.into());
     let frame = vec![0u8; 4096];

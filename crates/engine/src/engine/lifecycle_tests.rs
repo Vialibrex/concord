@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use concord_common::CoreOptions;
-use concord_test_support::tcp_echo;
+use concord_test_support::{free_port, tcp_echo};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, timeout};
@@ -106,11 +106,6 @@ impl Listening {
         mixed: false,
         dns: false,
     };
-}
-
-fn free_port() -> u16 {
-    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    probe.local_addr().unwrap().port()
 }
 
 /// An initialized engine whose `config.yaml` opens a mixed port and `dns.listen`, health-checks a
