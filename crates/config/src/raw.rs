@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use indexmap::IndexMap;
 use serde_json::Value;
 
@@ -134,19 +136,31 @@ pub(crate) fn asks_for_something(value: &Value) -> bool {
     }
 }
 
-fn section_user_keys(report: &mut LoadReport, name: &str, user: &Map, tiers: &Tiers) {
-    for (key, value) in user {
-        match tiers.of(key) {
-            Some(Tier::T2) if !asks_for_something(value) => {}
-            Some(Tier::T2) => report.warn(
+/// An unknown key whose value defines an anchor is a template, which mihomo ignores once its
+/// aliases are expanded, so it is dropped without a warning.
+fn section_user_keys(
+    report: &mut LoadReport,
+    name: &str,
+    user: &mut Map,
+    tiers: &Tiers,
+    templates: &HashSet<String>,
+) {
+    user.retain(|key, value| match tiers.of(key) {
+        Some(Tier::T2) if asks_for_something(value) => {
+            report.warn(
                 "unsupported_key",
                 format!("{name}.{key}"),
                 unsupported_message(name, key),
-            ),
-            None => report.warn("unknown_key", format!("{name}.{key}"), "unknown key"),
-            _ => {}
+            );
+            true
         }
-    }
+        None if templates.contains(&format!("{name}.{key}")) => false,
+        None => {
+            report.warn("unknown_key", format!("{name}.{key}"), "unknown key");
+            true
+        }
+        _ => true,
+    });
 }
 
 fn unsupported_message(section: &str, key: &str) -> &'static str {
@@ -225,23 +239,8 @@ impl RawConfig {
                     }
                 }
                 "hosts" => raw.hosts = expect_map(value, "hosts")?,
-                "dns" => raw.dns = raw.section("dns", value, keys::dns_defaults(), &keys::DNS)?,
-                "tun" => {
-                    raw.tun = raw.section("tun", value, keys::tun_defaults(), &keys::TUN)?;
-                }
-                "sniffer" => {
-                    raw.sniffer =
-                        raw.section("sniffer", value, keys::sniffer_defaults(), &keys::SNIFFER)?;
-                    stringify_sniff_ports(&mut raw.sniffer);
-                }
-                "ntp" => raw.ntp = raw.section("ntp", value, keys::ntp_defaults(), &keys::NTP)?,
-                "geox-url" => {
-                    raw.geox_url =
-                        raw.section("geox-url", value, keys::geox_defaults(), &keys::GEOX)?;
-                }
-                "profile" => {
-                    raw.profile =
-                        raw.section("profile", value, keys::profile_defaults(), &keys::PROFILE)?;
+                name @ ("dns" | "tun" | "sniffer" | "ntp" | "geox-url" | "profile") => {
+                    raw.section(name, value, &doc.anchored)?;
                 }
                 "experimental" => {
                     let user = expect_map(value, "experimental")?;
@@ -284,20 +283,33 @@ impl RawConfig {
         Ok(raw)
     }
 
-    fn section(&mut self, name: &str, value: Value, defaults: Map, tiers: &Tiers) -> Result<Map> {
-        let user = expect_map(value, name)?;
-        section_user_keys(&mut self.report, name, &user, tiers);
+    fn section(&mut self, name: &str, value: Value, templates: &HashSet<String>) -> Result<()> {
+        let mut user = expect_map(value, name)?;
+        let (slot, defaults, tiers) = match name {
+            "dns" => (&mut self.dns, keys::dns_defaults(), &keys::DNS),
+            "tun" => (&mut self.tun, keys::tun_defaults(), &keys::TUN),
+            "sniffer" => (&mut self.sniffer, keys::sniffer_defaults(), &keys::SNIFFER),
+            "ntp" => (&mut self.ntp, keys::ntp_defaults(), &keys::NTP),
+            "geox-url" => (&mut self.geox_url, keys::geox_defaults(), &keys::GEOX),
+            _ => (&mut self.profile, keys::profile_defaults(), &keys::PROFILE),
+        };
+        section_user_keys(&mut self.report, name, &mut user, tiers, templates);
         if name == "dns"
-            && let Some(Value::Object(filter)) = user.get("fallback-filter")
+            && let Some(Value::Object(filter)) = user.get_mut("fallback-filter")
         {
             section_user_keys(
                 &mut self.report,
                 "dns.fallback-filter",
                 filter,
                 &keys::FALLBACK_FILTER_TIERS,
+                templates,
             );
         }
-        Ok(keys::overlay(&defaults, user))
+        *slot = keys::overlay(&defaults, user);
+        if name == "sniffer" {
+            stringify_sniff_ports(slot);
+        }
+        Ok(())
     }
 
     fn json_with(&self, heavy: bool) -> Value {

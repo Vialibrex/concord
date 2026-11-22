@@ -120,3 +120,14 @@ fn a_scalar_document_is_not_a_config() {
     assert!(parse_document("just text").is_err());
     assert!(parse_document("").unwrap().root.is_empty());
 }
+
+#[test]
+fn keys_whose_value_defines_an_anchor_are_marked_by_path() {
+    let parsed = parse_document(
+        "a: &a {x: 1}\nb:\n  c: {d: &d [1]}\n  e: *a\nf: [&f 1]\ng: *a\nh: {<<: *a}\nrules:\n  - MATCH,DIRECT\n",
+    )
+    .unwrap();
+    let mut marked: Vec<&str> = parsed.anchored.iter().map(String::as_str).collect();
+    marked.sort_unstable();
+    assert_eq!(marked, ["a", "b", "b.c", "b.c.d", "f"]);
+}

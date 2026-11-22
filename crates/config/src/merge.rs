@@ -177,7 +177,7 @@ pub fn merge_document(
         root,
         lines: merged.lines,
         rules,
-        ..ParsedDocument::default()
+        anchored: overlay.anchored,
     })
 }
 

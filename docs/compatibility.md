@@ -22,6 +22,11 @@ stable `code` and are returned by
 widen exposure are never ignored silently, and keys that name a server's identity (`fingerprint`, `certificate`,
 `reality-opts`) are never dropped while the node keeps working.
 
+A top-level, `dns`, `tun`, `sniffer`, `ntp`, `geox-url` or `profile` key that mihomo does not have is ignored with an
+`unknown_key` warning, where mihomo ignores it silently. A key whose value defines a YAML anchor, such as
+`rule-anchor:` holding `domain: &domain {...}` for rule providers to merge, is a template and is ignored silently, as in
+mihomo; a key that only uses one, such as `copy: *domain`, is still unknown.
+
 ## Deliberate Differences
 
 | Behaviour | mihomo | Concord |

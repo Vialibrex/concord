@@ -31,7 +31,7 @@ pub struct ParsedDocument {
     pub lines: SourceLines,
     /// The top-level `rules` when the line scanner could read them; `root` then has none.
     pub rules: Option<RuleLines>,
-    /// Top-level keys whose value carries an anchor.
+    /// Keys whose value defines an anchor, by their dotted path through the mappings above them.
     pub anchored: HashSet<String>,
 }
 
@@ -164,6 +164,7 @@ enum Frame {
     Seq {
         items: Vec<Value>,
         anchor: usize,
+        defines: bool,
         text: bool,
     },
     Map {
@@ -172,6 +173,7 @@ enum Frame {
         merging: bool,
         merges: Vec<Value>,
         anchor: usize,
+        defines: bool,
         text: bool,
     },
 }
@@ -235,6 +237,7 @@ fn build_with(text: &str, decoded: usize, nested: bool) -> Result<ParsedDocument
                 builder.frames.push(Frame::Seq {
                     items: Vec::new(),
                     anchor,
+                    defines: false,
                     text,
                 });
             }
@@ -248,12 +251,19 @@ fn build_with(text: &str, decoded: usize, nested: bool) -> Result<ParsedDocument
                     merging: false,
                     merges: Vec::new(),
                     anchor,
+                    defines: false,
                     text,
                 });
             }
             Event::SequenceEnd => {
-                if let Some(Frame::Seq { items, anchor, .. }) = builder.frames.pop() {
-                    builder.finish(Value::Array(items), anchor, line)?;
+                if let Some(Frame::Seq {
+                    items,
+                    anchor,
+                    defines,
+                    ..
+                }) = builder.frames.pop()
+                {
+                    builder.finish(Value::Array(items), anchor, defines, line)?;
                 }
             }
             Event::MappingEnd => {
@@ -261,11 +271,12 @@ fn build_with(text: &str, decoded: usize, nested: bool) -> Result<ParsedDocument
                     mut map,
                     anchor,
                     merges,
+                    defines,
                     ..
                 }) = builder.frames.pop()
                 {
                     merge_into(&mut map, merges);
-                    builder.finish(Value::Object(map), anchor, line)?;
+                    builder.finish(Value::Object(map), anchor, defines, line)?;
                 }
             }
             Event::Alias(id) => {
@@ -277,7 +288,7 @@ fn build_with(text: &str, decoded: usize, nested: bool) -> Result<ParsedDocument
                     .ok_or_else(|| error_at("unknown anchor referenced", line))?;
                 builder.charge(nodes, line)?;
                 let value = builder.anchors.get(&id).cloned().unwrap_or_default();
-                builder.finish(value, 0, line)?;
+                builder.finish(value, 0, false, line)?;
             }
             _ => {}
         }
@@ -366,6 +377,21 @@ impl Builder {
         }
     }
 
+    /// The dotted path of the key whose value ends now, when only mappings lead to it.
+    fn key_path(&self) -> Option<String> {
+        let mut path = String::new();
+        for frame in &self.frames {
+            let Frame::Map { key: Some(key), .. } = frame else {
+                return None;
+            };
+            if !path.is_empty() {
+                path.push('.');
+            }
+            path.push_str(key);
+        }
+        (!path.is_empty()).then_some(path)
+    }
+
     fn record_key(&mut self, key: &str, line: usize) {
         if !self.nested {
             return;
@@ -434,24 +460,35 @@ impl Builder {
         self.record_line(line);
         let force_text = self.child_text();
         let value = resolve_scalar(text, style, tag, force_text);
-        self.finish(value, anchor, line)
+        self.finish(value, anchor, false, line)
     }
 
-    fn finish(&mut self, value: Value, anchor: usize, line: usize) -> Result<()> {
+    /// `inner` says whether an anchor was defined inside `value`.
+    fn finish(&mut self, value: Value, anchor: usize, inner: bool, line: usize) -> Result<()> {
         if anchor != 0 {
             self.anchors.insert(anchor, value.clone());
         }
-        let top_level = self.frames.len() == 1;
+        let defines = anchor != 0 || inner;
+        let path = if defines { self.key_path() } else { None };
         match self.frames.last_mut() {
             None => self.root = Some(value),
-            Some(Frame::Seq { items, .. }) => items.push(value),
+            Some(Frame::Seq {
+                items,
+                defines: outer,
+                ..
+            }) => {
+                *outer |= defines;
+                items.push(value);
+            }
             Some(Frame::Map {
                 map,
                 key,
                 merging,
                 merges,
+                defines: outer,
                 ..
             }) => {
+                *outer |= defines;
                 let name = key.take().unwrap_or_default();
                 if std::mem::take(merging) {
                     match &value {
@@ -472,8 +509,8 @@ impl Builder {
                         line,
                     ));
                 } else {
-                    if top_level && anchor != 0 {
-                        self.anchored.insert(name.clone());
+                    if let Some(path) = path {
+                        self.anchored.insert(path);
                     }
                     map.insert(name, value);
                 }
