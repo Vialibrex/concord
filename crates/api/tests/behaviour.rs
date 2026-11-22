@@ -103,6 +103,17 @@ async fn next<E: Send + 'static>(events: &mut EventStream<E>) -> E {
     }
 }
 
+/// A query's id is taken just before it is published, so two queries that finish together can
+/// reach `dns.watch` out of id order.
+async fn see_queries(events: &mut EventStream<DnsEntry>, seen: &mut Vec<DnsEntry>, ids: &[u64]) {
+    while !ids
+        .iter()
+        .all(|id| seen.iter().any(|entry| entry.id == *id))
+    {
+        seen.push(next(events).await);
+    }
+}
+
 async fn eventually<E: Send + 'static>(
     events: &mut EventStream<E>,
     mut found: impl FnMut(&E) -> bool,
@@ -1632,12 +1643,7 @@ async fn a_connection_names_the_dns_queries_that_gave_out_its_address() {
         }
         let mut named = delta.opened[0].dns_queries.clone();
         named.sort_unstable();
-        while seen
-            .iter()
-            .all(|entry| entry.id < named.last().copied().unwrap_or(0))
-        {
-            seen.push(next(&mut queries.events).await);
-        }
+        see_queries(&mut queries.events, &mut seen, &named).await;
         let ids: Vec<u64> = seen
             .iter()
             .filter(|entry| entry.domain == asked)
@@ -1724,9 +1730,7 @@ async fn a_udp_flow_names_the_dns_queries_its_direct_dial_made() {
     named.sort_unstable();
     assert!(!named.is_empty(), "the DIRECT dial looked udp.test up");
     let mut seen: Vec<DnsEntry> = Vec::new();
-    while seen.iter().all(|entry| entry.id < *named.last().unwrap()) {
-        seen.push(next(&mut queries.events).await);
-    }
+    see_queries(&mut queries.events, &mut seen, &named).await;
     let ids: Vec<u64> = seen
         .iter()
         .filter(|entry| entry.domain == "udp.test")
