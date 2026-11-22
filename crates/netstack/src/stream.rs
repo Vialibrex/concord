@@ -438,10 +438,6 @@ impl DirectIo for NetStream {
         Poll::Ready(Ok(read))
     }
 
-    fn attach(&mut self, socket: TcpStream) -> Option<Box<dyn Attached>> {
-        self.attach_owned(&mut Some(socket.into()))
-    }
-
     fn attach_owned(&mut self, socket: &mut Option<OwnedTcp>) -> Option<Box<dyn Attached>> {
         let shared = self.shared();
         let mut state = shared.lock();

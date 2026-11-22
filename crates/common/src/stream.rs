@@ -32,12 +32,7 @@ pub trait DirectIo: Send {
     ) -> Poll<io::Result<usize>>;
 
     /// Hands over a socket for the stack to move the bytes itself until both directions
-    /// close; None when it cannot take one now.
-    fn attach(&mut self, _socket: tokio::net::TcpStream) -> Option<Box<dyn Attached>> {
-        None
-    }
-
-    /// Takes the socket only on acceptance; refusal leaves it available to the caller.
+    /// close. The socket is taken only on acceptance; refusal leaves it with the caller.
     fn attach_owned(&mut self, _socket: &mut Option<OwnedTcp>) -> Option<Box<dyn Attached>> {
         None
     }

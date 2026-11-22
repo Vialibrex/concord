@@ -24,7 +24,7 @@ async fn a_stream_keeps_an_attached_socket_through_duplex_half_close() {
     let mut attached = stream
         .direct()
         .expect("WireGuard must preserve the inner stream's direct I/O")
-        .attach(socket)
+        .attach_owned(&mut Some(socket.into()))
         .expect("an established stream can take a socket");
     drop(outbound);
 

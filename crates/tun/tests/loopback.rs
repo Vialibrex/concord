@@ -287,7 +287,7 @@ async fn reads_pack_while_a_socket_gathers_and_start_over_otherwise() {
     let (near, (mut far, _)) = tokio::try_join!(connecting, listener.accept()).unwrap();
     let _attached = stream
         .direct()
-        .and_then(|direct| direct.attach(near))
+        .and_then(|direct| direct.attach_owned(&mut Some(near.into())))
         .expect("an idle connection takes a socket");
     tokio::time::sleep(Duration::from_millis(20)).await;
     for byte in 0..8u8 {

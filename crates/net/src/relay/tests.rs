@@ -453,13 +453,6 @@ impl concord_common::DirectIo for Attaching {
         Poll::Pending
     }
 
-    fn attach(
-        &mut self,
-        socket: tokio::net::TcpStream,
-    ) -> Option<Box<dyn concord_common::Attached>> {
-        self.attach_owned(&mut Some(socket.into()))
-    }
-
     fn attach_owned(
         &mut self,
         socket: &mut Option<concord_common::OwnedTcp>,

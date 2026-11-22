@@ -849,7 +849,7 @@ async fn attached_until_both_sides_close(batched: bool) {
     let mut server = link.accepted.pop().unwrap();
     let (near, mut far) = concord_test_support::tcp_pair().await;
     let mut attached = server
-        .attach(near)
+        .attach_owned(&mut Some(near.into()))
         .expect("a fresh connection takes a socket");
 
     let up = pattern(700_000, 5);
@@ -1095,7 +1095,7 @@ async fn a_socket_handed_over_as_the_connection_resets_is_released() {
         link.step();
     }
     let (near, _far) = socket_pair(None).await;
-    let mut attached = server.attach(near).unwrap();
+    let mut attached = server.attach_owned(&mut Some(near.into())).unwrap();
     drop(client);
     link.client.poll(&mut link.to_server);
     hand_over(&mut link, true);
@@ -1132,7 +1132,7 @@ async fn closed_still_delivers(batched: bool) {
     drive(&mut link, |l| !l.accepted.is_empty(), 10).await;
     let mut server = link.accepted.pop().unwrap();
     let (near, mut far) = socket_pair(Some(4096)).await;
-    let mut attached = server.attach(near).unwrap();
+    let mut attached = server.attach_owned(&mut Some(near.into())).unwrap();
     let up = pattern(250_000, 7);
     let (sent_tx, mut sent) = tokio::sync::oneshot::channel();
     {
@@ -1423,7 +1423,7 @@ async fn a_fin_batched_with_payload_reaches_the_socket_after_it() {
     drive(&mut link, |l| !l.accepted.is_empty(), 10).await;
     let mut server = link.accepted.pop().unwrap();
     let (near, mut far) = socket_pair(None).await;
-    let _attached = server.attach(near).unwrap();
+    let _attached = server.attach_owned(&mut Some(near.into())).unwrap();
     link.server.poll(&mut link.to_client);
     let up = pattern(3000, 9);
     client.write_all(&up).await.unwrap();
