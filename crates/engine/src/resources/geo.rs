@@ -201,20 +201,21 @@ impl GeoUpdater {
     pub async fn fetch_missing(
         &self,
         file: GeoFile,
+        urls: &GeoUrls,
         fetcher: &dyn Fetcher,
     ) -> Result<(), GeoUpdateError> {
-        self.reported(file, self.download_missing(file, fetcher))
+        self.reported(file, self.download_missing(file, urls, fetcher))
             .await
     }
 
     async fn download_missing(
         &self,
         file: GeoFile,
+        urls: &GeoUrls,
         fetcher: &dyn Fetcher,
     ) -> Result<(), GeoUpdateError> {
         let name = geo_file_name(file);
         tracing::info!("Can't find {name}, start download");
-        let urls = self.urls.load_full();
         let home = self.home()?;
         let spilled = download_spilled(fetcher, geo_request(urls.url(file)), home.root())
             .await
@@ -260,7 +261,8 @@ impl GeoUpdater {
         answered.cancelled().await;
         let mut failures = 0;
         while self.store.ensure(file).is_err() {
-            if let Err(err) = self.fetch_missing(file, fetcher).await {
+            let urls = self.urls.load_full();
+            if let Err(err) = self.fetch_missing(file, &urls, fetcher).await {
                 tracing::warn!("[GEO] {err}");
                 sleep(provider_backoff(failures, GEO_RETRY_CAP)).await;
                 failures = failures.saturating_add(1);
@@ -272,20 +274,21 @@ impl GeoUpdater {
     pub async fn replace_invalid(
         &self,
         file: GeoFile,
+        urls: &GeoUrls,
         fetcher: &dyn Fetcher,
     ) -> Result<(), GeoUpdateError> {
-        self.reported(file, self.download_replacement(file, fetcher))
+        self.reported(file, self.download_replacement(file, urls, fetcher))
             .await
     }
 
     async fn download_replacement(
         &self,
         file: GeoFile,
+        urls: &GeoUrls,
         fetcher: &dyn Fetcher,
     ) -> Result<(), GeoUpdateError> {
         let name = geo_file_name(file);
         tracing::warn!("{name} invalid, remove and download");
-        let urls = self.urls.load_full();
         let home = self.home()?;
         let spilled = download_spilled(fetcher, geo_request(urls.url(file)), home.root())
             .await

@@ -60,7 +60,7 @@ impl ProbeEnv for TunnelProbes {
     }
 
     fn trust(&self) -> Arc<TrustStore> {
-        self.fetcher.trust.load_full()
+        self.fetcher.identity.load().trust.clone()
     }
 
     fn tasks(&self) -> Tasks {

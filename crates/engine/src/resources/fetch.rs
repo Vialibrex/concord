@@ -27,9 +27,22 @@ const MAX_REDIRECTS: usize = 10;
 /// provider can name the proxy it is fetched through.
 pub(crate) struct TunnelFetcher {
     pub tunnel: Tunnel,
-    pub trust: ArcSwap<TrustStore>,
     pub options: Arc<ArcSwap<CoreOptions>>,
-    pub user_agent: ArcSwap<String>,
+    /// The config in force's.
+    pub identity: ArcSwap<Identity>,
+}
+
+/// What a download presents: a config's `global-ua` and the trust its custom certificates make.
+pub(crate) struct Identity {
+    pub user_agent: String,
+    pub trust: Arc<TrustStore>,
+}
+
+/// Downloads as one identity rather than the config in force's: those a config makes while it
+/// builds, before it is in force.
+pub(crate) struct FetchAs<'a> {
+    fetcher: &'a TunnelFetcher,
+    identity: &'a Identity,
 }
 
 fn fetch_error(kind: FetchErrorKind, message: impl Into<String>) -> FetchError {
@@ -58,6 +71,15 @@ fn http_error(err: HttpError) -> FetchError {
 }
 
 impl TunnelFetcher {
+    pub(crate) fn fetch_as<'a>(&'a self, identity: &'a Identity) -> FetchAs<'a> {
+        FetchAs {
+            fetcher: self,
+            identity,
+        }
+    }
+}
+
+impl FetchAs<'_> {
     /// Follows redirects to the response that is not one, under the request's deadline,
     /// and reads its body through `take`.
     async fn fetch<T>(
@@ -72,26 +94,27 @@ impl TunnelFetcher {
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
         {
-            headers.push(("User-Agent".to_string(), self.user_agent.load().to_string()));
+            headers.push(("User-Agent".to_string(), self.identity.user_agent.clone()));
         }
         let limit = request
             .size_limit
             .and_then(|limit| usize::try_from(limit).ok())
             .unwrap_or(usize::MAX);
         let tls = TlsSettings {
-            trust: self.trust.load_full(),
-            skip_cert_verify: self.options.load().skip_cert_verify,
+            trust: self.identity.trust.clone(),
+            skip_cert_verify: self.fetcher.options.load().skip_cert_verify,
             offer_h2: true,
         };
         let exchange = async {
             for _ in 0..MAX_REDIRECTS {
                 let target = Target::parse(&url).map_err(http_error)?;
                 let stream = self
+                    .fetcher
                     .tunnel
                     .dial_inner(&target.address(), request.via_proxy.as_deref())
                     .await
                     .map_err(|err| dial_error(&err))?;
-                let mut connection = connect(stream, &target, &tls, self.tunnel.tasks())
+                let mut connection = connect(stream, &target, &tls, self.fetcher.tunnel.tasks())
                     .await
                     .map_err(http_error)?;
                 let mut response = connection
@@ -137,6 +160,23 @@ impl TunnelFetcher {
 
 #[async_trait]
 impl Fetcher for TunnelFetcher {
+    async fn get(&self, request: FetchRequest) -> Result<FetchResponse, FetchError> {
+        self.fetch_as(&self.identity.load_full()).get(request).await
+    }
+
+    async fn get_into(
+        &self,
+        request: FetchRequest,
+        sink: &mut (dyn AsyncWrite + Send + Unpin),
+    ) -> Result<FetchHead, FetchError> {
+        self.fetch_as(&self.identity.load_full())
+            .get_into(request, sink)
+            .await
+    }
+}
+
+#[async_trait]
+impl Fetcher for FetchAs<'_> {
     async fn get(&self, request: FetchRequest) -> Result<FetchResponse, FetchError> {
         let (head, body) = self
             .fetch(&request, async |response: &mut Streaming| {

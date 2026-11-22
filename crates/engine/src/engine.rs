@@ -38,7 +38,7 @@ use crate::ops::{self, RuleSetSource};
 use crate::probe::{Prober, RouteHit};
 use crate::probe_env::TunnelProbes;
 use crate::proxy_tasks::ProxyTasks;
-use crate::resources::{self, GeoUpdater, TunnelFetcher};
+use crate::resources::{self, GeoUpdater, Identity, TunnelFetcher};
 use crate::route::RouteCounters;
 use crate::views::*;
 
@@ -164,9 +164,11 @@ impl Engine {
         let options = Arc::new(ArcSwap::from_pointee(CoreOptions::default()));
         let fetcher = Arc::new(TunnelFetcher {
             tunnel: tunnel.clone(),
-            trust: ArcSwap::new(TrustStore::from_parts(Vec::new(), &[], Vec::new())),
             options: options.clone(),
-            user_agent: ArcSwap::from_pointee("clash.meta".to_string()),
+            identity: ArcSwap::from_pointee(Identity {
+                user_agent: "clash.meta".to_string(),
+                trust: TrustStore::from_parts(Vec::new(), &[], Vec::new()),
+            }),
         });
         let geo_store = Arc::new(GeoStore::new(".").with_opener(mmap::open_read_only));
         let proxy_tasks = Arc::new(ProxyTasks::new(own.clone()));
@@ -336,6 +338,7 @@ impl Engine {
         )
         .await
         .map_err(|err| Failure::core(err.to_string()))?;
+        built.globals.put_in_force(&self.shared);
         self.shared.tunnel.install(built.runtime);
         self.shared.tunnel.set_status(TunnelStatus::Inner);
         Ok(())
@@ -375,6 +378,7 @@ impl Engine {
             mitm,
             modules,
             trust,
+            globals,
         } = built;
         if !self.profile_controller.load(Ordering::Relaxed) {
             host_owns_controller(&mut applied.general, &mut warnings);
@@ -383,6 +387,7 @@ impl Engine {
         if let Some(old) = state.take() {
             old.stop.cancel();
         }
+        globals.put_in_force(&self.shared);
         self.warnings.store(Arc::new(warnings));
         self.shared.tunnel.set_live(LiveOptions {
             mode: applied.general.mode,

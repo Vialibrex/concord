@@ -42,7 +42,7 @@ use crate::error::{Failure, GeoUpdateError, RuleLoadError};
 use crate::fake_ip_store::FakeIpStore;
 use crate::lan;
 use crate::ops::on_parse_stack;
-use crate::resources::{GeoUpdater, GeoUrls, RuleProviders, TunnelFetcher};
+use crate::resources::{GeoUpdater, GeoUrls, Identity, RuleProviders, TunnelFetcher};
 use crate::route::RouteCounters;
 use crate::views::{WarningView, log_warnings, warning_views};
 
@@ -351,6 +351,28 @@ pub(crate) struct Built {
     pub mitm: concord_config::MitmDef,
     pub modules: Vec<concord_config::mitm::modules::AppliedModule>,
     pub trust: Arc<TrustStore>,
+    pub globals: Globals,
+}
+
+/// What a config sets on the engine outside its runtime. A build downloads with its own geo URLs
+/// and identity before they are in force, so a config that fails to build leaves them as they were.
+pub(crate) struct Globals {
+    geo_urls: Arc<GeoUrls>,
+    identity: Arc<Identity>,
+    ip4p: bool,
+    unified_delay: bool,
+}
+
+impl Globals {
+    pub(crate) fn put_in_force(self, shared: &Shared) {
+        shared.geo.urls.store(self.geo_urls);
+        shared.fetcher.identity.store(self.identity);
+        shared.sockets.set_ip4p(self.ip4p);
+        shared
+            .options
+            .unified_delay
+            .store(self.unified_delay, Ordering::Relaxed);
+    }
 }
 
 const CA_BUNDLE: &[u8] = include_bytes!("../../../assets/ca-certificates.crt");
@@ -514,6 +536,7 @@ fn module_texts(home: &HomeDir, section: &concord_config::Map) -> ModuleTexts {
 
 async fn compile_program(
     shared: &Shared,
+    globals: &Globals,
     profile: &mut Profile,
     env: &Arc<CompileEnv>,
 ) -> Result<RouteProgram, ApplyError> {
@@ -532,7 +555,9 @@ async fn compile_program(
         match compiled {
             Ok(program) => return Ok(program),
             Err(err) => match geo_problem(&err) {
-                Some(problem) if fetched.insert(problem) => fetch_geo(shared, problem).await?,
+                Some(problem) if fetched.insert(problem) => {
+                    fetch_geo(shared, globals, problem).await?;
+                }
                 _ => return Err(err.into()),
             },
         }
@@ -545,10 +570,16 @@ fn geo_problem(err: &CompileError) -> Option<GeoProblem> {
         .or_else(|| err.invalid_geo_file().map(GeoProblem::Invalid))
 }
 
-async fn fetch_geo(shared: &Shared, problem: GeoProblem) -> Result<(), ApplyError> {
+async fn fetch_geo(
+    shared: &Shared,
+    globals: &Globals,
+    problem: GeoProblem,
+) -> Result<(), ApplyError> {
+    let urls = &globals.geo_urls;
+    let fetcher = shared.fetcher.fetch_as(&globals.identity);
     match problem {
-        GeoProblem::Missing(file) => shared.geo.fetch_missing(file, &*shared.fetcher).await,
-        GeoProblem::Invalid(file) => shared.geo.replace_invalid(file, &*shared.fetcher).await,
+        GeoProblem::Missing(file) => shared.geo.fetch_missing(file, urls, &fetcher).await,
+        GeoProblem::Invalid(file) => shared.geo.replace_invalid(file, urls, &fetcher).await,
     }
     .map_err(ApplyError::from)
 }
@@ -571,18 +602,18 @@ pub(crate) async fn build(
     mut profile: Profile,
     selections: Arc<SelectionStore>,
 ) -> Result<Built, ApplyError> {
-    shared
-        .geo
-        .urls
-        .store(Arc::new(GeoUrls::from_config(&profile.geo)));
-    shared
-        .fetcher
-        .user_agent
-        .store(Arc::new(user_agent(&profile.general)));
     let trust = shared
         .trust
         .for_custom(profile.tls.custom_certificates.clone());
-    shared.fetcher.trust.store(trust.clone());
+    let globals = Globals {
+        geo_urls: Arc::new(GeoUrls::from_config(&profile.geo)),
+        identity: Arc::new(Identity {
+            user_agent: user_agent(&profile.general),
+            trust: trust.clone(),
+        }),
+        ip4p: profile.dialer_ip4p_convert,
+        unified_delay: profile.general.unified_delay,
+    };
 
     let store = Arc::new(RuleSetStore::new());
     let rule_providers = Arc::new(RuleProviders::new(
@@ -598,24 +629,18 @@ pub(crate) async fn build(
         carry_rule_sets(&rule_providers, previous);
     }
     let env = Arc::new(CompileEnv::new(shared.geo.store.clone(), store.clone()));
-    let program = compile_program(shared, &mut profile, &env).await?;
+    let program = compile_program(shared, &globals, &mut profile, &env).await?;
 
     let rules = Arc::new(DnsRules {
         geo: shared.geo.store.clone(),
         rule_sets: store,
     });
     let opts = sock_opts(&profile.general);
-    let dns = build_dns(shared, home, &profile, &rules, &trust, &opts).await?;
+    let dns = build_dns(shared, &globals, home, &profile, &rules, &trust, &opts).await?;
 
     let sniffer = Arc::new(sniffer_of(&profile.sniffer, rules.as_ref())?);
     let (profile, outbounds) =
         build_outbounds(shared, home, profile, selections, &dns, &trust, &opts).await?;
-
-    shared.sockets.set_ip4p(profile.dialer_ip4p_convert);
-    shared
-        .options
-        .unified_delay
-        .store(profile.general.unified_delay, Ordering::Relaxed);
 
     let warnings = warning_views(&profile, shared.android);
     log_warnings(&warnings);
@@ -655,11 +680,13 @@ pub(crate) async fn build(
         mitm: profile.mitm,
         modules: profile.modules,
         trust,
+        globals,
     })
 }
 
 async fn build_dns(
     shared: &Shared,
+    globals: &Globals,
     home: &Arc<HomeDir>,
     profile: &Profile,
     rules: &Arc<DnsRules>,
@@ -686,7 +713,9 @@ async fn build_dns(
         match Resolver::new(&profile.dns, &profile.hosts, deps) {
             Ok(resolver) => break resolver,
             Err(err) => match GeoProblem::in_dns(&err) {
-                Some(problem) if fetched.insert(problem) => fetch_geo(shared, problem).await?,
+                Some(problem) if fetched.insert(problem) => {
+                    fetch_geo(shared, globals, problem).await?;
+                }
                 _ => return Err(err.into()),
             },
         }

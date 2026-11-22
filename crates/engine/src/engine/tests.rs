@@ -353,6 +353,43 @@ pub(super) async fn running(config: &str) -> (Arc<Engine>, u16, tempfile::TempDi
     (engine, port, home)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_profile_that_fails_to_build_leaves_geo_urls_user_agent_and_trust_in_force() {
+    let (engine, _, home) = running(
+        "global-ua: in-force\ngeox-url:\n  mmdb: http://a.test/country.mmdb\nrules:\n  - MATCH,DIRECT\n",
+    )
+    .await;
+    let identity = engine.shared.fetcher.identity.load_full();
+    let urls = engine.shared.geo.urls.load_full();
+    assert_eq!(identity.user_agent, "in-force");
+    assert_eq!(urls.mmdb, "http://a.test/country.mmdb");
+    std::fs::write(
+        home.path().join("config.yaml"),
+        "global-ua: rejected\ngeox-url:\n  mmdb: http://127.0.0.1:1/country.mmdb\n\
+         tls:\n  custom-certificates: [not a certificate]\n\
+         rules:\n  - GEOIP,CN,DIRECT\n",
+    )
+    .unwrap();
+    let home_dir = engine.home().unwrap();
+    let profile = apply::load_profile(&engine.shared, &home_dir, None)
+        .await
+        .unwrap();
+    let built = apply::build(
+        &engine.shared,
+        &home_dir,
+        profile,
+        Arc::new(SelectionStore::new()),
+    )
+    .await;
+    assert!(built.is_err(), "the country database cannot be downloaded");
+    assert!(Arc::ptr_eq(
+        &engine.shared.fetcher.identity.load_full(),
+        &identity
+    ));
+    assert!(Arc::ptr_eq(&engine.shared.geo.urls.load_full(), &urls));
+    engine.shutdown().await;
+}
+
 /// Sends a SOCKS5 request for `target` with `command` (1 connect, 3 UDP associate) and returns
 /// the stream with the address the reply binds.
 #[expect(clippy::disallowed_methods, reason = "a client outside the core")]

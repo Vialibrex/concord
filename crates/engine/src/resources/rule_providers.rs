@@ -175,10 +175,15 @@ impl RuleProviders {
         if faults.is_empty() {
             return false;
         }
+        let urls = self.geo.urls.load_full();
         for fault in faults {
             let fetched = match *fault {
-                GeoFault::Missing(file) => self.geo.fetch_missing(file, &*self.fetcher).await,
-                GeoFault::Invalid(file) => self.geo.replace_invalid(file, &*self.fetcher).await,
+                GeoFault::Missing(file) => {
+                    self.geo.fetch_missing(file, &urls, &*self.fetcher).await
+                }
+                GeoFault::Invalid(file) => {
+                    self.geo.replace_invalid(file, &urls, &*self.fetcher).await
+                }
             };
             if let Err(err) = fetched {
                 tracing::warn!("[Provider] {err}");
