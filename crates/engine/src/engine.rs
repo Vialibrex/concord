@@ -23,7 +23,6 @@ use concord_rules::geo::GeoStore;
 use concord_tls::TrustStore;
 use concord_tun::{Prefix, TunRunner};
 use concord_tunnel::{ConnTable, LiveOptions, Tunnel, TunnelStatus};
-use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
@@ -35,7 +34,7 @@ use crate::fake_ip_store;
 use crate::faults::Faults;
 use crate::ntp::{self, NtpSettings};
 use crate::ops;
-use crate::probe::{Prober, RouteHit};
+use crate::probe::{OutboundIpResult, Prober, RouteHit, ServiceItem};
 use crate::probe_env::TunnelProbes;
 use crate::proxy_tasks::ProxyTasks;
 use crate::resources::{GeoUpdater, Identity, TunnelFetcher};
@@ -636,11 +635,21 @@ impl Engine {
         self.prober.check_routes(&routes).await
     }
 
-    pub async fn probe_outbound_ip(&self, proxy: String, urls: Vec<String>, timeout: i64) -> Value {
+    pub async fn probe_outbound_ip(
+        &self,
+        proxy: String,
+        urls: Vec<String>,
+        timeout: i64,
+    ) -> OutboundIpResult {
         self.prober.outbound_ip(&proxy, &urls, timeout).await
     }
 
-    pub async fn probe_services(&self, proxy: String, names: Vec<String>, timeout: i64) -> Value {
+    pub async fn probe_services(
+        &self,
+        proxy: String,
+        names: Vec<String>,
+        timeout: i64,
+    ) -> Vec<ServiceItem> {
         self.prober.services(&proxy, &names, timeout).await
     }
 

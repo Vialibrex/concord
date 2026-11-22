@@ -1302,15 +1302,9 @@ async fn a_probe_reports_where_it_left_and_the_route_can_be_rechecked() {
         .engine
         .probe_outbound_ip("G".to_string(), vec![url], 5000)
         .await;
-    assert_eq!(answer["body"], "203.0.113.7", "{answer}");
-    assert_eq!(answer["chains"], serde_json::json!(["up", "G"]), "{answer}");
-    let hits = answer["hits"].as_array().unwrap();
-    assert_eq!(hits.len(), 1, "{answer}");
-    let hit = RouteHit {
-        host: hits[0]["host"].as_str().unwrap().to_string(),
-        proxy: hits[0]["proxy"].as_str().unwrap_or("").to_string(),
-        exit: hits[0]["exit"].as_str().unwrap().to_string(),
-    };
+    assert_eq!(answer.body, "203.0.113.7", "{answer:?}");
+    assert_eq!(answer.chains, ["up", "G"], "{answer:?}");
+    let [hit] = <[RouteHit; 1]>::try_from(answer.hits).unwrap();
     assert!(hit.exit.starts_with("\"up\" Socks5 "), "{}", hit.exit);
 
     let (_, held) = rig.engine.check_routes(vec![vec![hit.clone()]]).await;

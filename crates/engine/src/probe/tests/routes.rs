@@ -1,5 +1,4 @@
 use concord_common::sync::lock;
-use serde_json::json;
 
 use crate::probe::RouteHit;
 use crate::probe::testing::{FakeEnv, exit_name};
@@ -60,16 +59,4 @@ async fn a_hit_with_the_wrong_exit_drops_the_whole_route() {
         .await;
 
     assert_eq!(held, [false, true]);
-}
-
-#[test]
-fn a_hit_serializes_without_an_empty_proxy() {
-    assert_eq!(
-        serde_json::to_value(hit("a:1", "", "x")).unwrap(),
-        json!({"host": "a:1", "exit": "x"})
-    );
-    assert_eq!(
-        serde_json::to_value(hit("a:1", "n", "x")).unwrap(),
-        json!({"host": "a:1", "proxy": "n", "exit": "x"})
-    );
 }

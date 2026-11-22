@@ -1,4 +1,3 @@
-use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -11,29 +10,25 @@ use crate::yaml::{self, ParsedDocument};
 
 const PROFILE_SECTIONS: [&str; 3] = ["proxies", "proxy-groups", "sub-rules"];
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProfileBase {
     pub config: Value,
     pub digest: String,
-    #[serde(rename = "match-rules")]
     pub match_rules: Vec<String>,
     pub proxies: usize,
-    #[serde(rename = "proxy-groups")]
     pub proxy_groups: usize,
     pub rules: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileOutbound {
     pub name: String,
-    #[serde(rename = "type")]
     pub kind: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileOutbounds {
     pub proxies: Vec<ProfileOutbound>,
-    #[serde(rename = "proxy-groups")]
     pub proxy_groups: Vec<ProfileOutbound>,
 }
 

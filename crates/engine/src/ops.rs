@@ -7,6 +7,7 @@ use concord_config::proxy::ProxyParse;
 use concord_config::{
     LoadOptions, Map, crypt, filter, load_raw, parse_proxy, parse_raw, share_link,
 };
+pub use concord_config::{ProfileBase, ProfileOutbound, ProfileOutbounds};
 use concord_platform::HomeDir;
 use serde_json::Value;
 
@@ -117,20 +118,18 @@ pub async fn decrypt_config(path: String, key: String) -> Result<String, Failure
     .await?
 }
 
-pub async fn profile_base(path: String) -> Result<Value, Failure> {
+pub async fn profile_base(path: String) -> Result<ProfileBase, Failure> {
     on_parse_stack(move || {
         let bytes = read_file(&path)?;
-        let base = concord_config::profile_base(&bytes, None).map_err(Failure::Config)?;
-        serde_json::to_value(base).map_err(|err| Failure::core(err.to_string()))
+        concord_config::profile_base(&bytes, None).map_err(Failure::Config)
     })
     .await?
 }
 
-pub async fn profile_outbounds(path: String) -> Result<Value, Failure> {
+pub async fn profile_outbounds(path: String) -> Result<ProfileOutbounds, Failure> {
     on_parse_stack(move || {
         let bytes = read_file(&path)?;
-        let outbounds = concord_config::profile_outbounds(&bytes, None).map_err(Failure::Config)?;
-        serde_json::to_value(outbounds).map_err(|err| Failure::core(err.to_string()))
+        concord_config::profile_outbounds(&bytes, None).map_err(Failure::Config)
     })
     .await?
 }

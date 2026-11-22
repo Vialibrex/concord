@@ -2,19 +2,26 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 
 use crate::probe::outbound_ip::mentions_ip;
 use crate::probe::testing::{FakeEnv, Resp, Server, exit_name, handler, serve, serve_fn};
-use crate::probe::{Prober, RouteHit};
+use crate::probe::{OutboundIpResult, Prober, RouteHit};
+
+fn hit(host: &str, proxy: &str, exit: &str) -> RouteHit {
+    RouteHit {
+        host: host.into(),
+        proxy: proxy.into(),
+        exit: exit.into(),
+    }
+}
 
 fn urls(servers: &[&Server]) -> Vec<String> {
     servers.iter().map(|server| server.url("")).collect()
 }
 
-async fn lookup(prober: &Prober, proxy: &str, urls: &[String], timeout: i64) -> Value {
+async fn lookup(prober: &Prober, proxy: &str, urls: &[String], timeout: i64) -> OutboundIpResult {
     prober.outbound_ip(proxy, urls, timeout).await
 }
 
@@ -33,10 +40,10 @@ async fn takes_the_first_usable_answer() {
     )
     .await;
 
-    assert_eq!(answer.get("error"), None, "{answer}");
-    assert_eq!(answer["body"], "ip=203.0.113.7");
-    assert_eq!(answer["url"], quick.url(""));
-    assert_eq!(answer["chains"], json!(["node-a"]));
+    assert_eq!(answer.error, None, "{answer:?}");
+    assert_eq!(answer.body, "ip=203.0.113.7");
+    assert_eq!(answer.url, quick.url(""));
+    assert_eq!(answer.chains, ["node-a"]);
 }
 
 #[tokio::test]
@@ -50,7 +57,7 @@ async fn skips_an_answer_without_an_address() {
 
     let answer = lookup(&env.prober(), "node-a", &urls(&[&limited, &later]), 4000).await;
 
-    assert_eq!(answer["url"], later.url(""));
+    assert_eq!(answer.url, later.url(""));
 }
 
 #[test]
@@ -107,7 +114,7 @@ async fn drops_the_losers_once_the_race_is_won() {
 
     let answer = lookup(&env.prober(), "node-a", &sources, 5000).await;
 
-    assert_eq!(answer["body"], "ip=203.0.113.9");
+    assert_eq!(answer.body, "ip=203.0.113.9");
     tokio::time::timeout(Duration::from_secs(2), async {
         while !closed.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -143,8 +150,8 @@ async fn a_lookup_from_an_older_epoch_is_cancelled() {
         .await
         .expect("the lookup from the older epoch kept running")
         .unwrap();
-    assert_eq!(answer["error"], "failed");
-    assert_eq!(answer["core-epoch"], 1);
+    assert_eq!(answer.error, Some("failed"));
+    assert_eq!(answer.core_epoch, 1);
 }
 
 #[tokio::test]
@@ -168,7 +175,7 @@ async fn a_lookup_from_the_same_epoch_is_left_alone() {
     reached.recv().await.unwrap();
     lookup(&prober, "node-a", &urls(&[&fast]), 5000).await;
 
-    assert_eq!(first.await.unwrap()["body"], "ip=203.0.113.7");
+    assert_eq!(first.await.unwrap().body, "ip=203.0.113.7");
 }
 
 #[tokio::test]
@@ -178,7 +185,7 @@ async fn reports_failure_when_every_source_fails() {
 
     let answer = lookup(&env.prober(), "node-a", &urls(&[&broken, &broken]), 3000).await;
 
-    assert_eq!(answer["error"], "failed");
+    assert_eq!(answer.error, Some("failed"));
 }
 
 #[tokio::test]
@@ -188,7 +195,7 @@ async fn a_sweep_that_runs_out_of_time_reports_a_timeout() {
 
     let answer = lookup(&env.prober(), "node-a", &urls(&[&stuck]), 200).await;
 
-    assert_eq!(answer["error"], "timeout");
+    assert_eq!(answer.error, Some("timeout"));
 }
 
 #[tokio::test]
@@ -198,13 +205,21 @@ async fn an_empty_source_list_is_a_failure_with_the_stamp() {
 
     let answer = lookup(&env.prober(), "node-a", &[], 1000).await;
 
-    assert_eq!(
-        answer,
-        json!({
-            "url": "", "body": "", "delay": 0, "chains": [], "error": "failed",
-            "core-epoch": 7, "route-version": 42, "hits": [],
-        })
-    );
+    let OutboundIpResult {
+        url,
+        body,
+        delay,
+        chains,
+        error,
+        core_epoch,
+        route_version,
+        hits,
+        node_hits,
+    } = answer;
+    assert_eq!((url, body, delay), (String::new(), String::new(), 0));
+    assert!(chains.is_empty() && hits.is_empty() && node_hits.is_empty());
+    assert_eq!(error, Some("failed"));
+    assert_eq!((core_epoch, route_version), (7, 42));
 }
 
 #[tokio::test]
@@ -215,25 +230,15 @@ async fn the_answer_carries_the_stamp_and_the_exit_it_reached() {
     let host = server.addr.to_string();
 
     let routed = lookup(&env.prober(), "", &urls(&[&server]), 4000).await;
+    assert_eq!((routed.core_epoch, routed.route_version), (7, 42));
+    assert_eq!(routed.hits, [hit(&host, "", &exit_name("DIRECT"))]);
     assert_eq!(
-        (&routed["core-epoch"], &routed["route-version"]),
-        (&json!(7), &json!(42))
+        routed.node_hits,
+        [hit(&host, "DIRECT", &exit_name("DIRECT"))]
     );
-    assert_eq!(
-        routed["hits"],
-        json!([{"host": host, "exit": exit_name("DIRECT")}])
-    );
-    assert_eq!(
-        routed["node-hits"],
-        json!([{"host": host, "proxy": "DIRECT", "exit": exit_name("DIRECT")}])
-    );
-    assert!(routed["delay"].is_i64());
 
     let pinned = lookup(&env.prober(), "node-a", &urls(&[&server]), 4000).await;
-    assert_eq!(
-        pinned["hits"],
-        json!([{"host": host, "proxy": "node-a", "exit": exit_name("node-a")}])
-    );
+    assert_eq!(pinned.hits, [hit(&host, "node-a", &exit_name("node-a"))]);
 }
 
 #[tokio::test]
@@ -245,17 +250,11 @@ async fn a_failed_lookup_still_names_its_exit() {
     env.refuse.store(true, Ordering::SeqCst);
 
     let failed = lookup(&env.prober(), "node-a", &sources, 2000).await;
-    assert_eq!(failed["error"], "failed");
-    assert_eq!(
-        failed["hits"],
-        json!([{"host": host, "proxy": "node-a", "exit": exit_name("node-a")}])
-    );
+    assert_eq!(failed.error, Some("failed"));
+    assert_eq!(failed.hits, [hit(&host, "node-a", &exit_name("node-a"))]);
 
     let missing = lookup(&env.prober(), "gone", &sources, 2000).await;
-    assert_eq!(
-        missing["hits"],
-        json!([{"host": "", "proxy": "gone", "exit": ""}])
-    );
+    assert_eq!(missing.hits, [hit("", "gone", "")]);
 }
 
 #[tokio::test]
@@ -266,12 +265,10 @@ async fn the_node_under_a_group_is_reported_beside_the_target() {
 
     let answer = lookup(&env.prober(), "group-x", &urls(&[&server]), 4000).await;
 
-    assert_eq!(answer["chains"], json!(["node-of-group-x", "group-x"]));
-    let hits: Vec<RouteHit> = vec![RouteHit {
-        host: host.clone(),
-        proxy: "node-of-group-x".into(),
-        exit: exit_name("node-of-group-x"),
-    }];
-    assert_eq!(answer["node-hits"], serde_json::to_value(hits).unwrap());
-    assert_eq!(answer["hits"][0]["proxy"], "group-x");
+    assert_eq!(answer.chains, ["node-of-group-x", "group-x"]);
+    assert_eq!(
+        answer.node_hits,
+        [hit(&host, "node-of-group-x", &exit_name("node-of-group-x"))]
+    );
+    assert_eq!(answer.hits[0].proxy, "group-x");
 }

@@ -139,11 +139,11 @@ impl Control {
         let timeout = params
             .timeout
             .map_or(0, |ms| i64::try_from(ms).unwrap_or(i64::MAX));
-        let value = self
+        let result = self
             .engine
             .probe_outbound_ip(params.proxy, params.urls, timeout)
             .await;
-        serde_json::from_value(value).map_err(|err| ApiError::internal(err.to_string()))
+        Ok(convert::outbound_ip(result))
     }
 
     pub(super) async fn probe_services(
@@ -153,13 +153,12 @@ impl Control {
         let timeout = params
             .timeout
             .map_or(0, |ms| i64::try_from(ms).unwrap_or(i64::MAX));
-        let value = self
+        let items = self
             .engine
             .probe_services(params.proxy, params.names, timeout)
             .await;
         Ok(ServiceList {
-            items: serde_json::from_value(value)
-                .map_err(|err| ApiError::internal(err.to_string()))?,
+            items: items.into_iter().map(convert::service_item).collect(),
         })
     }
 }

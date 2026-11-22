@@ -35,20 +35,20 @@ impl Control {
         &self,
         params: ProfileParams,
     ) -> Result<ProfileInspect, ApiError> {
-        let value = ops::profile_base(params.profile.path)
+        let base = ops::profile_base(params.profile.path)
             .await
             .map_err(data_error)?;
-        serde_json::from_value(value).map_err(|err| ApiError::internal(err.to_string()))
+        Ok(convert::profile_inspect(base))
     }
 
     pub(super) async fn profile_outbounds(
         &self,
         params: ProfileParams,
     ) -> Result<ProfileOutbounds, ApiError> {
-        let value = ops::profile_outbounds(params.profile.path)
+        let outbounds = ops::profile_outbounds(params.profile.path)
             .await
             .map_err(data_error)?;
-        serde_json::from_value(value).map_err(|err| ApiError::internal(err.to_string()))
+        Ok(convert::profile_outbounds(outbounds))
     }
 
     pub(super) async fn profile_build(

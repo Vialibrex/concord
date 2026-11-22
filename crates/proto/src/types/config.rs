@@ -266,10 +266,8 @@ dto! {
     pub struct ProfileInspect {
         pub config: Json,
         pub digest: String,
-        #[serde(alias = "match-rules")]
         pub match_rules: Vec<String>,
         pub proxies: u64,
-        #[serde(alias = "proxy-groups")]
         pub proxy_groups: u64,
         pub rules: u64,
     }
@@ -282,7 +280,6 @@ dto! {
 
     pub struct ProfileOutbounds {
         pub proxies: Vec<OutboundRef>,
-        #[serde(alias = "proxy-groups")]
         pub proxy_groups: Vec<OutboundRef>,
     }
 

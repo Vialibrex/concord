@@ -23,6 +23,8 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 pub use hits::RouteHit;
+pub use outbound_ip::OutboundIpResult;
+pub use services::ServiceItem;
 
 const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_CONCURRENCY: usize = 10;

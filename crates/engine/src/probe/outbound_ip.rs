@@ -6,8 +6,6 @@ use concord_common::sync::lock;
 use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use futures_util::stream::FuturesUnordered;
-use serde::Serialize;
-use serde_json::Value;
 use tokio::time::{Instant, interval_at};
 use tokio_util::sync::CancellationToken;
 
@@ -19,21 +17,17 @@ use super::{BROWSER_USER_AGENT, DEFAULT_PROBE_TIMEOUT, LookupClaim, Prober, time
 const STAGGER: Duration = Duration::from_millis(800);
 const MAX_BODY: usize = 4096;
 
-#[derive(Default, Serialize)]
-struct OutboundIpResult {
-    url: String,
-    body: String,
-    delay: i64,
-    chains: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<&'static str>,
-    #[serde(rename = "core-epoch")]
-    core_epoch: u64,
-    #[serde(rename = "route-version")]
-    route_version: u64,
-    hits: Vec<RouteHit>,
-    #[serde(rename = "node-hits", skip_serializing_if = "Vec::is_empty")]
-    node_hits: Vec<RouteHit>,
+#[derive(Debug, Default)]
+pub struct OutboundIpResult {
+    pub url: String,
+    pub body: String,
+    pub delay: i64,
+    pub chains: Vec<String>,
+    pub error: Option<&'static str>,
+    pub core_epoch: u64,
+    pub route_version: u64,
+    pub hits: Vec<RouteHit>,
+    pub node_hits: Vec<RouteHit>,
 }
 
 type Race<'a> = FuturesUnordered<BoxFuture<'a, Option<OutboundIpResult>>>;
@@ -79,15 +73,10 @@ impl<'a> Sources<'a> {
 }
 
 impl Prober {
-    pub async fn outbound_ip(&self, proxy: &str, urls: &[String], timeout_ms: i64) -> Value {
-        let result = self.lookup_outbound_ip(proxy, urls, timeout_ms).await;
-        serde_json::to_value(result).unwrap_or(Value::Null)
-    }
-
     /// Takes the first usable answer and drops the losers so they stop occupying
     /// probe slots. `url` is the source that was asked, not where it redirected,
     /// and `body` is raw: Dart owns the sources and their parsers.
-    async fn lookup_outbound_ip(
+    pub async fn outbound_ip(
         &self,
         proxy: &str,
         urls: &[String],

@@ -33,12 +33,10 @@ dto! {
         pub chains: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub error: Option<String>,
-        #[serde(alias = "core-epoch")]
         pub epoch: u64,
-        #[serde(alias = "route-version")]
         pub version: u64,
         pub hits: Vec<RouteHit>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "node-hits")]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub node_hits: Vec<RouteHit>,
     }
 
@@ -64,11 +62,8 @@ dto! {
         pub delay: i64,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub chains: Vec<String>,
-        #[serde(alias = "checked-at")]
         pub checked_at: i64,
-        #[serde(alias = "core-epoch")]
         pub epoch: u64,
-        #[serde(alias = "route-version")]
         pub version: u64,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         pub hits: Vec<RouteHit>,

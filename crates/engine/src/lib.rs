@@ -30,7 +30,7 @@ pub use engine::{
 };
 pub use error::Failure;
 pub use faults::{Service, ServiceFault};
-pub use probe::RouteHit;
+pub use probe::{OutboundIpResult, RouteHit, ServiceItem};
 pub use route::RouteCounters;
 pub use tun::TunStartError;
 #[cfg(unix)]

@@ -3,7 +3,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use concord_common::sync::lock;
-use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::probe::Prober;
@@ -30,13 +29,8 @@ fn prober(checkers: Vec<Checker>) -> Arc<Prober> {
     Arc::new(Prober::with_checkers(FakeEnv::new(&[]), checkers))
 }
 
-fn names(items: &Value) -> Vec<&str> {
-    items
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|item| item["name"].as_str().unwrap())
-        .collect()
+fn names(items: &[ServiceItem]) -> Vec<&str> {
+    items.iter().map(|item| item.name.as_str()).collect()
 }
 
 fn strings(names: &[&str]) -> Vec<String> {
@@ -59,17 +53,11 @@ async fn runs_every_checker_by_default() {
     let items = prober.services("", &[], 1000).await;
 
     assert_eq!(names(&items), ["alpha", "beta"]);
-    assert_eq!(items[0]["status"], AVAILABLE);
-    assert_eq!(items[0]["region"], "US");
-    assert_eq!(items[1]["status"], UNSUPPORTED_REGION);
-    assert_eq!(items[1].get("region"), None);
-    assert!(
-        items
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|item| item["checked-at"].as_i64().unwrap() > 0)
-    );
+    assert_eq!(items[0].status, AVAILABLE);
+    assert_eq!(items[0].region, "US");
+    assert_eq!(items[1].status, UNSUPPORTED_REGION);
+    assert!(items[1].region.is_empty());
+    assert!(items.iter().all(|item| item.checked_at > 0));
 }
 
 #[tokio::test]
@@ -84,7 +72,7 @@ async fn stamps_the_registered_name() {
 
     let items = prober.services("", &[], 1000).await;
 
-    assert_eq!(items[0]["name"], "alpha");
+    assert_eq!(items[0].name, "alpha");
 }
 
 #[tokio::test]
@@ -106,10 +94,7 @@ async fn keeps_the_requested_order() {
 async fn ignores_an_unknown_name() {
     let prober = prober(vec![stub("alpha", item(AVAILABLE))]);
 
-    assert_eq!(
-        prober.services("", &strings(&["nope"]), 1000).await,
-        json!([])
-    );
+    assert_eq!(prober.services("", &strings(&["nope"]), 1000).await, []);
 }
 
 #[tokio::test]
@@ -123,8 +108,8 @@ async fn survives_a_panicking_rule() {
 
     let items = prober.services("", &[], 1000).await;
 
-    assert_eq!(items[0]["status"], FAILED);
-    assert_eq!(items[1]["status"], AVAILABLE);
+    assert_eq!(items[0].status, FAILED);
+    assert_eq!(items[1].status, AVAILABLE);
 }
 
 #[tokio::test]
@@ -135,10 +120,7 @@ async fn answers_carry_the_route_stamp() {
 
     let items = prober.services("", &[], 1000).await;
 
-    assert_eq!(
-        (&items[0]["core-epoch"], &items[0]["route-version"]),
-        (&json!(7), &json!(42))
-    );
+    assert_eq!((items[0].core_epoch, items[0].route_version), (7, 42));
 }
 
 struct Tracker {
@@ -245,13 +227,13 @@ async fn drops_a_queued_check_asked_again() {
         .await
         .expect("a check queued for a slot kept waiting after its service was asked again")
         .unwrap();
-    assert_eq!(older[0]["status"], FAILED);
+    assert_eq!(older[0].status, FAILED);
     drop(held);
     let newer = tokio::time::timeout(Duration::from_secs(2), newer)
         .await
         .expect("the newer check never got a slot")
         .unwrap();
-    assert_eq!(newer[0]["status"], AVAILABLE);
+    assert_eq!(newer[0].status, AVAILABLE);
     assert_eq!(calls.load(Ordering::SeqCst), 1, "only the newer check runs");
 }
 
@@ -301,7 +283,7 @@ async fn hands_the_cancelled_checks_slot_to_its_replacement() {
     .await
     .expect("the replacement waited behind the checks every slot was held by");
 
-    assert_eq!(replacement[0]["status"], AVAILABLE);
+    assert_eq!(replacement[0].status, AVAILABLE);
     for index in 1..4 {
         prober
             .services("", &[format!("service-{index}")], 5000)
@@ -323,7 +305,7 @@ async fn retries_a_timeout_once() {
 
     let items = prober.services("", &[], 1000).await;
 
-    assert_eq!(items[0]["status"], AVAILABLE);
+    assert_eq!(items[0].status, AVAILABLE);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
@@ -338,7 +320,7 @@ async fn reports_a_repeated_timeout_after_one_retry() {
 
     let items = prober.services("", &[], 1000).await;
 
-    assert_eq!(items[0]["status"], TIMEOUT);
+    assert_eq!(items[0].status, TIMEOUT);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
@@ -380,13 +362,13 @@ async fn cancels_the_older_check_of_the_same_service() {
 
     let newer = prober.services("", &strings(&["alpha"]), 5000).await;
 
-    assert_eq!(newer[0]["status"], AVAILABLE);
+    assert_eq!(newer[0].status, AVAILABLE);
     let older = tokio::time::timeout(Duration::from_secs(2), older)
         .await
         .expect("the older sweep kept running after its service was asked again")
         .unwrap();
-    assert_eq!(older[0]["status"], FAILED);
-    assert_eq!(older[1]["status"], AVAILABLE);
+    assert_eq!(older[0].status, FAILED);
+    assert_eq!(older[1].status, AVAILABLE);
 }
 
 #[test]
@@ -446,31 +428,4 @@ fn trace_ip_keeps_only_an_address() {
     ] {
         assert_eq!(trace_ip(body), want, "{body:?}");
     }
-}
-
-#[test]
-fn an_item_serializes_like_the_go_one() {
-    let full = ServiceItem {
-        name: "claude".into(),
-        region: "JP".into(),
-        ip: "198.51.100.9".into(),
-        delay: 120,
-        chains: vec!["node".into()],
-        checked_at: 5,
-        core_epoch: 1,
-        route_version: 2,
-        ..item(AVAILABLE)
-    };
-    assert_eq!(
-        serde_json::to_value(full).unwrap(),
-        json!({
-            "name": "claude", "status": "available", "region": "JP", "ip": "198.51.100.9",
-            "delay": 120,
-            "chains": ["node"], "checked-at": 5, "core-epoch": 1, "route-version": 2,
-        })
-    );
-    assert_eq!(
-        serde_json::to_value(item(FAILED)).unwrap(),
-        json!({"name": "", "status": "failed", "checked-at": 0, "core-epoch": 0, "route-version": 0})
-    );
 }

@@ -3,16 +3,14 @@ use std::sync::Mutex;
 
 use concord_common::RouteStamp;
 use concord_common::sync::lock;
-use serde::Serialize;
 
 use super::{ProbeEnv, Prober};
 
 /// Where a request for `host` (`host:port`) left: through `proxy` when the probe
 /// was pinned to one, by the rules when `proxy` is empty.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct RouteHit {
     pub host: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub proxy: String,
     pub exit: String,
 }

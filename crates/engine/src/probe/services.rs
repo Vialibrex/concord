@@ -7,8 +7,6 @@ use async_trait::async_trait;
 use concord_common::sync::lock;
 use futures_util::FutureExt;
 use futures_util::future::{BoxFuture, join_all};
-use serde::Serialize;
-use serde_json::Value;
 
 use super::ctx::{Ctx, ProbeError};
 use super::fetch::{ProbeRequest, ProbeResult, Until, acquire};
@@ -43,30 +41,18 @@ pub const TIMEOUT: &str = "timeout";
 pub const FAILED: &str = "failed";
 
 /// A blank status means a rule has yet to judge the answer.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ServiceItem {
     pub name: String,
     pub status: &'static str,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub region: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub ip: String,
-    #[serde(skip_serializing_if = "is_zero")]
     pub delay: i64,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub chains: Vec<String>,
-    #[serde(rename = "checked-at")]
     pub checked_at: i64,
-    #[serde(rename = "core-epoch")]
     pub core_epoch: u64,
-    #[serde(rename = "route-version")]
     pub route_version: u64,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hits: Vec<RouteHit>,
-}
-
-fn is_zero(value: &i64) -> bool {
-    *value == 0
 }
 
 impl ServiceItem {
@@ -214,12 +200,7 @@ impl Drop for Claimed<'_> {
 }
 
 impl Prober {
-    pub async fn services(&self, proxy: &str, names: &[String], timeout_ms: i64) -> Value {
-        let items = self.check_services(proxy, names, timeout_ms).await;
-        serde_json::to_value(items).unwrap_or(Value::Null)
-    }
-
-    async fn check_services(
+    pub async fn services(
         &self,
         proxy: &str,
         names: &[String],

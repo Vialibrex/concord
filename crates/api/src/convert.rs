@@ -23,6 +23,12 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+mod probe;
+mod profile;
+
+pub use self::probe::{outbound_ip, service_item};
+pub use self::profile::{profile_inspect, profile_outbounds};
+
 pub fn unix_millis(at: SystemTime) -> i64 {
     at.duration_since(UNIX_EPOCH).map_or(0, |elapsed| {
         i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
