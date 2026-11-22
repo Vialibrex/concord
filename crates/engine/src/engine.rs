@@ -23,7 +23,7 @@ use concord_rules::geo::GeoStore;
 use concord_tls::TrustStore;
 use concord_tun::{Prefix, TunRunner};
 use concord_tunnel::{ConnTable, LiveOptions, Tunnel, TunnelStatus};
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
@@ -448,7 +448,7 @@ impl Engine {
         self.own
             .spawn_blocking(concord_platform::release_free_memory);
         match rejected {
-            Some(message) => Err(Failure::new("config_rejected", message)),
+            Some(message) => Err(Failure::ConfigRejected(message)),
             None => Ok(()),
         }
     }
@@ -577,8 +577,8 @@ impl Engine {
             .query(name, qtype)
             .await
             .map_err(|err| match err {
-                QueryError::Exchange(err) => Failure::core(err.to_string()),
-                other => Failure::new("invalid_query", other.to_string()),
+                QueryError::Exchange(err) => Failure::Io(err),
+                other => Failure::InvalidQuery(other),
             })
     }
 
@@ -605,7 +605,9 @@ impl Engine {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
         if !valid {
-            return Err(Failure::new("invalid_arguments", "invalid rule set name"));
+            return Err(Failure::InvalidArguments(
+                "invalid rule set name".to_string(),
+            ));
         }
         let source = home.join("providers").join("rules").join(name);
         let downloaded = !url.is_empty();
@@ -613,7 +615,7 @@ impl Engine {
             RuleSetSource::Downloaded(
                 resources::download(&*self.shared.fetcher, resources::rule_set_request(url))
                     .await
-                    .map_err(|err| request_failure(&err, json!({})))?,
+                    .map_err(|err| request_failure(err, None))?,
             )
         } else {
             RuleSetSource::Local(source.clone())
@@ -634,13 +636,13 @@ impl Engine {
     }
 
     pub fn geo_update(self: &Arc<Self>, kind: &str) -> Result<(), Failure> {
-        let file = resources::geo_file_of(kind)
-            .ok_or_else(|| Failure::core(format!("unknown geo resource: {kind}")))?;
+        let file =
+            resources::geo_file_of(kind).ok_or_else(|| Failure::UnknownGeo(kind.to_string()))?;
         let claim = self
             .shared
             .geo
             .claim(file)
-            .ok_or_else(|| Failure::core(format!("geo update already in progress: {kind}")))?;
+            .ok_or_else(|| Failure::GeoUpdating(kind.to_string()))?;
         self.shared
             .geo
             .spawn_update(claim, self.shared.fetcher.clone(), &self.tasks);

@@ -208,14 +208,14 @@ impl MitmService {
 
     pub fn issue_certificate(&self, host: &str) -> Result<String, Failure> {
         if host.is_empty() {
-            return Err(Failure::new("invalid_arguments", "missing host"));
+            return Err(Failure::InvalidArguments("missing host".to_string()));
         }
         self.started()?.issue_certificate(host).map_err(ca_failure)
     }
 
     pub fn validate(&self, raw: Value) -> Result<Value, Failure> {
         let raw: MitmConfig = serde_json::from_value(raw)
-            .map_err(|err| Failure::new("invalid_arguments", err.to_string()))?;
+            .map_err(|err| Failure::InvalidArguments(err.to_string()))?;
         let validation = self.started()?.validate(&raw);
         Ok(serde_json::to_value(validation).unwrap_or(Value::Null))
     }
@@ -338,10 +338,7 @@ impl MitmService {
                     .iter()
                     .any(|module| module.spec.name == name) =>
             {
-                return Err(Failure::new(
-                    "invalid_arguments",
-                    format!("no module named {name}"),
-                ));
+                return Err(Failure::InvalidArguments(format!("no module named {name}")));
             }
             Some(name) => Refetch::Module(name),
             None => Refetch::All,

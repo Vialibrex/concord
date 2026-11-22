@@ -14,7 +14,7 @@ These are host tests. Android was exercised by hand in an embedding app on an em
 
 | # | Behaviour | Status | Tests and notes |
 |---|---|---|---|
-| 1 | A rejected `config.setup` applies the built-in empty config and answers `config_rejected` | partial | `concord-api::behaviour::a_rejected_profile_is_rejected_with_a_fallback_and_the_core_keeps_running` (`rejected` with `fellBack`); `concord-engine::e2e::a_rejected_config_falls_back_to_direct_and_says_so`. A failing empty config answering `internal` is not tested |
+| 1 | A rejected `config.setup` applies the built-in empty config and answers `rejected` with `fellBack` | partial | `concord-api::behaviour::a_rejected_profile_is_rejected_with_a_fallback_and_the_core_keeps_running` (`rejected` with `fellBack`); `concord-engine::e2e::a_rejected_config_falls_back_to_direct_and_says_so`. A failing empty config answering `internal` is not tested |
 | 2 | `options` apply before the profile is read | partial | `concord-api::behaviour::options_take_effect_before_the_profile_is_read` asserts the test URL, not the timeout |
 | 3 | `config.setup` opens no port; `listener.start` does | verified | `concord-api::behaviour::engine_start_opens_the_port_and_an_apply_alone_does_not` |
 | 4 | Providers load asynchronously and each reports `loaded` | verified | Now `resourceUpdate`, every step of whose first load waits for the apply to finish: `concord-api::behaviour::each_provider_reports_loaded_after_the_apply_has_answered`, `an_apply_does_not_wait_for_a_provider_download`; `concord-engine::e2e::the_first_loads_report_their_outcome_only_once_the_apply_lets_them`. Every later fetch reports too: `concord-group::providers::an_http_provider_reports_every_fetch_whatever_started_it`, `concord-engine::geo_update` |

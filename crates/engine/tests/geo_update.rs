@@ -134,7 +134,10 @@ async fn an_unknown_resource_is_refused() {
 
     let failure = rig.engine.geo_update("GEOFOO").unwrap_err();
 
-    assert!(failure.message.contains("unknown geo resource"));
+    assert!(
+        matches!(failure, concord_engine::Failure::UnknownGeo(_)),
+        "{failure:?}"
+    );
     rig.engine.shutdown().await;
 }
 
@@ -150,7 +153,10 @@ async fn one_update_per_resource_runs_at_a_time() {
     rig.engine.geo_update("MMDB").unwrap();
     let second = rig.engine.geo_update("MMDB").unwrap_err();
 
-    assert!(second.message.contains("already in progress"), "{second:?}");
+    assert!(
+        matches!(second, concord_engine::Failure::GeoUpdating(_)),
+        "{second:?}"
+    );
     rig.engine.geo_update("ASN").unwrap();
     assert!(eventually(|| rig.geo_events("MMDB").first() == Some(&ResourcePhase::Updating)).await);
     rig.engine.shutdown().await;

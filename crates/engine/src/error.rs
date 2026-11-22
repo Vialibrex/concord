@@ -1,46 +1,66 @@
-use concord_config::provider::RuleProviderDef;
-use concord_group::FetchError;
-use concord_rules::RuleSetError;
-use concord_rules::geo::GeoError;
-use serde_json::Value;
+use std::io;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Failure {
-    pub code: String,
-    pub message: String,
-    pub details: Option<Value>,
+use concord_config::ConfigError;
+use concord_config::provider::RuleProviderDef;
+use concord_dns::QueryError;
+use concord_group::FetchError;
+use concord_rules::geo::GeoError;
+use concord_rules::{CompileSetError, RuleSetError};
+
+pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Why an engine call failed. A caller branches on the variant; the text is for people.
+#[derive(Debug, thiserror::Error)]
+pub enum Failure {
+    /// The profile did not apply and the built-in default runs in its place.
+    #[error("{0}")]
+    ConfigRejected(String),
+    #[error("{0}")]
+    InvalidArguments(String),
+    #[error(transparent)]
+    InvalidQuery(QueryError),
+    #[error("external provider does not exist")]
+    ProviderNotFound { provider: String },
+    #[error("external provider is updating")]
+    ProviderUpdating { provider: String },
+    #[error("{source}")]
+    ProviderUpdate { provider: String, source: BoxError },
+    #[error(transparent)]
+    RuleSet(#[from] CompileSetError),
+    /// A download got no answer, or one that was not a success. `provider` is the provider it
+    /// was for, if any.
+    #[error("{source}")]
+    Request {
+        provider: Option<String>,
+        timed_out: bool,
+        source: BoxError,
+    },
+    #[error("open {path}: {}", io_message(source))]
+    Open { path: String, source: io::Error },
+    #[error("unknown geo resource: {0}")]
+    UnknownGeo(String),
+    #[error("geo update already in progress: {0}")]
+    GeoUpdating(String),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error("{0}")]
+    Core(String),
 }
 
 impl Failure {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Failure {
-            code: code.into(),
-            message: message.into(),
-            details: None,
-        }
-    }
-
     pub fn core(message: impl Into<String>) -> Self {
-        Self::new("core_error", message)
-    }
-
-    pub fn with_details(mut self, details: Value) -> Self {
-        self.details = Some(details);
-        self
+        Failure::Core(message.into())
     }
 }
 
-impl std::fmt::Display for Failure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for Failure {}
-
-impl From<std::io::Error> for Failure {
-    fn from(err: std::io::Error) -> Self {
-        Failure::core(err.to_string())
+fn io_message(err: &io::Error) -> String {
+    match err.kind() {
+        io::ErrorKind::NotFound => "no such file or directory".to_string(),
+        io::ErrorKind::PermissionDenied => "permission denied".to_string(),
+        io::ErrorKind::IsADirectory => "is a directory".to_string(),
+        _ => err.to_string(),
     }
 }
 

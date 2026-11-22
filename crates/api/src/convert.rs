@@ -457,61 +457,42 @@ pub fn capabilities(source: concord_engine::Capabilities) -> Capabilities {
     }
 }
 
-/// Who is at fault when an engine call fails with a plain `core_error`: the data
-/// the caller named, or the core.
+/// Who is at fault for a failure the engine does not classify: the data the caller
+/// named, or the core.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Blame {
     Data,
     Core,
 }
 
-fn detail<'a>(failure: &'a Failure, key: &str) -> Option<&'a str> {
-    failure.details.as_ref()?.get(key)?.as_str()
-}
-
-/// Reads the codes the engine has always used. The message text is only passed
-/// through for people; nothing here depends on it, except the one file-missing
-/// phrase `ops::read_file` writes.
 pub fn api_error(failure: Failure, blame: Blame) -> ApiError {
-    let message = failure.message.clone();
-    match failure.code.as_str() {
-        "config_rejected" => ApiError::rejected(message, true),
-        "invalid_arguments" => ApiError::invalid_params(message),
-        "provider_not_found" => ApiError::not_found(
-            "provider",
-            detail(&failure, "providerName").unwrap_or_default(),
-        ),
-        "provider_updating" => ApiError::conflict("updating", message),
-        "rule_set_empty" | "rule_set_mixed" | "rule_set_invalid" => {
-            ApiError::rejected_because(&failure.code, message)
+    let message = failure.to_string();
+    match failure {
+        Failure::ConfigRejected(_) => ApiError::rejected(message, true),
+        Failure::InvalidArguments(_) => ApiError::invalid_params(message),
+        Failure::InvalidQuery(_) => ApiError::invalid_field("qtype", message),
+        Failure::ProviderNotFound { provider } => ApiError::not_found("provider", provider),
+        Failure::ProviderUpdating { .. } | Failure::GeoUpdating(_) => {
+            ApiError::conflict("updating", message)
         }
-        "provider_update_error" => ApiError::rejected(message, false),
-        "request_error" => match detail(&failure, "reason") {
-            Some("timeout") => {
-                ApiError::new(concord_proto::ErrorData::Timeout { after: None }, message)
+        Failure::ProviderUpdate { .. } => ApiError::rejected(message, false),
+        Failure::RuleSet(err) => ApiError::rejected_because(err.code(), message),
+        Failure::Request {
+            timed_out: true, ..
+        } => ApiError::new(concord_proto::ErrorData::Timeout { after: None }, message),
+        Failure::Request { provider, .. } => {
+            ApiError::unavailable(provider.unwrap_or_default(), message)
+        }
+        Failure::UnknownGeo(_) => ApiError::invalid_field("type", message),
+        Failure::Open { path, source } if source.kind() == std::io::ErrorKind::NotFound => {
+            ApiError::not_found("file", path)
+        }
+        Failure::Open { .. } | Failure::Config(_) | Failure::Io(_) | Failure::Core(_) => {
+            match blame {
+                Blame::Data => ApiError::rejected(message, false),
+                Blame::Core => ApiError::internal(message),
             }
-            _ => ApiError::unavailable(
-                detail(&failure, "providerName")
-                    .unwrap_or_default()
-                    .to_string(),
-                message,
-            ),
-        },
-        "request_bad_response" => ApiError::unavailable(
-            detail(&failure, "providerName")
-                .unwrap_or_default()
-                .to_string(),
-            message,
-        ),
-        _ if message.ends_with(": no such file or directory") => {
-            let name = message
-                .strip_prefix("open ")
-                .and_then(|rest| rest.strip_suffix(": no such file or directory"))
-                .unwrap_or_default();
-            ApiError::not_found("file", name)
         }
-        _ if blame == Blame::Data => ApiError::rejected(message, false),
-        _ => ApiError::internal(message),
     }
 }
 
@@ -626,71 +607,59 @@ mod tests {
     }
 
     #[test]
-    fn rule_set_failures_keep_their_reason() {
-        let error = api_error(
-            Failure::new("rule_set_mixed", "mixed behaviours"),
-            Blame::Core,
-        );
-        let ErrorData::Rejected { reason, .. } = error.data else {
-            panic!("{error:?}");
-        };
-        assert_eq!(reason.as_deref(), Some("rule_set_mixed"));
-    }
-
-    #[test]
     fn connection_ids_count_up() {
         let (first, second) = (record("a", None), record("b", None));
         assert!(second.seq > first.seq);
     }
 
-    fn failure(code: &str, message: &str, details: Option<Value>) -> Failure {
-        let mut failure = Failure::new(code, message);
-        failure.details = details;
-        failure
-    }
-
     #[test]
-    fn engine_codes_become_error_kinds() {
+    fn engine_failures_become_error_kinds() {
         let kind = |failure, blame| api_error(failure, blame).data.kind();
+        let text = |text: &str| text.to_string();
+        let request = |timed_out| Failure::Request {
+            provider: Some(text("p")),
+            timed_out,
+            source: "x".into(),
+        };
         assert_eq!(
-            kind(failure("config_rejected", "bad", None), Blame::Core),
+            kind(Failure::ConfigRejected(text("bad")), Blame::Core),
             "rejected"
         );
         assert_eq!(
-            kind(failure("invalid_arguments", "x", None), Blame::Core),
+            kind(Failure::InvalidArguments(text("x")), Blame::Core),
             "invalid_params"
         );
         assert_eq!(
-            kind(failure("provider_updating", "x", None), Blame::Core),
+            kind(
+                Failure::ProviderUpdating {
+                    provider: text("p")
+                },
+                Blame::Core
+            ),
             "conflict"
         );
         assert_eq!(
-            kind(failure("provider_update_error", "x", None), Blame::Core),
+            kind(Failure::GeoUpdating(text("ASN")), Blame::Core),
+            "conflict"
+        );
+        assert_eq!(
+            kind(
+                Failure::ProviderUpdate {
+                    provider: text("p"),
+                    source: "x".into()
+                },
+                Blame::Core
+            ),
             "rejected"
         );
-        assert_eq!(
-            kind(failure("rule_set_mixed", "x", None), Blame::Core),
-            "rejected"
-        );
-        assert_eq!(
-            kind(failure("request_bad_response", "x", None), Blame::Core),
-            "unavailable"
-        );
-        assert_eq!(
-            kind(failure("core_error", "boom", None), Blame::Core),
-            "internal"
-        );
-        assert_eq!(
-            kind(failure("core_error", "bad yaml", None), Blame::Data),
-            "rejected"
-        );
+        assert_eq!(kind(request(false), Blame::Core), "unavailable");
+        assert_eq!(kind(Failure::core("boom"), Blame::Core), "internal");
+        assert_eq!(kind(Failure::core("bad yaml"), Blame::Data), "rejected");
         assert_eq!(
             api_error(
-                failure(
-                    "provider_not_found",
-                    "x",
-                    Some(json!({"providerName": "p"}))
-                ),
+                Failure::ProviderNotFound {
+                    provider: text("p")
+                },
                 Blame::Core
             )
             .data,
@@ -700,19 +669,21 @@ mod tests {
             }
         );
         assert_eq!(
-            api_error(
-                failure("request_error", "x", Some(json!({"reason": "timeout"}))),
-                Blame::Core
-            )
-            .data,
+            api_error(request(true), Blame::Core).data,
             ErrorData::Timeout { after: None }
         );
         assert_eq!(
-            api_error(
-                failure("core_error", "open /a/b: no such file or directory", None),
-                Blame::Data
-            )
-            .data,
+            api_error(Failure::UnknownGeo(text("FOO")), Blame::Core).data,
+            ErrorData::InvalidParams {
+                path: Some("type".into())
+            }
+        );
+        let missing = Failure::Open {
+            path: text("/a/b"),
+            source: std::io::ErrorKind::NotFound.into(),
+        };
+        assert_eq!(
+            api_error(missing, Blame::Data).data,
             ErrorData::NotFound {
                 entity: "file".into(),
                 name: "/a/b".into()

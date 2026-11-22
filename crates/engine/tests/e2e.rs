@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use concord_common::sync::lock;
 use concord_common::{CoreEvent, CoreOptions, EventSink, ResourcePhase, ResourceUpdate};
-use concord_engine::{Engine, EngineConfig, ProxyView, RouteHit, SetupRequest, UpdateRequest};
+use concord_engine::{
+    Engine, EngineConfig, Failure, ProxyView, RouteHit, SetupRequest, UpdateRequest,
+};
 use concord_platform::{NativePlatform, Platform};
 use concord_test_support::{tcp_echo, udp_echo};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -359,7 +361,7 @@ impl Rig {
         }
     }
 
-    async fn apply(&self, config: &str) -> Result<(), concord_engine::Failure> {
+    async fn apply(&self, config: &str) -> Result<(), Failure> {
         self.apply_with(config, BTreeMap::new()).await
     }
 
@@ -367,7 +369,7 @@ impl Rig {
         &self,
         config: &str,
         selected: BTreeMap<String, String>,
-    ) -> Result<(), concord_engine::Failure> {
+    ) -> Result<(), Failure> {
         self.setup(config, selected, CoreOptions::default()).await
     }
 
@@ -376,7 +378,7 @@ impl Rig {
         config: &str,
         selected: BTreeMap<String, String>,
         options: CoreOptions,
-    ) -> Result<(), concord_engine::Failure> {
+    ) -> Result<(), Failure> {
         let text = format!("mixed-port: {}\n{config}", self.mixed);
         std::fs::write(self.home.path().join("config.yaml"), text).unwrap();
         self.engine
@@ -563,12 +565,10 @@ async fn a_rejected_config_falls_back_to_direct_and_says_so() {
         .apply("rules:\n  - NOT-A-RULE,x,DIRECT\n")
         .await
         .unwrap_err();
-    assert_eq!(failure.code, "config_rejected");
-    assert!(
-        failure.message.contains("NOT-A-RULE"),
-        "{}",
-        failure.message
-    );
+    let Failure::ConfigRejected(message) = failure else {
+        panic!("{failure:?}");
+    };
+    assert!(message.contains("NOT-A-RULE"), "{message}");
     rig.engine.start_listeners().await;
     assert!(
         socks_connect(rig.mixed, echo).await.is_err(),
@@ -635,13 +635,11 @@ async fn a_geo_file_that_cannot_be_fetched_rejects_the_config() {
         "geox-url:\n  mmdb: http://{server}/Country.mmdb\nrules:\n  - GEOIP,CN,DIRECT\n  - MATCH,DIRECT\n"
     );
     let failure = rig.apply(&config).await.unwrap_err();
-    assert_eq!(failure.code, "config_rejected");
-    assert!(
-        failure.message.contains("can't download MMDB"),
-        "{}",
-        failure.message
-    );
-    assert!(failure.message.contains("404"), "{}", failure.message);
+    let Failure::ConfigRejected(message) = failure else {
+        panic!("{failure:?}");
+    };
+    assert!(message.contains("can't download MMDB"), "{message}");
+    assert!(message.contains("404"), "{message}");
     assert_eq!(hits.load(Ordering::SeqCst), 1);
     rig.engine.shutdown().await;
 }
@@ -702,7 +700,10 @@ async fn providers_load_over_the_tunnel_and_update_on_request() {
     assert_eq!(hits.load(Ordering::SeqCst), before + 2);
 
     let missing = rig.engine.providers().update("nope").await.unwrap_err();
-    assert_eq!(missing.code, "provider_not_found");
+    assert!(
+        matches!(missing, Failure::ProviderNotFound { .. }),
+        "{missing:?}"
+    );
     rig.engine.shutdown().await;
 }
 
@@ -875,12 +876,10 @@ async fn a_provider_path_through_a_symlink_names_the_provider_and_the_path() {
     let config = "rule-providers:\n  local:\n    type: file\n    behavior: domain\n    path: linked/r.txt\n\
                   rules:\n  - RULE-SET,local,REJECT\n  - MATCH,DIRECT\n";
     let failure = rig.apply(config).await.unwrap_err();
+    let message = failure.to_string();
     assert!(
-        failure
-            .message
-            .contains("rule provider local: path crosses a symlink: linked/r.txt"),
-        "{}",
-        failure.message
+        message.contains("rule provider local: path crosses a symlink: linked/r.txt"),
+        "{message}"
     );
     rig.engine.shutdown().await;
 }
@@ -1211,7 +1210,10 @@ async fn the_lan_keys_bind_and_filter_the_listeners() {
         ..UpdateRequest::default()
     };
     let failure = rig.engine.update(request).await.unwrap_err();
-    assert_eq!(failure.code, "invalid_arguments");
+    assert!(
+        matches!(failure, Failure::InvalidArguments(_)),
+        "{failure:?}"
+    );
     let general = rig.engine.general().await.unwrap();
     assert_eq!(general.lan_allowed_ips, ["127.0.0.0/8"]);
     assert_eq!(general.bind_address, "192.0.2.1");
@@ -1226,7 +1228,7 @@ async fn an_update_before_any_config_is_refused() {
         .update(UpdateRequest::default())
         .await
         .unwrap_err();
-    assert_eq!(failure.message, "config is not applied");
+    assert_eq!(failure.to_string(), "config is not applied");
     rig.engine.shutdown().await;
 }
 

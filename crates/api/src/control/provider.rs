@@ -107,16 +107,7 @@ impl Control {
     }
 
     pub(super) async fn geo_update(&self, params: GeoUpdateParams) -> Result<Empty, ApiError> {
-        self.engine.geo_update(&params.kind).map_err(|failure| {
-            if failure
-                .message
-                .starts_with("geo update already in progress")
-            {
-                ApiError::conflict("updating", failure.message)
-            } else {
-                ApiError::invalid_field("type", failure.message)
-            }
-        })?;
+        self.engine.geo_update(&params.kind).map_err(core_error)?;
         Ok(Empty {})
     }
 }

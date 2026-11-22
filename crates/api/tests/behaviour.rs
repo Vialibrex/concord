@@ -368,6 +368,27 @@ async fn a_large_result_goes_to_the_file_the_caller_names_and_only_inside_the_ho
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rule_set_that_does_not_compile_names_its_reason() {
+    let rig = Rig::new().await;
+    let rules = rig.home.join("providers").join("rules");
+    std::fs::create_dir_all(&rules).unwrap();
+    std::fs::write(rules.join("broken.mrs"), [0x28, 0xb5, 0x2f, 0xfd, 0, 0]).unwrap();
+    let error = rig
+        .control
+        .rule_set_compile(RuleSetCompileParams {
+            name: "broken.mrs".to_string(),
+            url: None,
+        })
+        .await
+        .unwrap_err();
+    let ErrorData::Rejected { reason, .. } = error.data else {
+        panic!("{error:?}");
+    };
+    assert_eq!(reason.as_deref(), Some("rule_set_invalid"));
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_missing_file_is_not_found_and_not_a_bare_message() {
     let rig = Rig::new().await;
     let error = rig

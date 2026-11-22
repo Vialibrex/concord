@@ -2,12 +2,11 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use concord_group::{FetchErrorKind, Outbounds, ProviderError, ProxyProvider};
-use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use super::Engine;
-use crate::error::{Failure, ResourceError};
+use crate::error::{BoxError, Failure, ResourceError};
 use crate::resources::{RuleProvider, RuleProviders, behavior_of};
 use crate::views::{ProviderView, SubscriptionInfo};
 
@@ -67,14 +66,14 @@ impl Providers<'_> {
             }
             let outcome = rules.reported(&provider, rules.pull(&provider)).await;
             rules.release(&provider);
-            outcome.map_err(|err| rule_update_failure(name, &err))?;
+            outcome.map_err(|err| request_failure(err, Some(name)))?;
             self.refresh_route();
             return Ok(());
         }
         self.proxy_provider(name)?
             .update()
             .await
-            .map_err(|err| proxy_update_failure(name, &err))?;
+            .map_err(|err| proxy_update_failure(name, err))?;
         self.refresh_route();
         Ok(())
     }
@@ -82,9 +81,7 @@ impl Providers<'_> {
     /// Tests every node of a proxy provider at its own URL, as its timer would.
     pub async fn health_check(&self, name: &str) -> Result<(), Failure> {
         let provider = self.proxy_provider(name)?;
-        let outbounds = self
-            .outbounds()
-            .ok_or_else(|| provider_failure("provider_not_found", name, "no config in force"))?;
+        let outbounds = self.outbounds().ok_or_else(|| not_found(name))?;
         provider.health_check(&outbounds).await;
         Ok(())
     }
@@ -94,11 +91,7 @@ impl Providers<'_> {
             && let Some(provider) = rules.get(name)
         {
             if !provider.is_listed() {
-                return Err(provider_failure(
-                    "provider_update_error",
-                    name,
-                    "not external provider",
-                ));
+                return Err(update_failure(name, "not external provider"));
             }
             let provider: Arc<RuleProvider> = provider.clone();
             if !rules.claim(&provider) {
@@ -106,8 +99,7 @@ impl Providers<'_> {
             }
             let outcome = rules.side_load(&provider, data.into_bytes()).await;
             rules.release(&provider);
-            outcome
-                .map_err(|err| provider_failure("provider_update_error", name, &err.to_string()))?;
+            outcome.map_err(|err| update_failure(name, err))?;
             self.refresh_route();
             return Ok(());
         }
@@ -116,7 +108,7 @@ impl Providers<'_> {
             .await
             .map_err(|err| match err {
                 ProviderError::Updating => updating_failure(name),
-                other => provider_failure("provider_update_error", name, &other.to_string()),
+                other => update_failure(name, other),
             })?;
         self.refresh_route();
         Ok(())
@@ -125,13 +117,7 @@ impl Providers<'_> {
     fn proxy_provider(&self, name: &str) -> Result<Arc<ProxyProvider>, Failure> {
         self.outbounds()
             .and_then(|outbounds| outbounds.provider(name))
-            .ok_or_else(|| {
-                provider_failure(
-                    "provider_not_found",
-                    name,
-                    "external provider does not exist",
-                )
-            })
+            .ok_or_else(|| not_found(name))
     }
 
     fn refresh_route(&self) {
@@ -184,73 +170,52 @@ fn rule_provider_view(provider: &RuleProvider) -> ProviderView {
 }
 
 fn updating_failure(name: &str) -> Failure {
-    provider_failure("provider_updating", name, "external provider is updating")
-}
-
-fn provider_failure(code: &str, name: &str, message: &str) -> Failure {
-    Failure::new(code, message).with_details(json!({"providerName": name}))
-}
-
-fn kind_reason(kind: &FetchErrorKind) -> Option<&'static str> {
-    match kind {
-        FetchErrorKind::Tls => Some("tls"),
-        FetchErrorKind::Dns => Some("dns"),
-        FetchErrorKind::Timeout => Some("timeout"),
-        FetchErrorKind::Connection => Some("connection"),
-        FetchErrorKind::Other => None,
+    Failure::ProviderUpdating {
+        provider: name.to_string(),
     }
 }
 
-/// The reason values are matched by `lib/common/network_error.dart`.
-pub(super) fn request_failure(err: &ResourceError, mut details: Value) -> Failure {
-    match err {
-        ResourceError::Status(code) => {
-            details["statusCode"] = json!(code);
-            Failure::new("request_bad_response", err.to_string()).with_details(details)
-        }
-        ResourceError::Fetch(fetch) => {
-            if let Some(reason) = kind_reason(&fetch.kind) {
-                details["reason"] = json!(reason);
-            }
-            Failure::new("request_error", err.to_string()).with_details(details)
-        }
-        ResourceError::Other(message) => Failure::core(message.clone()),
-        ResourceError::Load(load) => Failure::core(load.to_string()),
+fn not_found(name: &str) -> Failure {
+    Failure::ProviderNotFound {
+        provider: name.to_string(),
     }
 }
 
-fn rule_update_failure(name: &str, err: &ResourceError) -> Failure {
-    match err {
-        ResourceError::Other(message) => provider_failure("provider_update_error", name, message),
-        ResourceError::Load(load) => {
-            provider_failure("provider_update_error", name, &load.to_string())
-        }
-        _ => request_failure(err, json!({"providerName": name})),
+fn update_failure(name: &str, source: impl Into<BoxError>) -> Failure {
+    Failure::ProviderUpdate {
+        provider: name.to_string(),
+        source: source.into(),
     }
 }
 
-fn proxy_update_failure(name: &str, err: &ProviderError) -> Failure {
-    match err {
-        ProviderError::NotFound => provider_failure(
-            "provider_not_found",
-            name,
-            "external provider does not exist",
-        ),
-        ProviderError::Updating => updating_failure(name),
-        ProviderError::Status(_) => {
-            let mut details = json!({"providerName": name});
-            if let Some(code) = err.status_code() {
-                details["statusCode"] = json!(code);
-            }
-            Failure::new("request_bad_response", err.to_string()).with_details(details)
-        }
-        ProviderError::Fetch(fetch) => {
-            let mut details = json!({"providerName": name});
-            if let Some(reason) = kind_reason(&fetch.kind) {
-                details["reason"] = json!(reason);
-            }
-            Failure::new("request_error", err.to_string()).with_details(details)
-        }
-        other => provider_failure("provider_update_error", name, &other.to_string()),
+/// A download that failed, for the provider named, if any.
+pub(super) fn request_failure(err: ResourceError, provider: Option<&str>) -> Failure {
+    let timed_out = match &err {
+        ResourceError::Status(_) => false,
+        ResourceError::Fetch(fetch) => fetch.kind == FetchErrorKind::Timeout,
+        ResourceError::Other(_) | ResourceError::Load(_) => match provider {
+            Some(name) => return update_failure(name, err),
+            None => return Failure::core(err.to_string()),
+        },
+    };
+    Failure::Request {
+        provider: provider.map(str::to_string),
+        timed_out,
+        source: err.into(),
+    }
+}
+
+fn proxy_update_failure(name: &str, err: ProviderError) -> Failure {
+    let timed_out = match &err {
+        ProviderError::NotFound => return not_found(name),
+        ProviderError::Updating => return updating_failure(name),
+        ProviderError::Status(_) => false,
+        ProviderError::Fetch(fetch) => fetch.kind == FetchErrorKind::Timeout,
+        ProviderError::Content(_) | ProviderError::Io(_) => return update_failure(name, err),
+    };
+    Failure::Request {
+        provider: Some(name.to_string()),
+        timed_out,
+        source: err.into(),
     }
 }

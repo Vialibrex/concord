@@ -48,31 +48,25 @@ pub(crate) async fn compile_rule_set(
             RuleSetSource::Downloaded(bytes) => (bytes, false),
             RuleSetSource::Local(path) => (std::fs::read(path).map_err(Failure::from)?, true),
         };
-        let compiled = concord_rules::compile_rule_set(&bytes, allow_empty)
-            .map_err(|err| Failure::new(err.code(), err.to_string()))?;
+        let compiled =
+            concord_rules::compile_rule_set(&bytes, allow_empty).map_err(Failure::RuleSet)?;
         Ok((bytes, compiled))
     })
     .await?
 }
 
 pub(crate) fn read_file(path: &str) -> Result<Vec<u8>, Failure> {
-    std::fs::read(path).map_err(|err| Failure::core(format!("open {path}: {}", io_message(&err))))
-}
-
-fn io_message(err: &io::Error) -> String {
-    match err.kind() {
-        io::ErrorKind::NotFound => "no such file or directory".to_string(),
-        io::ErrorKind::PermissionDenied => "permission denied".to_string(),
-        io::ErrorKind::IsADirectory => "is a directory".to_string(),
-        _ => err.to_string(),
-    }
+    std::fs::read(path).map_err(|source| Failure::Open {
+        path: path.to_string(),
+        source,
+    })
 }
 
 pub async fn validate_config(path: String) -> Result<Option<String>, Failure> {
     on_parse_stack(move || {
         let bytes = match read_file(&path) {
             Ok(bytes) => bytes,
-            Err(failure) => return Some(failure.message),
+            Err(failure) => return Some(failure.to_string()),
         };
         parse_raw(&bytes).err().map(|err| err.to_string())
     })
@@ -83,13 +77,13 @@ pub async fn validate_config(path: String) -> Result<Option<String>, Failure> {
 /// without running anything.
 pub async fn check_config(path: String, android: bool) -> Result<Vec<WarningView>, Failure> {
     on_parse_stack(move || {
-        let raw = parse_raw(&read_file(&path)?).map_err(config_failure)?;
+        let raw = parse_raw(&read_file(&path)?).map_err(Failure::Config)?;
         let options = LoadOptions {
             capabilities: apply::capabilities(),
             android,
             ..LoadOptions::default()
         };
-        let profile = load_raw(raw, &options).map_err(config_failure)?;
+        let profile = load_raw(raw, &options).map_err(Failure::Config)?;
         Ok(crate::views::warning_views(&profile, android))
     })
     .await?
@@ -98,7 +92,7 @@ pub async fn check_config(path: String, android: bool) -> Result<Vec<WarningView
 pub async fn read_config(path: String) -> Result<Value, Failure> {
     on_parse_stack(move || {
         let bytes = read_file(&path)?;
-        let raw = parse_raw(&bytes).map_err(config_failure)?;
+        let raw = parse_raw(&bytes).map_err(Failure::Config)?;
         Ok(raw.to_json())
     })
     .await?
@@ -107,7 +101,7 @@ pub async fn read_config(path: String) -> Result<Value, Failure> {
 /// The mapping a configured node was written with, as `config.yaml` has it now.
 pub(crate) fn configured_proxy(path: &Path, name: &str) -> Result<Option<Map>, Failure> {
     let bytes = std::fs::read(path).map_err(Failure::from)?;
-    let raw = parse_raw(&bytes).map_err(config_failure)?;
+    let raw = parse_raw(&bytes).map_err(Failure::Config)?;
     Ok(raw
         .proxies
         .into_iter()
@@ -117,7 +111,7 @@ pub(crate) fn configured_proxy(path: &Path, name: &str) -> Result<Option<Map>, F
 pub async fn decrypt_config(path: String, key: String) -> Result<String, Failure> {
     on_parse_stack(move || {
         let bytes = read_file(&path)?;
-        let plain = crypt::decrypt_bytes(&bytes, &[key.as_str()]).map_err(config_failure)?;
+        let plain = crypt::decrypt_bytes(&bytes, &[key.as_str()]).map_err(Failure::Config)?;
         Ok(String::from_utf8_lossy(&plain).into_owned())
     })
     .await?
@@ -126,7 +120,7 @@ pub async fn decrypt_config(path: String, key: String) -> Result<String, Failure
 pub async fn profile_base(path: String) -> Result<Value, Failure> {
     on_parse_stack(move || {
         let bytes = read_file(&path)?;
-        let base = concord_config::profile_base(&bytes, None).map_err(config_failure)?;
+        let base = concord_config::profile_base(&bytes, None).map_err(Failure::Config)?;
         serde_json::to_value(base).map_err(|err| Failure::core(err.to_string()))
     })
     .await?
@@ -135,7 +129,7 @@ pub async fn profile_base(path: String) -> Result<Value, Failure> {
 pub async fn profile_outbounds(path: String) -> Result<Value, Failure> {
     on_parse_stack(move || {
         let bytes = read_file(&path)?;
-        let outbounds = concord_config::profile_outbounds(&bytes, None).map_err(config_failure)?;
+        let outbounds = concord_config::profile_outbounds(&bytes, None).map_err(Failure::Config)?;
         serde_json::to_value(outbounds).map_err(|err| Failure::core(err.to_string()))
     })
     .await?
@@ -144,7 +138,7 @@ pub async fn profile_outbounds(path: String) -> Result<Value, Failure> {
 pub async fn merge_profile(path: String, overlay: String) -> Result<String, Failure> {
     on_parse_stack(move || {
         let bytes = read_file(&path)?;
-        concord_config::merge_profile(&bytes, &overlay, None).map_err(config_failure)
+        concord_config::merge_profile(&bytes, &overlay, None).map_err(Failure::Config)
     })
     .await?
 }
@@ -189,7 +183,7 @@ pub fn validate_proxies(proxies: &[Map]) -> Vec<ValidationIssue> {
 pub async fn convert_proxies(path: String) -> Result<Vec<Map>, Failure> {
     on_parse_stack(move || {
         let bytes = read_file(&path)?;
-        share_link::decode_subscription_bytes(&bytes).map_err(config_failure)
+        share_link::decode_subscription_bytes(&bytes).map_err(Failure::Config)
     })
     .await?
 }
@@ -216,10 +210,6 @@ pub fn validate_filters(filters: &[String]) -> Vec<ValidationIssue> {
         }
     }
     issues
-}
-
-fn config_failure(err: concord_config::ConfigError) -> Failure {
-    Failure::core(err.to_string())
 }
 
 #[cfg(test)]
@@ -273,7 +263,7 @@ mod tests {
     fn a_missing_file_reads_like_the_other_core() {
         let failure = read_file("/definitely/not/here").unwrap_err();
         assert_eq!(
-            failure.message,
+            failure.to_string(),
             "open /definitely/not/here: no such file or directory"
         );
     }

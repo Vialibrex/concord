@@ -322,7 +322,6 @@ async fn an_http_error_status_carries_its_code() {
     let rig = Rig::new(HTTP_PROVIDER);
     rig.fetcher.serve_with("http://sub.test/list", 404, &[], "");
     let err = rig.out.provider("p").unwrap().update().await.unwrap_err();
-    assert_eq!(err.status_code(), Some(404));
     assert_eq!(err.to_string(), "404 Not Found");
 }
 

@@ -48,7 +48,7 @@ fn prefixes(texts: &[String]) -> Result<Vec<IpCidr>, Failure> {
         .iter()
         .map(|text| {
             IpCidr::parse(text.trim())
-                .ok_or_else(|| Failure::new("invalid_arguments", format!("invalid prefix: {text}")))
+                .ok_or_else(|| Failure::InvalidArguments(format!("invalid prefix: {text}")))
         })
         .collect()
 }

@@ -45,7 +45,7 @@ pub async fn run(options: Options) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(failure) => {
-            println!("{}", json!({ "error": failure.message }));
+            println!("{}", json!({ "error": failure.to_string() }));
             ExitCode::FAILURE
         }
     }

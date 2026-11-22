@@ -29,7 +29,7 @@ silently:
 
 | Handling | When |
 |---|---|
-| Reject the profile (`config_rejected`), then run the built-in empty config, which routes direct | The profile is wrong: unknown or malformed rules, illegal fields, a reference to something that never existed |
+| Reject the profile (`rejected` with `fellBack`), then run the built-in empty config, which routes direct | The profile is wrong: unknown or malformed rules, illegal fields, a reference to something that never existed |
 | Quarantine the node and warn | The node is valid but unsupported. A group left empty by quarantine, or whose selected node was quarantined, refuses connections rather than falling back |
 | Ignore and warn | The key does not change routing, or the app overrides it |
 

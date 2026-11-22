@@ -73,13 +73,6 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-    pub fn status_code(&self) -> Option<u16> {
-        match self {
-            ProviderError::Status(text) => text.get(..3)?.parse().ok(),
-            _ => None,
-        }
-    }
-
     pub fn status(code: u16) -> Self {
         let reason = http::StatusCode::from_u16(code)
             .ok()

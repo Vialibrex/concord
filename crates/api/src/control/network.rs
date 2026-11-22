@@ -92,13 +92,7 @@ impl Control {
             .dns_query(&params.name, &qtype)
             .await
             .map(convert::dns_query)
-            .map_err(|failure| {
-                if failure.code == "invalid_query" {
-                    ApiError::invalid_field("qtype", failure.message)
-                } else {
-                    core_error(failure)
-                }
-            })
+            .map_err(core_error)
     }
 
     pub(super) async fn dns_watch(

@@ -447,7 +447,7 @@ pub(crate) enum ApplyError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Save(io::Error),
-    #[error("{}", .0.message)]
+    #[error(transparent)]
     Parse(Failure),
     #[error(transparent)]
     Providers(#[from] RuleLoadError),
