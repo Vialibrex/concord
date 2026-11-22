@@ -4,6 +4,7 @@ use super::*;
 pub(crate) struct UdpNat {
     pub(super) flows: DashMap<FlowId, Arc<Flow>>,
     pub(super) slots: DashMap<SessionKey, Arc<OnceCell<Arc<Session>>>>,
+    /// Counts the idle sweep's ticks.
     pub(super) clock: AtomicU32,
     pub(super) scanning: AtomicBool,
 }
@@ -156,7 +157,7 @@ pub(super) fn start_flow(
         forget_round_flow();
         inner.nat.evict_oldest();
     }
-    let mut queue = VecDeque::with_capacity(4);
+    let mut queue = VecDeque::new();
     queue.push_back(Queued::unsent(payload.as_slice()));
     let flow = Arc::new(Flow {
         ready: OnceLock::new(),

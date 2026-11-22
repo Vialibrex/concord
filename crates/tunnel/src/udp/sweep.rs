@@ -1,5 +1,7 @@
 use super::*;
 
+const TICK: Duration = Duration::from_secs(1);
+
 pub(super) fn start_scanner(inner: &Arc<Inner>) {
     if inner.nat.scanning.swap(true, Ordering::AcqRel) {
         return;
@@ -11,7 +13,7 @@ pub(super) fn start_scanner(inner: &Arc<Inner>) {
 /// all while there is no UDP traffic.
 pub(super) async fn scan(inner: Arc<Inner>) {
     let nat = &inner.nat;
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(TICK);
     loop {
         tick.tick().await;
         let now = nat.clock.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
