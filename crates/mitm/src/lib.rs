@@ -16,7 +16,7 @@ mod forward;
 mod headers;
 mod heads;
 mod hooks;
-#[cfg(test)]
+#[cfg(all(test, feature = "script"))]
 mod hooks_tests;
 mod hostlist;
 mod jq;
