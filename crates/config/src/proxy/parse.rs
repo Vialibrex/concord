@@ -746,6 +746,7 @@ fn parse_tuic(f: &mut Fields<'_>, caps: &Capabilities) -> R<TuicOpts> {
     let (server, port) = server_port(f)?;
     let mut tls = tls_without_reality(f, "sni", caps)?;
     tls.enabled = true;
+    f.boolean("reduce-rtt")?;
     let out = TuicOpts {
         server,
         port,
@@ -755,7 +756,6 @@ fn parse_tuic(f: &mut Fields<'_>, caps: &Capabilities) -> R<TuicOpts> {
         ip: f.string("ip")?,
         heartbeat_interval: f.loose("heartbeat-interval", 0)?,
         tls,
-        reduce_rtt: f.boolean("reduce-rtt")?,
         request_timeout: f.loose("request-timeout", 0)?,
         udp_relay_mode: f.string("udp-relay-mode")?,
         congestion_controller: f.string("congestion-controller")?,
@@ -1063,6 +1063,7 @@ fn parse_ssh(f: &mut Fields<'_>) -> R<SshOpts> {
 
 fn parse_shadowquic(f: &mut Fields<'_>) -> R<ShadowQuicOpts> {
     let (server, port) = server_port(f)?;
+    f.ignore_switch("zero-rtt", "this core does not resume JLS sessions");
     Ok(ShadowQuicOpts {
         server,
         port,
@@ -1072,7 +1073,6 @@ fn parse_shadowquic(f: &mut Fields<'_>) -> R<ShadowQuicOpts> {
         alpn: f.strings("alpn")?,
         quic_versions: f.strings("quic-versions")?,
         udp_over_stream: f.boolean("udp-over-stream")?,
-        zero_rtt: f.boolean("zero-rtt")?,
         keep_alive_interval: f.loose("keep-alive-interval", 0)?,
         congestion_controller: f.string("congestion-controller")?,
         up: f.string("up")?,

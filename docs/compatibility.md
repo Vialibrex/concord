@@ -73,6 +73,10 @@ neither the negotiated idle timeout nor a way to change keepalive after connecti
 shorter than twice the keepalive period, an idle connection can close despite keepalive; configure a
 shorter positive keepalive period for that peer. quic-go applies the cap to the negotiated timeout.
 
+ShadowQUIC `zero-rtt` is ignored with a warning: mihomo keeps one TLS session per node and sends 0-RTT data on the
+connections after the first (`adapter/outbound/shadowquic.go:111-115`), but Concord's JLS handshake does not resume
+sessions. TUIC `reduce-rtt` is accepted with no effect, as in mihomo: it dials with `DialEarly`
+(`transport/tuic/common/dial.go:45-46`) but keeps no TLS session to resume, so it never sends 0-RTT data either.
 Hysteria2's initial and maximum receive windows both apply, but quinn keeps one window per stream and per connection
 where quic-go starts at the initial window and grows it up to the maximum: Concord holds the larger of the two from
 the start.
