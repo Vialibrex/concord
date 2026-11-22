@@ -30,7 +30,9 @@ use self::batch::{
 };
 pub(crate) use self::nat::{UdpNat, handle};
 use self::recv::{adopt, receive_loop};
-use self::session::{end_session, enqueue, idle, is_gone, poll_inline, retire, send, session_for};
+use self::session::{
+    end_session, enqueue, idle, is_gone, poll_inline, send, send_failed, session_for,
+};
 use self::sweep::start_scanner;
 use crate::flow::{FlowState, pre_handle};
 use crate::route::{Decision, route};
@@ -193,6 +195,7 @@ mod tests {
     use super::batch::{BATCH, BATCH_DATAGRAMS};
     use super::nat::deliver;
     use super::session::drain_overflow;
+    use super::session::retire;
     use super::*;
     use crate::runtime::Tunnel;
     use crate::table::ConnTable;

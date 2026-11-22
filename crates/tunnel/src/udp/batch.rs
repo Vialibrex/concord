@@ -313,12 +313,9 @@ pub(super) fn send_batch(inner: &Arc<Inner>, session: &Arc<Session>, mut rest: &
             }
             Poll::Ready(Ok(_)) | Poll::Pending => break,
             Poll::Ready(Err(err)) => {
-                if let Some(datagram) = rest.first() {
-                    tracing::debug!("[UDP] send to {} failed: {err}", datagram.dst);
-                }
-                if is_gone(&err) {
-                    session.end(ConnEnd::of_error(&err));
-                    retire(inner, session);
+                if let Some(datagram) = rest.first()
+                    && send_failed(inner, session, datagram.dst, &err)
+                {
                     return;
                 }
                 rest = rest.get(1..).unwrap_or_default();

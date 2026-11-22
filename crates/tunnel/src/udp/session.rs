@@ -193,11 +193,7 @@ pub(super) fn send(
     match poll_inline(|cx| session.inner.poll_send(cx, &mut packet, target)) {
         Poll::Ready(Ok(())) => session.registration.tracked().uploaded(bytes),
         Poll::Ready(Err(err)) => {
-            tracing::debug!("[UDP] send to {target} failed: {err}");
-            if is_gone(&err) {
-                session.end(ConnEnd::of_error(&err));
-                retire(inner, session);
-            }
+            send_failed(inner, session, target, &err);
         }
         Poll::Pending => enqueue(inner, session, [(Queued::Polled(packet), target.clone())]),
     }
@@ -266,15 +262,28 @@ pub(super) async fn drain_overflow(inner: Arc<Inner>, session: Arc<Session>) {
         match send_packet(&*session.inner, &mut packet, &target).await {
             Ok(()) => session.registration.tracked().uploaded(bytes),
             Err(err) => {
-                tracing::debug!("[UDP] send to {target} failed: {err}");
-                if is_gone(&err) {
-                    session.end(ConnEnd::of_error(&err));
-                    retire(&inner, &session);
+                if send_failed(&inner, &session, &target, &err) {
                     return;
                 }
             }
         }
     }
+}
+
+/// Logs a failed send and retires the session when its socket is gone; true when it did.
+pub(super) fn send_failed(
+    inner: &Inner,
+    session: &Session,
+    target: impl std::fmt::Display,
+    err: &io::Error,
+) -> bool {
+    tracing::debug!("[UDP] send to {target} failed: {err}");
+    if !is_gone(err) {
+        return false;
+    }
+    session.end(ConnEnd::of_error(err));
+    retire(inner, session);
+    true
 }
 
 pub(super) fn is_gone(err: &io::Error) -> bool {
