@@ -245,7 +245,7 @@ Upgrade `quinn`, `quinn-proto` and `quinn-udp` together; replay these changes an
 
 - `Cargo.lock`: registry lockfile omitted; the workspace uses its root lockfile.
 
-- `src/async_device/unix/mod.rs`: `AsyncDevice::into_sync` returns the existing owned device after reactor deregistration, preserving its FD, queued packets and VNET/offload state. TUN queue owners use it with `AsyncDevice::new` to register on their runtime; raw-fd adoption rejects VNET descriptors.
+- `src/async_device/unix/mod.rs`: `AsyncDevice::into_sync` returns the existing owned device after reactor deregistration, preserving its FD, queued packets and VNET/offload state. TUN queue owners use it with `AsyncDevice::new` to register on their runtime; raw-fd adoption rejects VNET descriptors. It is compiled only on Linux and Android, where `crates/tun` has queue owners; macOS exports its own `AsyncDevice` wrapper instead.
 
 
 ## h3 0.0.8

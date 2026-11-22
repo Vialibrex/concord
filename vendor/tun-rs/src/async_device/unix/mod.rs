@@ -100,6 +100,7 @@ impl AsyncDevice {
 
     /// Deregisters without changing the native queue or offload configuration.
     // Concord: re-register the owned device without raw-fd adoption resetting VNET state.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     pub fn into_sync(self) -> io::Result<SyncDevice> {
         Ok(SyncDevice(self.into_device()?))
     }
