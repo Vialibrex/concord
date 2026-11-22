@@ -258,7 +258,7 @@ fn transport(opts: &ShadowQuicOpts, controllers: Arc<SwitchFactory>) -> Arc<Tran
     Transport {
         stream_window: or_default(opts.recv_window_conn, STREAM_WINDOW),
         conn_window: or_default(opts.recv_window, CONN_WINDOW),
-        double_send_window: true,
+        peer_bounded_send: true,
         keep_alive: (opts.keep_alive_interval > 0)
             .then(|| Duration::from_millis(u64::from(opts.keep_alive_interval))),
         datagram_frame: datagram_frame(opts),

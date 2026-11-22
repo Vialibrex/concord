@@ -277,7 +277,7 @@ fn transport(opts: &Hysteria2Opts, controllers: Arc<SwitchFactory>) -> Arc<Trans
             opts.max_connection_receive_window,
             DEFAULT_CONN_WINDOW,
         ),
-        double_send_window: true,
+        peer_bounded_send: true,
         keep_alive: Some(KEEP_ALIVE),
         datagram_frame: DATAGRAM_FRAME,
         streams: None,

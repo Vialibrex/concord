@@ -26,8 +26,9 @@ pub fn bbr_window(cwnd: u32) -> u64 {
 pub struct Transport {
     pub stream_window: u64,
     pub conn_window: u64,
-    /// Lets twice the connection window of writes wait for acknowledgement.
-    pub double_send_window: bool,
+    /// Bounds unacknowledged writes by the peer's flow-control credit alone, as quic-go does,
+    /// instead of quinn's own send window.
+    pub peer_bounded_send: bool,
     pub keep_alive: Option<Duration>,
     /// The `max_datagram_frame_size` the connection advertises, which sizes its receive buffer.
     pub datagram_frame: u64,
@@ -48,8 +49,8 @@ impl Transport {
             .stream_receive_window(varint(self.stream_window))
             .receive_window(conn_window)
             .datagram_receive_buffer_size(Some(datagram_buffer(self.datagram_frame)));
-        if self.double_send_window {
-            config.send_window(conn_window.into_inner().saturating_mul(2));
+        if self.peer_bounded_send {
+            config.send_window(u64::MAX);
         }
         if let Some(streams) = self.streams {
             config

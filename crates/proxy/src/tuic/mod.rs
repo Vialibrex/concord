@@ -151,7 +151,7 @@ fn transport(
     Transport {
         stream_window: or_default(opts.recv_window_conn, STREAM_WINDOW),
         conn_window: or_default(opts.recv_window, CONN_WINDOW),
-        double_send_window: false,
+        peer_bounded_send: false,
         keep_alive: Some(heartbeat),
         datagram_frame: u64::try_from(frame).unwrap_or(u64::MAX),
         streams: Some(u64::from(max_open + max_open.div_ceil(10))),

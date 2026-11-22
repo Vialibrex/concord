@@ -233,7 +233,7 @@ fn transport(opts: &HysteriaOpts, controllers: Arc<SwitchFactory>) -> Arc<Transp
     Transport {
         stream_window,
         conn_window,
-        double_send_window: true,
+        peer_bounded_send: true,
         keep_alive: Some(KEEP_ALIVE),
         datagram_frame: DATAGRAM_FRAME,
         streams: None,
