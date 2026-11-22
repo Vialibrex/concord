@@ -242,6 +242,22 @@ pub(crate) struct FailedDial {
     pub decision: Option<Box<Decision>>,
 }
 
+impl FailedDial {
+    pub(crate) fn logged(flow: &FlowState, decision: Decision, error: io::Error) -> Self {
+        tracing::warn!(
+            "[{}] dial {} {} --> {} error: {error}",
+            flow.network_name(),
+            decision.dial_label(),
+            flow.source_detail(),
+            flow.remote_text()
+        );
+        FailedDial {
+            error,
+            decision: Some(Box::new(decision)),
+        }
+    }
+}
+
 impl From<io::Error> for FailedDial {
     fn from(error: io::Error) -> Self {
         FailedDial {
@@ -328,17 +344,7 @@ async fn dial_plain(
             runtime
                 .outbounds
                 .note_dial_failed(&decision.chain, kind, Network::Tcp, &err);
-            tracing::warn!(
-                "[{}] dial {} {} --> {} error: {err}",
-                flow.network_name(),
-                decision.dial_label(),
-                flow.source_detail(),
-                flow.remote_text()
-            );
-            Err(FailedDial {
-                error: err,
-                decision: Some(Box::new(decision)),
-            })
+            Err(FailedDial::logged(flow, decision, err))
         }
     }
 }

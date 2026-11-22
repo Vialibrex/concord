@@ -104,7 +104,21 @@ impl Decision {
                 rule,
                 http_pending: false,
             }),
-            Resolved::Rematch(leaf) => Ok(rematch_decision(target, leaf, rule)),
+            Resolved::Rematch(leaf) => {
+                let info = leaf.info();
+                let provider = info.provider.clone().unwrap_or_else(|| Arc::from(""));
+                let chain: Box<[Arc<str>]> = Box::new([info.name.clone()]);
+                Ok(Decision {
+                    target: target.to_string(),
+                    provider_chain: Box::new([provider]),
+                    leaf,
+                    chain,
+                    exit_group: None,
+                    rule,
+                    http_pending: false,
+                    smart: false,
+                })
+            }
             Resolved::Rejected(reason) => Err(CoreError::Rejected(reason.to_string()).into()),
             Resolved::Pass | Resolved::PassRule | Resolved::Unknown => {
                 Err(CoreError::UnknownNode(target.to_string()).into())
@@ -217,10 +231,7 @@ async fn decide(
     let host_key = flow.host.clone();
     let host_key = host_key.as_deref();
     if let Some(name) = flow.special_proxy.clone() {
-        let resolved = runtime
-            .outbounds
-            .resolve(&name, &flow.meta, host_key, touch);
-        return Decision::of(&runtime.outbounds, &name, resolved, None);
+        return resolve_named(runtime, flow, host_key, touch, &name);
     }
 
     if let Some(host) = host_key
@@ -237,22 +248,23 @@ async fn decide(
     }
 
     match live.mode {
-        TunnelMode::Direct => {
-            let resolved = runtime
-                .outbounds
-                .resolve("DIRECT", &flow.meta, host_key, touch);
-            return Decision::of(&runtime.outbounds, "DIRECT", resolved, None);
-        }
-        TunnelMode::Global => {
-            let resolved = runtime
-                .outbounds
-                .resolve("GLOBAL", &flow.meta, host_key, touch);
-            return Decision::of(&runtime.outbounds, "GLOBAL", resolved, None);
-        }
+        TunnelMode::Direct => return resolve_named(runtime, flow, host_key, touch, "DIRECT"),
+        TunnelMode::Global => return resolve_named(runtime, flow, host_key, touch, "GLOBAL"),
         TunnelMode::Rule => {}
     }
 
     match_rules(flow, runtime, touch, host_key).await
+}
+
+fn resolve_named(
+    runtime: &Runtime,
+    flow: &FlowState,
+    host_key: Option<&str>,
+    touch: Touch,
+    name: &str,
+) -> io::Result<Decision> {
+    let resolved = runtime.outbounds.resolve(name, &flow.meta, host_key, touch);
+    Decision::of(&runtime.outbounds, name, resolved, None)
 }
 
 async fn match_rules(
@@ -275,10 +287,7 @@ async fn match_rules(
         match run.step(&flow.meta, &state, &ctx) {
             Step::Done => {
                 flow.observed = run.take_observed();
-                let resolved = runtime
-                    .outbounds
-                    .resolve("DIRECT", &flow.meta, host_key, touch);
-                return Decision::of(&runtime.outbounds, "DIRECT", resolved, None)
+                return resolve_named(runtime, flow, host_key, touch, "DIRECT")
                     .map(|decision| decision.pending(run.http_pending()));
             }
             Step::NeedIp => {
@@ -307,12 +316,14 @@ async fn match_rules(
                         }
                         flow.observed = run.take_observed();
                         let name = leaf.info().name.clone();
-                        return Ok(rematch_decision(
+                        let matched = matched_rule(&runtime.program, rule);
+                        return Decision::of(
+                            &runtime.outbounds,
                             &name,
-                            leaf,
-                            Some(matched_rule(&runtime.program, rule)),
+                            Resolved::Rematch(leaf),
+                            Some(matched),
                         )
-                        .pending(run.http_pending()));
+                        .map(|decision| decision.pending(run.http_pending()));
                     }
                     Resolved::Unknown | Resolved::Pass => {
                         run.skip();
@@ -357,26 +368,6 @@ fn matched_rule(program: &RouteProgram, rule: RuleRef) -> MatchedRule {
         type_name: Arc::from(info.type_name),
         payload: Arc::from(info.payload),
         index: rule.main_index(),
-    }
-}
-
-fn rematch_decision(target: &str, leaf: Arc<dyn Outbound>, rule: Option<MatchedRule>) -> Decision {
-    let name = leaf.info().name.clone();
-    Decision {
-        target: target.to_string(),
-        provider_chain: vec![
-            leaf.info()
-                .provider
-                .clone()
-                .unwrap_or_else(|| Arc::from("")),
-        ]
-        .into(),
-        leaf,
-        chain: vec![name].into(),
-        exit_group: None,
-        rule,
-        http_pending: false,
-        smart: false,
     }
 }
 

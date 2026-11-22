@@ -208,17 +208,7 @@ pub(crate) async fn dial(
             if quiet {
                 attempt.report_failure(&decision, &err, elapsed, proxied_before);
             }
-            tracing::warn!(
-                "[{}] dial {} {} --> {} error: {err}",
-                flow.network_name(),
-                decision.dial_label(),
-                flow.source_detail(),
-                flow.remote_text()
-            );
-            return Err(FailedDial {
-                error: err,
-                decision: Some(Box::new(decision)),
-            });
+            return Err(FailedDial::logged(flow, decision, err));
         };
         tracing::debug!(
             "[{}] dial {} --> {} error: {err}, retry through {member} (attempt {})",
