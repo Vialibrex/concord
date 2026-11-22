@@ -1,6 +1,8 @@
 mod bench;
 mod commits;
 #[cfg(test)]
+mod default_features;
+#[cfg(test)]
 mod doc_paths;
 mod internal_marks;
 mod interop_peers;
