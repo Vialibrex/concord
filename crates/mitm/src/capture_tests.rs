@@ -16,26 +16,9 @@ use crate::limits::PRESSURE_NO_BODIES;
 use crate::script::testkit::{FakeRuntime, sync_program};
 use crate::script::{ScriptProgram, ScriptResponse, ScriptResult, ScriptRuntime};
 use crate::testing::{
-    Client, Handler, Reply, Rig, Service, TEST_APP, TestServer, Wire, flow, offer_on, rig_for,
-    start_server, start_service,
+    Client, Handler, Reply, Rig, Service, TEST_APP, TestServer, Wire, echo, flow, header_value,
+    offer_on, rig_for, start_server, start_service,
 };
-
-fn echo() -> Handler {
-    Arc::new(|seen| {
-        let added = seen
-            .headers
-            .get("x-added")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or_default();
-        Reply::ok(&format!(
-            "{}|{}|{added}|{}",
-            seen.host,
-            seen.path,
-            String::from_utf8_lossy(&seen.body)
-        ))
-        .with("X-Upstream", "yes")
-    })
-}
 
 fn capture(rig: &Rig, section: serde_json::Value) {
     let errors = rig.config(section);
@@ -59,12 +42,8 @@ async fn settled(rig: &Rig, connection: &str, count: usize) -> Vec<ExchangeSumma
 }
 
 fn header(list: Option<&crate::script::HeaderList>, name: &str) -> String {
-    list.and_then(|list| {
-        list.iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(name))
-            .and_then(|(_, values)| values.first().cloned())
-    })
-    .unwrap_or_default()
+    list.map(|list| header_value(list, name))
+        .unwrap_or_default()
 }
 
 fn action(kind: &'static str, phase: &str, detail: &str) -> Action {

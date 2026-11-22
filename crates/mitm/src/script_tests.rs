@@ -15,27 +15,9 @@ use crate::script::{
 };
 use crate::task::ScriptRunError;
 use crate::testing::{
-    Client, Handler, Reply, Rig, TestServer, eventually, flow, offer_on, rig_for, start_server,
+    Client, Handler, Reply, Rig, TestServer, echo, eventually, flow, header_value, offer_on,
+    rig_for, start_server,
 };
-
-fn echo() -> Handler {
-    Arc::new(|seen| {
-        let text = |name: &str| {
-            seen.headers
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .to_string()
-        };
-        Reply::ok(&format!(
-            "{}|{}|{}|{}",
-            seen.host,
-            seen.path,
-            text("x-added"),
-            String::from_utf8_lossy(&seen.body)
-        ))
-    })
-}
 
 async fn scripted(programs: Vec<(&str, Arc<dyn ScriptProgram>)>) -> (TestServer, Rig) {
     let server = start_server(true, &["http/1.1", "h2"], echo()).await;
@@ -486,14 +468,6 @@ async fn only_the_expected_ca_decrypts_and_a_renewed_one_ends_sessions() {
         client.send(request).await.is_err(),
         "the renewed CA closes what the old one decrypted"
     );
-}
-
-fn header_value(header: &crate::script::HeaderList, name: &str) -> String {
-    header
-        .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(name))
-        .and_then(|(_, values)| values.first().cloned())
-        .unwrap_or_default()
 }
 
 #[tokio::test]

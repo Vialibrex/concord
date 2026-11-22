@@ -10,30 +10,16 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::testing::{
-    Client, Handler, Reply, Rig, Service, Wire, eventually, flow, flow_of, full_body, offer_on,
-    rig_for, start_server, start_service,
+    Client, Handler, Reply, Rig, Service, Wire, echo, eventually, flow, flow_of, full_body,
+    offer_on, rig_for, start_server, start_service,
 };
 
-fn echo() -> Handler {
-    Arc::new(|seen| {
-        let text = |name: &str| {
-            seen.headers
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .to_string()
-        };
-        let reply = match seen.path.as_str() {
-            "/api" => Reply::ok(r#"{"ad":true,"items":[]}"#),
-            _ => Reply::ok(&format!(
-                "{}|{}|{}|{}",
-                seen.host,
-                seen.path,
-                text("x-added"),
-                String::from_utf8_lossy(&seen.body)
-            )),
-        };
-        reply.with("X-Upstream", "yes")
+/// `echo`, except `/api` answers a JSON document for the body rewrites to edit.
+fn api_or_echo() -> Handler {
+    let echo = echo();
+    Arc::new(move |seen| match seen.path.as_str() {
+        "/api" => Reply::ok(r#"{"ad":true,"items":[]}"#).with("X-Upstream", "yes"),
+        _ => echo(seen),
     })
 }
 
@@ -45,7 +31,7 @@ async fn rig(handler: Handler, tls: bool, alpn: &[&str]) -> (crate::testing::Tes
 
 #[tokio::test]
 async fn rewrites_decrypted_requests() {
-    let (server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     let errors = rig.config(json!({
         "enable": true,
         "hostname": ["example.test"],
@@ -112,7 +98,7 @@ async fn rewrites_decrypted_requests() {
 
 #[tokio::test]
 async fn rewrites_json_bodies_with_jq() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     let errors = rig.config(json!({
         "enable": true,
         "hostname": ["example.test"],
@@ -156,7 +142,7 @@ async fn url_and_header_rejects_by_the_request_head() {
             r"^https?://example\.test/d \r\nHost:\sexample\.test\r\n url-and-header reject-array",
         ],
     });
-    let (_plain, plain) = rig(echo(), false, &[]).await;
+    let (_plain, plain) = rig(api_or_echo(), false, &[]).await;
     assert!(plain.config(config.clone()).is_empty());
     let mut client = Client::plain(&plain, "example.test", 80).await;
     let request = client.request("GET", "/d", &[("User-Agent", "httpdns/2.1")], "");
@@ -170,7 +156,7 @@ async fn url_and_header_rejects_by_the_request_head() {
         "matching is case-sensitive, so only the Host line matches"
     );
 
-    let (_tls, tls) = rig(echo(), true, &["h2"]).await;
+    let (_tls, tls) = rig(api_or_echo(), true, &["h2"]).await;
     assert!(tls.config(config).is_empty());
     let mut client = Client::tls(&tls, "example.test", 443, &["h2"])
         .await
@@ -244,7 +230,7 @@ async fn rewrites_follow_the_status_and_both_heads() {
 
 #[tokio::test]
 async fn a_whole_head_rewrite_changes_the_head_but_not_the_host() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     let errors = rig.config(json!({
         "enable": true,
         "hostname": ["example.test"],
@@ -303,7 +289,7 @@ async fn a_whole_head_rewrite_changes_the_head_but_not_the_host() {
 
 #[tokio::test]
 async fn map_local_and_request_body_mocks_read_the_request_head() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     let errors = rig.config(json!({
         "enable": true,
         "hostname": ["example.test"],
@@ -346,7 +332,7 @@ async fn map_local_and_request_body_mocks_read_the_request_head() {
 
 #[tokio::test]
 async fn a_map_local_file_larger_than_a_piece_is_read_from_disk_at_each_answer() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     let resources = rig.resources();
     std::fs::create_dir_all(&resources).unwrap();
     let large: Vec<u8> = (0..crate::rules::LOCAL_PIECE * 3 + 7)
@@ -386,7 +372,7 @@ async fn a_map_local_file_larger_than_a_piece_is_read_from_disk_at_each_answer()
 async fn skips_verifying_only_the_hosts_listed_for_it() {
     let wire = hello("example.test", &["http/1.1"]);
     for (listed, decrypted) in [("example.test", true), ("other.test", false)] {
-        let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+        let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
         let errors = rig.config(json!({
             "enable": true,
             "hostname": ["example.test", "other.test"],
@@ -410,7 +396,7 @@ async fn skips_verifying_only_the_hosts_listed_for_it() {
 
 #[tokio::test]
 async fn a_pinned_ca_decrypts_only_while_the_host_finds_it_trusted() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     let fingerprint = rig
         .mitm
         .authority()
@@ -440,7 +426,7 @@ async fn a_pinned_ca_decrypts_only_while_the_host_finds_it_trusted() {
 
 #[tokio::test]
 async fn decrypts_only_for_the_clients_listed() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(json!({
         "enable": true,
         "hostname": ["example.test"],
@@ -459,7 +445,7 @@ async fn decrypts_only_for_the_clients_listed() {
 
 #[tokio::test]
 async fn dials_the_host_a_rewrite_moves_to() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(json!({
         "enable": true,
         "hostname": ["example.test"],
@@ -508,7 +494,7 @@ async fn decodes_a_gzip_body_it_rewrites() {
 
 #[tokio::test]
 async fn relays_a_websocket() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(
         json!({"enable": true, "hostname": ["example.test"], "skip-server-cert-verify": true}),
     );
@@ -539,7 +525,7 @@ async fn relays_a_websocket() {
 
 #[tokio::test]
 async fn serves_plain_http() {
-    let (_server, rig) = rig(echo(), false, &[]).await;
+    let (_server, rig) = rig(api_or_echo(), false, &[]).await;
     rig.config(json!({
         "enable": true,
         "hostname": ["example.test"],
@@ -647,7 +633,7 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
 
 #[tokio::test]
 async fn leaves_what_it_cannot_decrypt() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(
         json!({"enable": true, "hostname": ["example.test"], "skip-server-cert-verify": true}),
     );
@@ -670,7 +656,7 @@ async fn leaves_what_it_cannot_decrypt() {
 
 #[tokio::test]
 async fn leaves_a_connection_its_server_fails() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(
         json!({"enable": true, "hostname": ["example.test"], "skip-server-cert-verify": true}),
     );
@@ -679,7 +665,7 @@ async fn leaves_a_connection_its_server_fails() {
     assert_eq!(declined(&rig, flow("example.test", 443), &wire).await, wire);
     assert_eq!(rig.dialer.marks().len(), 0);
 
-    let (server, rig) = self::rig(echo(), true, &["http/1.1"]).await;
+    let (server, rig) = self::rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(json!({"enable": true, "hostname": ["example.test"]}));
     let wire = hello("example.test", &["http/1.1"]);
     assert_eq!(
@@ -692,7 +678,7 @@ async fn leaves_a_connection_its_server_fails() {
 
 #[tokio::test]
 async fn reads_the_server_name_when_only_the_address_is_known() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(
         json!({"enable": true, "hostname": ["example.test"], "skip-server-cert-verify": true}),
     );
@@ -727,7 +713,7 @@ async fn reads_the_server_name_when_only_the_address_is_known() {
 
 #[tokio::test]
 async fn marks_and_keeps_what_decrypting_a_client_refused() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(
         json!({"enable": true, "hostname": ["example.test"], "skip-server-cert-verify": true}),
     );
@@ -766,7 +752,7 @@ async fn marks_and_keeps_what_decrypting_a_client_refused() {
 
 #[tokio::test]
 async fn leaves_the_cores_own_connections_alone() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(
         json!({"enable": true, "hostname": ["example.test"], "skip-server-cert-verify": true}),
     );
@@ -777,7 +763,7 @@ async fn leaves_the_cores_own_connections_alone() {
 
 #[tokio::test]
 async fn leaves_the_hosts_own_connections_alone() {
-    let server = start_server(false, &[], echo()).await;
+    let server = start_server(false, &[], api_or_echo()).await;
     let rig = rig_for(&server, None);
     rig.config(json!({
         "enable": true,
@@ -801,7 +787,7 @@ async fn leaves_the_hosts_own_connections_alone() {
 
 #[tokio::test]
 async fn drops_quic_to_listed_hosts() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(json!({"enable": true, "hostname": ["example.test"]}));
     let interceptor = rig.mitm.interceptor();
     assert!(interceptor.drop_quic(&flow("example.test", 443)));
@@ -819,7 +805,7 @@ async fn drops_quic_to_listed_hosts() {
 
 #[tokio::test]
 async fn offers_http2_to_clients_only_when_asked_and_reaches_servers_over_it() {
-    let (server, rig) = rig(echo(), true, &["h2", "http/1.1"]).await;
+    let (server, rig) = rig(api_or_echo(), true, &["h2", "http/1.1"]).await;
     rig.config(json!({
         "enable": true,
         "hostname": ["example.test"],
@@ -892,7 +878,7 @@ async fn grpc_bodies_are_left_untouched() {
 
 #[tokio::test]
 async fn a_connection_dropped_before_decrypting_lists_as_plain() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(
         json!({"enable": true, "hostname": ["example.test"], "skip-server-cert-verify": true}),
     );
@@ -908,7 +894,7 @@ async fn a_connection_dropped_before_decrypting_lists_as_plain() {
 
 #[tokio::test]
 async fn widens_a_bare_entry_to_a_port_it_sniffed_a_name_on() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(json!({"enable": true, "hostname": ["example.test", "-skip.test"]}));
     let engine = rig.mitm.engine().unwrap();
     let mut sniffed = flow_of(InboundKind::Tun, Address::new("203.0.113.7", 8443));
@@ -936,7 +922,7 @@ async fn rewrites_plain_http_without_decrypting_tls() {
         }
         config
     };
-    let server = start_server(false, &[], echo()).await;
+    let server = start_server(false, &[], api_or_echo()).await;
     let without_ca = crate::testing::rig_without_ca(&server, None);
     without_ca.config(config(true));
     let decrypt_off = rig_for(&server, None);
@@ -958,7 +944,7 @@ async fn rewrites_plain_http_without_decrypting_tls() {
 
 #[tokio::test]
 async fn reads_plain_http_to_any_host_while_a_rule_acts_on_requests() {
-    let server = start_server(false, &[], echo()).await;
+    let server = start_server(false, &[], api_or_echo()).await;
     let rig = rig_for(&server, None);
     rig.config(json!({"enable": true, "hostname": ["listed.test"]}));
     let engine = rig.mitm.engine().unwrap();
@@ -984,7 +970,7 @@ async fn reads_plain_http_to_any_host_while_a_rule_acts_on_requests() {
 
 #[tokio::test]
 async fn plain_http_leaves_an_excluded_host_alone() {
-    let server = start_server(false, &[], echo()).await;
+    let server = start_server(false, &[], api_or_echo()).await;
     let rig = rig_for(&server, None);
     rig.config(json!({
         "enable": true,
@@ -1000,7 +986,7 @@ async fn plain_http_leaves_an_excluded_host_alone() {
 
 #[tokio::test]
 async fn plain_http_to_an_unlisted_host_is_not_peeked_without_a_rule() {
-    let server = start_server(false, &[], echo()).await;
+    let server = start_server(false, &[], api_or_echo()).await;
     let rig = rig_for(&server, None);
     rig.config(json!({"enable": true, "hostname": ["listed.test"]}));
     tokio::time::pause();
@@ -1022,7 +1008,7 @@ async fn plain_http_to_an_unlisted_host_is_not_peeked_without_a_rule() {
 
 #[tokio::test]
 async fn the_certificate_cache_follows_the_limit() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(
         json!({"enable": true, "hostname": ["example.test"], "limits": {"certificate-cache": 2}}),
     );
@@ -1035,7 +1021,7 @@ async fn the_certificate_cache_follows_the_limit() {
 
 #[tokio::test]
 async fn a_full_body_buffer_passes_bodies_on() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(json!({
         "enable": true,
         "hostname": ["example.test"],
@@ -1352,7 +1338,7 @@ async fn plain_http_cost() {
         ticks * 10_000
     }
     let rounds: usize = std::env::var("MM_ROUNDS").map_or(5000, |n| n.parse().unwrap());
-    let server = start_server(false, &[], echo()).await;
+    let server = start_server(false, &[], api_or_echo()).await;
     let plain = rig_for(&server, None);
     plain.config(json!({"enable": true, "hostname": ["listed.test"]}));
     let ruled = rig_for(&server, None);
@@ -1446,7 +1432,7 @@ async fn head_rewrite_cost() {
         ticks * 10_000
     }
     let rounds: usize = std::env::var("MM_ROUNDS").map_or(5000, |n| n.parse().unwrap());
-    let server = start_server(false, &[], echo()).await;
+    let server = start_server(false, &[], api_or_echo()).await;
     let arms = [
         (
             "plain",
@@ -1534,7 +1520,7 @@ async fn keep_alive_origin() -> (std::net::SocketAddr, Arc<std::sync::atomic::At
 
 #[tokio::test]
 async fn the_upstream_of_a_session_still_open_closes_when_the_engine_stops() {
-    let (_server, rig) = rig(echo(), false, &[]).await;
+    let (_server, rig) = rig(api_or_echo(), false, &[]).await;
     let tracker = tokio_util::task::TaskTracker::new();
     let stop = tokio_util::sync::CancellationToken::new();
     rig.config_on(
@@ -1615,7 +1601,7 @@ async fn an_h2_stream_held_on_its_upstream_ends_when_the_client_leaves() {
 
 #[tokio::test]
 async fn a_relay_ends_when_its_ca_is_retired() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     let tracker = tokio_util::task::TaskTracker::new();
     rig.config_on(
         json!({"enable": true, "hostname": ["example.test"], "skip-server-cert-verify": true}),
@@ -1653,7 +1639,7 @@ async fn a_relay_ends_when_its_ca_is_retired() {
 
 #[tokio::test]
 async fn a_finished_session_ends_the_tasks_that_still_hold_it() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     let tracker = tokio_util::task::TaskTracker::new();
     rig.config_on(
         json!({"enable": true, "hostname": ["example.test"]}),
@@ -1722,7 +1708,7 @@ fn held_origin() -> (Service, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>
 
 #[tokio::test]
 async fn a_replaced_engine_closes_its_idle_sessions_and_is_dropped() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(section("a"));
     let old = Arc::downgrade(&rig.mitm.engine().unwrap().core);
     let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
@@ -1737,7 +1723,7 @@ async fn a_replaced_engine_closes_its_idle_sessions_and_is_dropped() {
 
 #[tokio::test]
 async fn an_apply_of_the_same_section_leaves_the_sessions_open() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(section("a"));
     let old = Arc::downgrade(&rig.mitm.engine().unwrap().core);
     let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
@@ -1754,7 +1740,7 @@ async fn an_apply_of_the_same_section_leaves_the_sessions_open() {
 
 #[tokio::test]
 async fn turning_mitm_off_closes_the_idle_sessions() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(section("a"));
     let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
         .await
@@ -1833,7 +1819,7 @@ async fn an_h2_client_of_a_replaced_engine_gets_goaway_and_its_open_stream_finis
 
 #[tokio::test]
 async fn a_websocket_keeps_its_replaced_engine_until_it_closes() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(section("a"));
     let old = Arc::downgrade(&rig.mitm.engine().unwrap().core);
     let (near, _offer) = offer_on(rig.mitm.interceptor(), flow("example.test", 443));
@@ -1864,7 +1850,7 @@ async fn a_websocket_keeps_its_replaced_engine_until_it_closes() {
 
 #[tokio::test]
 async fn an_address_token_leaves_a_connection_with_no_name_but_its_address() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     rig.config(
         json!({"enable": true, "hostname": ["-<ip-address>, *"], "skip-server-cert-verify": true}),
     );
@@ -1880,7 +1866,7 @@ async fn an_address_token_leaves_a_connection_with_no_name_but_its_address() {
 
 #[tokio::test]
 async fn a_disabled_hostname_is_taken_out_of_the_list_as_written() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     let errors = rig.config(json!({
         "enable": true,
         "hostname": ["a.test, b.test, *.c.test"],
@@ -1898,7 +1884,7 @@ async fn a_disabled_hostname_is_taken_out_of_the_list_as_written() {
 
 #[tokio::test]
 async fn header_rewrite_comes_before_the_url_rewrite_as_in_surge() {
-    let (_server, rig) = rig(echo(), true, &["http/1.1"]).await;
+    let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
     let errors = rig.config(json!({
         "enable": true,
         "hostname": ["example.test"],

@@ -75,6 +75,32 @@ impl Reply {
 
 pub(crate) type Handler = Arc<dyn Fn(&Seen) -> Reply + Send + Sync>;
 
+/// Answers `host|path|x-added|body` of what it was sent, marked `X-Upstream: yes`.
+pub(crate) fn echo() -> Handler {
+    Arc::new(|seen| {
+        let added = seen
+            .headers
+            .get("x-added")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        Reply::ok(&format!(
+            "{}|{}|{added}|{}",
+            seen.host,
+            seen.path,
+            String::from_utf8_lossy(&seen.body)
+        ))
+        .with("X-Upstream", "yes")
+    })
+}
+
+/// The first value of `name` in `list`, compared without case; empty when absent.
+pub(crate) fn header_value(list: &crate::script::HeaderList, name: &str) -> String {
+    list.iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .and_then(|(_, values)| values.first().cloned())
+        .unwrap_or_default()
+}
+
 pub(crate) struct TestServer {
     pub addr: SocketAddr,
     pub seen: Arc<Mutex<Vec<Seen>>>,
