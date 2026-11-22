@@ -5,6 +5,7 @@ use http::Request;
 use http_body_util::Full;
 use serde_json::json;
 
+use crate::capture::AnsweredBy;
 use crate::testing::{Client, Handler, Reply, Rig, flow, rig_for, start_server};
 
 fn named(name: &'static str) -> Handler {
@@ -132,6 +133,7 @@ async fn a_request_rejected_by_a_variant_gets_its_reply() {
     rig.dialer.route_url("/200", "REJECT-200", None);
     rig.dialer.route_url("/plain", "REJECT", None);
     rig.dialer.route_url("/drop", "REJECT-DROP", None);
+    rig.mitm.set_capture(true);
     let mut client = Client::tls(&rig, "ads.test", 443, &["http/1.1"])
         .await
         .unwrap();
@@ -157,6 +159,13 @@ async fn a_request_rejected_by_a_variant_gets_its_reply() {
         client.send(request).await.is_err(),
         "REJECT-DROP answers nothing"
     );
+    let ids = lock(&rig.dialer.closed_ids).clone();
+    let answers: Vec<_> = ids
+        .iter()
+        .flat_map(|id| rig.mitm.exchanges(id).exchanges)
+        .map(|exchange| (exchange.answer, exchange.action_kinds))
+        .collect();
+    assert_eq!(answers, vec![(Some(AnsweredBy::Reject), vec![]); 6]);
 }
 
 #[tokio::test]

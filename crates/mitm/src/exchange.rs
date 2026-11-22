@@ -13,7 +13,7 @@ use rand::RngCore;
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::body::{Body, Tap, empty, file_body, from_incoming, full};
-use crate::capture::Cap;
+use crate::capture::{AnsweredBy, Cap};
 use crate::forward::request_text;
 use crate::headers::{remove_hop_by_hop, text, to_list, version_text, with_host};
 use crate::heads::Heads;
@@ -21,10 +21,6 @@ use crate::rules::{LocalBody, UrlAction, tiny_gif};
 use crate::session::{ActivityGuard, Routed, Session};
 use crate::target::{TargetUrl, default_port};
 
-pub(crate) const ANSWER_REJECT: &str = "REJECT";
-pub(crate) const ANSWER_REDIRECT: &str = "REDIRECT";
-pub(crate) const ANSWER_MAP_LOCAL: &str = "MAP-LOCAL";
-pub(crate) const ANSWER_SCRIPT: &str = "SCRIPT";
 pub(crate) const RULE_URL_REWRITE: &str = "URL-REWRITE";
 pub(crate) const RULE_MAP_LOCAL: &str = "MAP-LOCAL";
 pub(crate) const RULE_SCRIPT: &str = "SCRIPT";
@@ -273,12 +269,18 @@ impl Session {
 
     /// Lists a request that went out on no connection, as one closed at once, under the
     /// rule that answered it.
-    pub(crate) fn answered(&self, target: &Target, chain: &str, rule: &str, payload: &str) {
+    pub(crate) fn answered(&self, target: &Target, answer: AnsweredBy, rule: &str, payload: &str) {
         if !target.cap.is_some() {
             return;
         }
+        target.cap.answered(answer);
         let flow = self.upstream_flow(&target.url.host, target.url.port);
-        let chain = [Arc::<str>::from(chain)];
+        let chain = [Arc::<str>::from(match answer {
+            AnsweredBy::Reject => "REJECT",
+            AnsweredBy::Redirect => "REDIRECT",
+            AnsweredBy::MapLocal => "MAP-LOCAL",
+            AnsweredBy::Script => "SCRIPT",
+        })];
         let rule = RuleLabel {
             name: rule.into(),
             payload: payload.into(),
@@ -346,6 +348,7 @@ impl Session {
                 http,
             }));
         };
+        target.cap.answered(AnsweredBy::Reject);
         target.cap.routed(&route.chain, route.rule.as_ref());
         if let Some(id) = dialer.record_closed(&flow, &route.chain, route.rule.as_ref()) {
             target.cap.attach(Some(&id));
@@ -426,7 +429,12 @@ impl Session {
                         rule.action.name(),
                         rule.module.as_deref(),
                     );
-                    self.answered(target, ANSWER_REDIRECT, RULE_URL_REWRITE, rule.source());
+                    self.answered(
+                        target,
+                        AnsweredBy::Redirect,
+                        RULE_URL_REWRITE,
+                        rule.source(),
+                    );
                     tracing::info!(
                         "[MITM] {} {} --> {replaced}",
                         rule.action.name(),
@@ -464,7 +472,7 @@ impl Session {
                     target
                         .cap
                         .note("url-rewrite", "", action.name(), rule.module.as_deref());
-                    self.answered(target, ANSWER_REJECT, RULE_URL_REWRITE, rule.source());
+                    self.answered(target, AnsweredBy::Reject, RULE_URL_REWRITE, rule.source());
                     tracing::info!("[MITM] {} {}", action.name(), target.url.raw);
                     let (status, content_type, data) = reject_response(action);
                     let mut headers = HeaderMap::new();
@@ -477,7 +485,7 @@ impl Session {
         }
         let rule = rules.map_local(&target.url.raw, heads)?;
         target.cap.note("map-local", "", "", rule.module.as_deref());
-        self.answered(target, ANSWER_MAP_LOCAL, RULE_MAP_LOCAL, rule.source());
+        self.answered(target, AnsweredBy::MapLocal, RULE_MAP_LOCAL, rule.source());
         tracing::info!("[MITM] map local {}", target.url.raw);
         Some((rule.status, rule.header.clone(), rule.body.clone()))
     }

@@ -6927,6 +6927,24 @@
           "type": "boolean",
           "description": "A rewrite, a local map or a script acted on it."
         },
+        "action-kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The kinds of the actions `mitm.exchange` lists, each once, in the order they first\nacted."
+        },
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MitmAnswer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What answered it in place of its server; absent when the request went to the server."
+        },
         "connection-id": {
           "type": [
             "integer",
@@ -6962,6 +6980,31 @@
         "kind"
       ],
       "description": "One exchange as `mitm.query` and `mitm.exchanges` list it."
+    },
+    "MitmAnswer": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "map-local"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "reject",
+          "description": "The rules rejected it, a `REJECT` policy or a `url-rewrite` reject line; a\n`REJECT-DROP` answers nothing."
+        },
+        {
+          "type": "string",
+          "const": "redirect",
+          "description": "A `url-rewrite` 302 or 307 line."
+        },
+        {
+          "type": "string",
+          "const": "script",
+          "description": "A request script answered or aborted it."
+        }
+      ]
     },
     "MitmApp": {
       "type": "object",

@@ -61,6 +61,12 @@ pub struct ExchangeSummary {
     /// A rewrite, a local map or a script acted on it.
     #[serde(skip_serializing_if = "is_false")]
     pub rewritten: bool,
+    /// The kinds of its `actions`, each once, in the order they first acted.
+    #[serde(rename = "action-kinds", skip_serializing_if = "Vec::is_empty")]
+    pub action_kinds: Vec<&'static str>,
+    /// What stood in for the server; none when the request went to it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<AnsweredBy>,
     /// The connection it went out on, as `connection.watch` numbers it.
     #[serde(rename = "connection-id", skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<u64>,
@@ -100,9 +106,19 @@ pub struct RouteNote {
     pub chains: Vec<String>,
 }
 
+/// What answered a request in place of its server; a request script that aborts it counts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AnsweredBy {
+    Reject,
+    Redirect,
+    MapLocal,
+    Script,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Action {
-    pub kind: String,
+    pub kind: &'static str,
     #[serde(skip_serializing_if = "is_empty")]
     pub phase: String,
     #[serde(skip_serializing_if = "is_empty")]
@@ -368,6 +384,8 @@ impl CaptureStore {
                 status_class: StatusClass::Pending.name(),
                 kind: ContentKind::Other.name(),
                 rewritten: false,
+                action_kinds: Vec::new(),
+                answer: None,
                 connection_id: None,
                 app: None,
             },
@@ -487,7 +505,7 @@ impl Exchange {
         let actions: usize = self
             .actions
             .iter()
-            .map(|action| action.kind.len() + action.phase.len() + action.detail.len())
+            .map(|action| action.phase.len() + action.detail.len())
             .sum();
         let route = self.route.as_ref().map_or(0, |route| {
             route.rule.len()
@@ -613,11 +631,11 @@ impl Cap {
         self.capture.is_some()
     }
 
-    pub fn note(&self, kind: &str, phase: &str, detail: &str, module: Option<&str>) {
+    pub fn note(&self, kind: &'static str, phase: &str, detail: &str, module: Option<&str>) {
         if let Some(c) = &self.capture {
             c.update(|e| {
                 e.actions.push(Action {
-                    kind: kind.to_string(),
+                    kind,
                     phase: phase.to_string(),
                     detail: detail.to_string(),
                     module: module.unwrap_or_default().to_string(),
@@ -627,13 +645,19 @@ impl Cap {
     }
 
     /// One action for each module among those whose lines acted, the profile's own as one.
-    pub fn note_each(&self, kind: &str, phase: &str, modules: &[Option<Arc<str>>]) {
+    pub fn note_each(&self, kind: &'static str, phase: &str, modules: &[Option<Arc<str>>]) {
         let mut seen: Vec<Option<&str>> = Vec::new();
         for module in modules.iter().map(Option::as_deref) {
             if !seen.contains(&module) {
                 seen.push(module);
                 self.note(kind, phase, "", module);
             }
+        }
+    }
+
+    pub fn answered(&self, answer: AnsweredBy) {
+        if let Some(c) = &self.capture {
+            c.update(|e| e.summary.answer = Some(answer));
         }
     }
 
@@ -927,7 +951,10 @@ mod tests {
             200,
             HeaderList::from([("Content-Length".to_string(), vec!["3".to_string()])]),
         );
+        cap.note("header-rewrite", PHASE_REQUEST, "", None);
         cap.note("script", PHASE_RESPONSE, "Sample", Some("Sample note"));
+        cap.note("header-rewrite", PHASE_REQUEST, "", Some("Sample note"));
+        cap.answered(AnsweredBy::MapLocal);
         let json = serde_json::to_value(store.find(cap.id().unwrap()).unwrap()).unwrap();
         for key in [
             "id",
@@ -948,6 +975,11 @@ mod tests {
             assert!(json.get(key).is_some(), "{key} in {json}");
         }
         assert!(json.get("error").is_none() && json.get("connection").is_none());
-        assert_eq!(json["actions"][0]["kind"], "script");
+        assert_eq!(json["actions"][1]["kind"], "script");
+        assert_eq!(
+            json["action-kinds"],
+            serde_json::json!(["header-rewrite", "script"])
+        );
+        assert_eq!(json["answer"], "map-local");
     }
 }

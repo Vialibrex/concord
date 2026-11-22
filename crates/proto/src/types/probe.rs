@@ -303,11 +303,31 @@ pub struct MitmExchangeSummary {
     /// A rewrite, a local map or a script acted on it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub rewritten: bool,
+    /// The kinds of the actions `mitm.exchange` lists, each once, in the order they first
+    /// acted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub action_kinds: Vec<String>,
+    /// What answered it in place of its server; absent when the request went to the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<MitmAnswer>,
     /// The connection it went out on, as `connection.watch` numbers it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<MitmApp>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum MitmAnswer {
+    /// The rules rejected it, a `REJECT` policy or a `url-rewrite` reject line; a
+    /// `REJECT-DROP` answers nothing.
+    Reject,
+    /// A `url-rewrite` 302 or 307 line.
+    Redirect,
+    MapLocal,
+    /// A request script answered or aborted it.
+    Script,
 }
 
 /// The process behind the connection an exchange went out on, kept after it closed.

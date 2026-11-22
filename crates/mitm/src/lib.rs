@@ -44,8 +44,8 @@ mod view_tests;
 
 pub use ca::{Authority, Ca, CaError, CertificateInfo};
 pub use capture::{
-    Action, App, Body, Exchange, ExchangeList, ExchangeSummary, Facets, QueryAnswer, RateBucket,
-    RouteNote,
+    Action, AnsweredBy, App, Body, Exchange, ExchangeList, ExchangeSummary, Facets, QueryAnswer,
+    RateBucket, RouteNote,
 };
 pub use concord_config::mitm::{IssueKind, LineError};
 pub use config::{Config, Issue, LineEntry, RawConfig, Validation};

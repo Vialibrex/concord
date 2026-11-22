@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use concord_config::mitm::MitmDef;
 
-use crate::capture::{Action, ExchangeSummary};
+use crate::capture::{Action, AnsweredBy, ExchangeSummary};
 use crate::limits::PRESSURE_NO_BODIES;
 use crate::script::testkit::{FakeRuntime, sync_program};
 use crate::script::{ScriptProgram, ScriptResponse, ScriptResult, ScriptRuntime};
@@ -67,9 +67,9 @@ fn header(list: Option<&crate::script::HeaderList>, name: &str) -> String {
     .unwrap_or_default()
 }
 
-fn action(kind: &str, phase: &str, detail: &str) -> Action {
+fn action(kind: &'static str, phase: &str, detail: &str) -> Action {
     Action {
-        kind: kind.into(),
+        kind,
         phase: phase.into(),
         detail: detail.into(),
         module: String::new(),
@@ -275,13 +275,13 @@ async fn a_request_answered_in_place_is_listed_as_a_connection() {
         }),
     );
     let want = [
-        ("/ad", "REJECT"),
-        ("/moved", "REDIRECT"),
-        ("/local", "MAP-LOCAL"),
-        ("/answer", "SCRIPT"),
-        ("/abort", "SCRIPT"),
+        ("/ad", "REJECT", AnsweredBy::Reject, "url-rewrite"),
+        ("/moved", "REDIRECT", AnsweredBy::Redirect, "url-rewrite"),
+        ("/local", "MAP-LOCAL", AnsweredBy::MapLocal, "map-local"),
+        ("/answer", "SCRIPT", AnsweredBy::Script, "script"),
+        ("/abort", "SCRIPT", AnsweredBy::Script, "script"),
     ];
-    for (path, _) in want {
+    for (path, ..) in want {
         let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
             .await
             .unwrap();
@@ -296,10 +296,15 @@ async fn a_request_answered_in_place_is_listed_as_a_connection() {
         let list = rig.mitm.exchanges(id).exchanges;
         assert_eq!(list.len(), 1, "{id} holds {list:?}");
         let path = list[0].url.trim_start_matches("https://example.test");
-        let expected = want.iter().find(|(p, _)| *p == path).unwrap().1;
+        let (_, expected, answer, kind) = want.iter().find(|(p, ..)| *p == path).unwrap();
         assert_eq!(
             (host.as_str(), chain.as_slice()),
             ("example.test", &[expected.to_string()][..]),
+            "{path}"
+        );
+        assert_eq!(
+            (list[0].answer, list[0].action_kinds.as_slice()),
+            (Some(*answer), &[*kind][..]),
             "{path}"
         );
     }
@@ -713,7 +718,7 @@ async fn each_action_names_the_module_whose_line_it_was() {
 
     let exchanges = settled(&rig, "conn-1", 1).await;
     let actions = rig.mitm.exchange(exchanges[0].id).unwrap().actions;
-    let from = |kind: &str, phase: &str, detail: &str, module: &str| Action {
+    let from = |kind: &'static str, phase: &str, detail: &str, module: &str| Action {
         module: module.into(),
         ..action(kind, phase, detail)
     };

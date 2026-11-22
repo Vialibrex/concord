@@ -303,6 +303,11 @@ impl Capture {
         summary.status_class = view.status().name();
         summary.kind = view.kind().name();
         summary.rewritten = view.exchange.rewritten();
+        for action in &view.exchange.actions {
+            if !summary.action_kinds.contains(&action.kind) {
+                summary.action_kinds.push(action.kind);
+            }
+        }
         summary.connection_id = view.conn.map(|conn| conn.seq);
         summary.app = view
             .conn
