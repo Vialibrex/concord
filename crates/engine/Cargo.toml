@@ -13,7 +13,7 @@ doctest = false
 
 [features]
 default = ["mitm"]
-# Without it the MITM methods answer `unsupported_capability` and a `mitm` section is ignored.
+# Without it a `mitm` section is ignored. `concord-api` turns it on for the MITM methods.
 mitm = ["dep:concord-mitm"]
 
 [dependencies]

@@ -6,17 +6,6 @@ use concord_proto::types::*;
 use super::{Control, core_error};
 
 impl Control {
-    fn mitm_enabled(&self) -> Result<(), ApiError> {
-        if self.engine.capabilities().features.mitm {
-            Ok(())
-        } else {
-            Err(ApiError::unsupported_capability(
-                "mitm",
-                "this build has no MITM",
-            ))
-        }
-    }
-
     async fn blocking<T: Send + 'static>(
         &self,
         work: impl FnOnce(&Engine) -> Result<T, Failure> + Send + 'static,
@@ -32,7 +21,6 @@ impl Control {
         &self,
         _params: Empty,
     ) -> Result<MitmCertificate, ApiError> {
-        self.mitm_enabled()?;
         let certificate = self.blocking(|engine| engine.mitm().certificate()).await?;
         Ok(MitmCertificate { certificate })
     }
@@ -41,7 +29,6 @@ impl Control {
         &self,
         _params: Empty,
     ) -> Result<MitmCertificate, ApiError> {
-        self.mitm_enabled()?;
         let certificate = self
             .blocking(|engine| engine.mitm().generate_certificate())
             .await?;
@@ -54,7 +41,6 @@ impl Control {
         &self,
         params: MitmValidateParams,
     ) -> Result<MitmValidateResult, ApiError> {
-        self.mitm_enabled()?;
         let validation = self
             .blocking(move |engine| engine.mitm().validate(params.config))
             .await?;
@@ -65,7 +51,6 @@ impl Control {
         &self,
         params: MitmModuleReadParams,
     ) -> Result<MitmModuleView, ApiError> {
-        self.mitm_enabled()?;
         let view = self
             .blocking(move |engine| {
                 engine.mitm().read_module(
@@ -83,7 +68,6 @@ impl Control {
         &self,
         _params: Empty,
     ) -> Result<MitmModuleStatusList, ApiError> {
-        self.mitm_enabled()?;
         let status = self.engine.mitm().module_status().map_err(core_error)?;
         serde_json::from_value(status).map_err(|err| ApiError::internal(err.to_string()))
     }
@@ -92,7 +76,6 @@ impl Control {
         &self,
         params: MitmFetchModuleParams,
     ) -> Result<Empty, ApiError> {
-        self.mitm_enabled()?;
         self.engine
             .mitm()
             .fetch_module(params.name)
@@ -104,7 +87,6 @@ impl Control {
         &self,
         params: MitmIssueParams,
     ) -> Result<MitmPem, ApiError> {
-        self.mitm_enabled()?;
         if params.host.is_empty() {
             return Err(ApiError::invalid_field("host", "host must not be empty"));
         }
@@ -118,7 +100,6 @@ impl Control {
         &self,
         params: MitmScriptParams,
     ) -> Result<MitmResult, ApiError> {
-        self.mitm_enabled()?;
         let result = self
             .engine
             .mitm()
@@ -132,7 +113,6 @@ impl Control {
         &self,
         params: MitmExchangesParams,
     ) -> Result<MitmResult, ApiError> {
-        self.mitm_enabled()?;
         let id = self
             .engine
             .connection_id(params.connection)
@@ -145,7 +125,6 @@ impl Control {
         &self,
         params: MitmQueryParams,
     ) -> Result<MitmQueryAnswer, ApiError> {
-        self.mitm_enabled()?;
         let query = exchange_query(params)?;
         let answer = self.engine.mitm().query(&query).map_err(core_error)?;
         serde_json::from_value(answer)
@@ -156,13 +135,11 @@ impl Control {
         &self,
         params: MitmExchangeParams,
     ) -> Result<MitmResult, ApiError> {
-        self.mitm_enabled()?;
         let result = self.engine.mitm().exchange(params.id).map_err(core_error)?;
         Ok(MitmResult { result })
     }
 
     pub(super) async fn mitm_body(&self, params: MitmBodyParams) -> Result<MitmResult, ApiError> {
-        self.mitm_enabled()?;
         let result = self
             .engine
             .mitm()

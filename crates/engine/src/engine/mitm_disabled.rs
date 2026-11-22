@@ -1,16 +1,12 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use concord_common::exchange_query::ExchangeQuery;
 use concord_platform::HomeDir;
 use concord_tls::TrustStore;
 use concord_tunnel::{ConnTable, Tunnel};
-use serde_json::Value;
 
-use crate::error::Failure;
-
-/// Stands in for the MITM engine in a build without the `mitm` feature. The API
-/// refuses MITM methods before reaching it, because `core.hello` reports no `mitm`.
+/// Stands in for the MITM engine in a build without the `mitm` feature: the engine's own
+/// calls into it do nothing. `concord-api` needs the feature for the MITM methods.
 pub struct MitmService {
     pressure: AtomicI32,
 }
@@ -47,60 +43,6 @@ impl MitmService {
     ) {
     }
 
-    pub fn certificate(&self) -> Result<Option<Value>, Failure> {
-        Err(unavailable())
-    }
-
-    pub fn generate_certificate(&self) -> Result<Value, Failure> {
-        Err(unavailable())
-    }
-
-    pub fn issue_certificate(&self, _host: &str) -> Result<String, Failure> {
-        Err(unavailable())
-    }
-
-    pub fn validate(&self, _raw: Value) -> Result<Value, Failure> {
-        Err(unavailable())
-    }
-
-    pub fn read_module(
-        &self,
-        _text: &str,
-        _arguments: &std::collections::BTreeMap<String, String>,
-        _attachments: &std::collections::BTreeMap<String, String>,
-        _language: String,
-    ) -> Result<Value, Failure> {
-        Err(unavailable())
-    }
-
-    pub fn module_status(&self) -> Result<Value, Failure> {
-        Err(unavailable())
-    }
-
-    pub fn fetch_module(&self, _name: Option<String>) -> Result<(), Failure> {
-        Err(unavailable())
-    }
-
-    pub async fn run_script(&self, _name: &str) -> Result<Value, Failure> {
-        Err(unavailable())
-    }
-
-    pub fn exchanges(&self, _id: &str) -> Result<Value, Failure> {
-        Err(unavailable())
-    }
-
-    pub fn query(&self, _query: &ExchangeQuery) -> Result<Value, Failure> {
-        Err(unavailable())
-    }
-
-    pub fn exchange(&self, _id: i64) -> Result<Value, Failure> {
-        Err(unavailable())
-    }
-
-    pub fn body(&self, _id: i64, _response: bool) -> Result<Value, Failure> {
-        Err(unavailable())
-    }
-
     pub(crate) fn apply(
         &self,
         section: &concord_config::MitmDef,
@@ -130,8 +72,4 @@ impl MitmService {
     pub(crate) fn network_changed(&self) {}
 
     pub(crate) fn shutdown(&self) {}
-}
-
-fn unavailable() -> Failure {
-    Failure::core("this build has no MITM")
 }
