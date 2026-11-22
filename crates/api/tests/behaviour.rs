@@ -17,7 +17,7 @@ use concord_engine::{Engine, EngineConfig};
 use concord_platform::NativePlatform;
 use concord_proto::types::*;
 use concord_proto::{ApiError, ErrorData};
-use concord_test_support::free_port;
+use concord_test_support::{free_port, port_to_bind_later};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -552,7 +552,7 @@ async fn each_provider_reports_loaded_after_the_apply_has_answered() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn engine_start_opens_the_port_and_an_apply_alone_does_not() {
     let rig = Rig::new().await;
-    let port = free_port();
+    let port = port_to_bind_later();
     rig.write_config(&format!("mixed-port: {port}\nrules:\n  - MATCH,DIRECT\n"));
     rig.apply().await.unwrap();
     assert!(
@@ -601,7 +601,7 @@ async fn a_port_that_cannot_be_bound_is_a_fault_in_the_engine_state_until_it_bin
     drop(taken);
     rig.control
         .config_patch(ConfigPatchParams {
-            mixed_port: Some(free_port()),
+            mixed_port: Some(port_to_bind_later()),
             ..Default::default()
         })
         .await
@@ -951,12 +951,12 @@ async fn a_pick_moves_the_route_and_the_watchers_hear_about_it_only_while_they_w
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_apply_hands_the_host_settings_to_a_core_nobody_patched() {
     let rig = Rig::new().await;
-    let mixed = free_port();
+    let mixed = port_to_bind_later();
     let target = hanging_server().await;
     rig.write_config(&format!(
         "mixed-port: {mixed}\nauthentication:\n  - user:pass\nrules:\n  - MATCH,DIRECT\n"
     ));
-    let controller = format!("127.0.0.1:{}", free_port());
+    let controller = format!("127.0.0.1:{}", port_to_bind_later());
     rig.apply_with(ConfigApplyParams {
         host: Some(HostSettings {
             external_controller: Some(controller.clone()),
@@ -1175,7 +1175,7 @@ async fn through_the_proxy(proxy: u16, target: u16) -> TcpStream {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connections_arrive_as_a_snapshot_then_opens_counters_and_closes() {
     let rig = Rig::new().await;
-    let proxy = free_port();
+    let proxy = port_to_bind_later();
     rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
     rig.apply().await.unwrap();
     rig.control.engine_start(Empty::default()).await.unwrap();
@@ -1259,7 +1259,7 @@ async fn connections_arrive_as_a_snapshot_then_opens_counters_and_closes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closed_connection_brings_its_final_totals_to_a_watch_without_counters() {
     let rig = Rig::new().await;
-    let proxy = free_port();
+    let proxy = port_to_bind_later();
     rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
     rig.apply().await.unwrap();
     rig.control.engine_start(Empty::default()).await.unwrap();
@@ -1307,7 +1307,7 @@ async fn a_closed_connection_brings_its_final_totals_to_a_watch_without_counters
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_watch_with_counters_hears_none_for_a_connection_after_its_close() {
     let rig = Rig::new().await;
-    let proxy = free_port();
+    let proxy = port_to_bind_later();
     rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
     rig.apply().await.unwrap();
     rig.control.engine_start(Empty::default()).await.unwrap();
@@ -1355,7 +1355,7 @@ async fn a_watch_with_counters_hears_none_for_a_connection_after_its_close() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_dial_is_watched_as_a_connection_that_opens_and_closes_with_why() {
     let rig = Rig::new().await;
-    let proxy = free_port();
+    let proxy = port_to_bind_later();
     rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
     rig.apply().await.unwrap();
     rig.control.engine_start(Empty::default()).await.unwrap();
@@ -1410,7 +1410,7 @@ async fn a_failed_dial_is_watched_as_a_connection_that_opens_and_closes_with_why
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_closed_connection_says_which_side_ended_it_or_that_the_core_did() {
     let rig = Rig::new().await;
-    let proxy = free_port();
+    let proxy = port_to_bind_later();
     rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
     rig.apply().await.unwrap();
     rig.control.engine_start(Empty::default()).await.unwrap();
@@ -1526,7 +1526,7 @@ enum Lookup {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_connection_says_when_each_step_of_setting_it_up_happened() {
     let rig = Rig::new().await;
-    let proxy = free_port();
+    let proxy = port_to_bind_later();
     let server = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = server.local_addr().unwrap().port();
     let dns = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -1610,7 +1610,7 @@ async fn a_connection_says_when_each_step_of_setting_it_up_happened() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_connection_names_the_dns_queries_that_gave_out_its_address() {
     let rig = Rig::new().await;
-    let (proxy, listen) = (free_port(), free_port());
+    let (proxy, listen) = (port_to_bind_later(), port_to_bind_later());
     let server = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = server.local_addr().unwrap().port();
     let dns = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -1694,7 +1694,7 @@ async fn a_connection_names_the_dns_queries_that_gave_out_its_address() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_udp_flow_names_the_dns_queries_its_direct_dial_made() {
     let rig = Rig::new().await;
-    let proxy = free_port();
+    let proxy = port_to_bind_later();
     let target = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = target.local_addr().unwrap().port();
     let dns = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
@@ -1767,7 +1767,7 @@ async fn a_udp_flow_names_the_dns_queries_its_direct_dial_made() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_connection_names_the_position_of_the_rule_that_decided_it() {
     let rig = Rig::new().await;
-    let proxy = free_port();
+    let proxy = port_to_bind_later();
     let (by_port, by_match) = (free_port(), free_port());
     rig.write_config(&format!(
         "mixed-port: {proxy}\nrules:\n  - DOMAIN,never.test,REJECT\n  - DST-PORT,{by_port},DIRECT\n  - MATCH,DIRECT\n"
@@ -1824,7 +1824,7 @@ async fn a_connection_names_the_position_of_the_rule_that_decided_it() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_smart_redial_that_fails_through_every_member_is_watched_as_one_failure() {
     let rig = Rig::new().await;
-    let proxy = free_port();
+    let proxy = port_to_bind_later();
     rig.write_config(&format!(
         "mixed-port: {proxy}\nproxies:\n  - {{name: a, type: socks5, server: 127.0.0.1, port: {}}}\n  - {{name: b, type: socks5, server: 127.0.0.1, port: {}}}\nproxy-groups:\n  - {{name: s, type: smart, proxies: [a, b], url: 'http://127.0.0.1:{}/', interval: 0}}\nrules:\n  - MATCH,s\n",
         free_port(),
@@ -1985,7 +1985,7 @@ async fn a_delay_run_still_dialing_ends_its_stream_when_the_core_shuts_down() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn after_a_shutdown_a_started_core_serves_its_port_and_finishes_a_delay_run() {
     let rig = Rig::new().await;
-    let port = free_port();
+    let port = port_to_bind_later();
     let echo = concord_test_support::tcp_echo().await;
     rig.write_config(&format!("mixed-port: {port}\nrules:\n  - MATCH,DIRECT\n"));
     rig.apply().await.unwrap();
