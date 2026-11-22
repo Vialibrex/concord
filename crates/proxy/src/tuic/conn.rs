@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -6,70 +5,47 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use concord_common::{Address, DialCx, Tasks};
-use concord_quic::{QuicConn, io_error};
-use tokio::sync::mpsc;
+use concord_quic::{Inbox, QuicConn, Sessions, io_error};
 use tokio::task::JoinHandle;
 
 use super::Shared;
-use super::wire::{self, Command, Defrag, Incoming, Version};
+use super::wire::{self, Command, Incoming, Version};
 use crate::util::lock;
 
-const QUEUE: usize = 64;
 const IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
 /// One Packet command: version, type, the 8-byte packet header, the longest address and a
 /// payload of the largest size its 16-bit field holds.
 const MAX_STREAM_PACKET: usize = 2 + 8 + 259 + u16::MAX as usize;
 
-pub(super) struct Entry {
-    queue: mpsc::Sender<(Address, Bytes)>,
-    defrag: Mutex<Defrag>,
-}
-
 /// Hands the relayed datagrams of one connection to the association they name.
 #[derive(Default)]
 pub(super) struct Hub {
-    sessions: Mutex<HashMap<u32, Arc<Entry>>>,
+    sessions: Sessions<Address>,
 }
 
 impl Hub {
-    pub(super) fn register(
-        &self,
-        version: Version,
-    ) -> Option<(u32, mpsc::Receiver<(Address, Bytes)>)> {
-        let (queue, rx) = mpsc::channel(QUEUE);
-        let mut sessions = lock(&self.sessions);
-        let id = (0..16).find_map(|_| {
-            let id = match version {
-                Version::V5 => u32::from(rand::random::<u16>().max(1)),
-                Version::V4 => rand::random::<u32>().max(1),
-            };
-            (!sessions.contains_key(&id)).then_some(id)
-        })?;
-        sessions.insert(
-            id,
-            Arc::new(Entry {
-                queue,
-                defrag: Mutex::new(Defrag::default()),
-            }),
-        );
-        Some((id, rx))
+    pub(super) fn register(&self, version: Version) -> Option<(u32, Inbox)> {
+        self.sessions.register(|taken| {
+            (0..16).find_map(|_| {
+                let id = match version {
+                    Version::V5 => u32::from(rand::random::<u16>().max(1)),
+                    Version::V4 => rand::random::<u32>().max(1),
+                };
+                (!taken(id)).then_some(id)
+            })
+        })
     }
 
     pub(super) fn remove(&self, id: u32) {
-        lock(&self.sessions).remove(&id);
+        self.sessions.remove(id);
     }
 
     fn close_all(&self) {
-        lock(&self.sessions).clear();
+        self.sessions.clear();
     }
 
-    fn deliver(&self, part: Incoming) {
-        let Some(entry) = lock(&self.sessions).get(&part.assoc).cloned() else {
-            return;
-        };
-        if let Some(whole) = lock(&entry.defrag).feed(part) {
-            let _ = entry.queue.try_send(whole);
-        }
+    fn deliver(&self, incoming: Incoming) {
+        self.sessions.deliver(incoming.assoc, incoming.part, Some);
     }
 }
 

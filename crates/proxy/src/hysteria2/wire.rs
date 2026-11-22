@@ -1,8 +1,7 @@
-use std::collections::HashMap;
 use std::io;
-use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use concord_quic::Fragment;
 use rand::Rng;
 
 use crate::util::invalid_data;
@@ -14,7 +13,6 @@ pub(crate) const MAX_UDP: usize = 4096;
 pub(crate) const MAX_RESPONSE_HEAD: usize = 1 + 8 + MAX_MESSAGE as usize + 8 + MAX_PADDING as usize;
 
 const PADDING_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-const DEFRAG_TTL: Duration = Duration::from_secs(10);
 
 pub(crate) fn padding(min: usize, max: usize) -> String {
     let mut rng = rand::rng();
@@ -172,76 +170,15 @@ pub(crate) fn parse_udp(datagram: &Bytes) -> io::Result<UdpMessage> {
     })
 }
 
-struct Pending {
-    pieces: Vec<Option<Bytes>>,
-    count: usize,
-    addr: String,
-    touched: Instant,
-}
-
-/// Puts the fragments of one session's datagrams back together.
-#[derive(Default)]
-pub(crate) struct Defrag {
-    pending: HashMap<u16, Pending>,
-    /// Expired entries are swept once the map doubles, so a sweep costs O(1) per feed.
-    sweep_at: usize,
-}
-
-impl Defrag {
-    pub(crate) fn feed(&mut self, message: UdpMessage) -> Option<(String, Bytes)> {
-        if message.fragments <= 1 {
-            return Some((message.addr, message.data));
+impl UdpMessage {
+    pub(crate) fn into_fragment(self) -> Fragment<String> {
+        Fragment {
+            packet: self.packet,
+            index: self.fragment,
+            total: self.fragments,
+            addr: Some(self.addr),
+            data: self.data,
         }
-        if message.fragment >= message.fragments {
-            return None;
-        }
-        let now = Instant::now();
-        if self.pending.len() >= self.sweep_at {
-            self.pending
-                .retain(|_, entry| now.duration_since(entry.touched) < DEFRAG_TTL);
-            self.sweep_at = 2 * self.pending.len();
-        }
-        let total = usize::from(message.fragments);
-        let entry = self
-            .pending
-            .entry(message.packet)
-            .or_insert_with(|| Pending {
-                pieces: vec![None; total],
-                count: 0,
-                addr: String::new(),
-                touched: now,
-            });
-        if entry.pieces.len() != total || now.duration_since(entry.touched) > DEFRAG_TTL {
-            *entry = Pending {
-                pieces: vec![None; total],
-                count: 0,
-                addr: String::new(),
-                touched: now,
-            };
-        }
-        entry.touched = now;
-        let slot = entry.pieces.get_mut(usize::from(message.fragment))?;
-        if slot.is_some() {
-            return None;
-        }
-        if message.fragment == 0 {
-            entry.addr.clone_from(&message.addr);
-        }
-        *slot = Some(message.data);
-        entry.count += 1;
-        if entry.count < total {
-            return None;
-        }
-        let done = self.pending.remove(&message.packet)?;
-        let size = done.pieces.iter().flatten().map(Bytes::len).sum();
-        if size == 0 {
-            return None;
-        }
-        let mut whole = Vec::with_capacity(size);
-        for piece in done.pieces.iter().flatten() {
-            whole.extend_from_slice(piece);
-        }
-        Some((done.addr, Bytes::from(whole)))
     }
 }
 
@@ -334,35 +271,5 @@ mod tests {
     fn a_truncated_udp_message_is_an_error() {
         assert!(parse_udp(&Bytes::from_static(&[0, 0, 0, 1, 0, 2, 0])).is_err());
         assert!(parse_udp(&Bytes::from_static(&[0, 0, 0, 1, 0, 2, 0, 1, 0])).is_err());
-    }
-
-    fn piece(packet: u16, fragment: u8, fragments: u8, data: &'static [u8]) -> UdpMessage {
-        UdpMessage {
-            session: 1,
-            packet,
-            fragment,
-            fragments,
-            addr: "a:1".into(),
-            data: Bytes::from_static(data),
-        }
-    }
-
-    #[test]
-    fn fragments_arrive_in_any_order() {
-        let mut defrag = Defrag::default();
-        assert!(defrag.feed(piece(5, 2, 3, b"cc")).is_none());
-        assert!(defrag.feed(piece(5, 0, 3, b"aa")).is_none());
-        assert!(defrag.feed(piece(5, 0, 3, b"zz")).is_none());
-        let (addr, whole) = defrag.feed(piece(5, 1, 3, b"bb")).unwrap();
-        assert_eq!(addr, "a:1");
-        assert_eq!(&whole[..], b"aabbcc");
-    }
-
-    #[test]
-    fn an_unfragmented_message_passes_through() {
-        let mut defrag = Defrag::default();
-        let (_, data) = defrag.feed(piece(1, 0, 1, b"x")).unwrap();
-        assert_eq!(&data[..], b"x");
-        assert!(defrag.feed(piece(1, 5, 2, b"x")).is_none());
     }
 }

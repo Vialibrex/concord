@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use concord_common::Address;
+use concord_quic::Fragment as Part;
 
 use crate::util::invalid_data;
 
@@ -19,8 +18,6 @@ const ATYP_DOMAIN: u8 = 0;
 const ATYP_V4: u8 = 1;
 const ATYP_V6: u8 = 2;
 const ATYP_NONE: u8 = 255;
-
-const DEFRAG_TTL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Version {
@@ -100,11 +97,7 @@ pub(crate) fn get_addr(input: &[u8]) -> io::Result<Option<(Option<Address>, usiz
 /// One relayed datagram or fragment of it, whichever version carried it.
 pub(crate) struct Incoming {
     pub(crate) assoc: u32,
-    pub(crate) packet: u16,
-    pub(crate) total: u8,
-    pub(crate) fragment: u8,
-    pub(crate) addr: Option<Address>,
-    pub(crate) data: Bytes,
+    pub(crate) part: Part<Address>,
 }
 
 pub(crate) enum Command {
@@ -164,11 +157,13 @@ fn parse_packet(version: Version, input: &Bytes) -> io::Result<Incoming> {
     }
     Ok(Incoming {
         assoc,
-        packet,
-        total,
-        fragment,
-        addr,
-        data: input.slice(start..end),
+        part: Part {
+            packet,
+            index: fragment,
+            total,
+            addr,
+            data: input.slice(start..end),
+        },
     })
 }
 
@@ -240,67 +235,6 @@ pub(crate) fn packet(version: Version, part: &Fragment<'_>) -> io::Result<Vec<u8
     Ok(out)
 }
 
-struct Pending {
-    pieces: Vec<Option<Bytes>>,
-    count: usize,
-    addr: Option<Address>,
-    touched: Instant,
-}
-
-#[derive(Default)]
-pub(crate) struct Defrag {
-    pending: HashMap<u16, Pending>,
-    /// Expired entries are swept once the map doubles, so a sweep costs O(1) per feed.
-    sweep_at: usize,
-}
-
-impl Defrag {
-    pub(crate) fn feed(&mut self, part: Incoming) -> Option<(Address, Bytes)> {
-        if part.total <= 1 {
-            return part.addr.map(|addr| (addr, part.data));
-        }
-        if part.fragment >= part.total {
-            return None;
-        }
-        let now = Instant::now();
-        if self.pending.len() >= self.sweep_at {
-            self.pending
-                .retain(|_, entry| now.duration_since(entry.touched) < DEFRAG_TTL);
-            self.sweep_at = 2 * self.pending.len();
-        }
-        let total = usize::from(part.total);
-        let fresh = || Pending {
-            pieces: vec![None; total],
-            count: 0,
-            addr: None,
-            touched: now,
-        };
-        let entry = self.pending.entry(part.packet).or_insert_with(fresh);
-        if entry.pieces.len() != total || now.duration_since(entry.touched) > DEFRAG_TTL {
-            *entry = fresh();
-        }
-        entry.touched = now;
-        let slot = entry.pieces.get_mut(usize::from(part.fragment))?;
-        if slot.is_some() {
-            return None;
-        }
-        if part.fragment == 0 {
-            entry.addr = part.addr;
-        }
-        *slot = Some(part.data);
-        entry.count += 1;
-        if entry.count < total {
-            return None;
-        }
-        let done = self.pending.remove(&part.packet)?;
-        let mut whole = Vec::new();
-        for piece in done.pieces.iter().flatten() {
-            whole.extend_from_slice(piece);
-        }
-        done.addr.map(|addr| (addr, Bytes::from(whole)))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,9 +279,10 @@ mod tests {
         else {
             panic!("expected a packet");
         };
-        assert_eq!((parsed.assoc, parsed.packet, parsed.total), (0x1234, 7, 1));
-        assert_eq!(parsed.addr, Some(dst()));
-        assert_eq!(&parsed.data[..], data);
+        let part = &parsed.part;
+        assert_eq!((parsed.assoc, part.packet, part.total), (0x1234, 7, 1));
+        assert_eq!(part.addr, Some(dst()));
+        assert_eq!(&part.data[..], data);
     }
 
     #[test]
@@ -370,7 +305,7 @@ mod tests {
             panic!("expected a packet");
         };
         assert_eq!(parsed.assoc, 0xdead_beef);
-        assert_eq!(&parsed.data[..], b"x");
+        assert_eq!(&parsed.part.data[..], b"x");
     }
 
     #[test]
@@ -378,24 +313,6 @@ mod tests {
         assert!(parse_command(Version::V5, &Bytes::from_static(&[4, 2])).is_err());
         assert!(parse_command(Version::V5, &Bytes::from_static(&[5])).is_err());
         assert!(parse_command(Version::V5, &Bytes::from_static(&[5, 2, 0, 1])).is_err());
-    }
-
-    #[test]
-    fn fragments_join_in_any_order_and_the_first_names_the_address() {
-        let part = |fragment: u8, addr: Option<Address>, data: &'static [u8]| Incoming {
-            assoc: 1,
-            packet: 9,
-            total: 3,
-            fragment,
-            addr,
-            data: Bytes::from_static(data),
-        };
-        let mut defrag = Defrag::default();
-        assert!(defrag.feed(part(2, None, b"cc")).is_none());
-        assert!(defrag.feed(part(1, None, b"bb")).is_none());
-        let (addr, whole) = defrag.feed(part(0, Some(dst()), b"aa")).unwrap();
-        assert_eq!(addr, dst());
-        assert_eq!(&whole[..], b"aabbcc");
     }
 
     #[test]

@@ -1,73 +1,49 @@
-use std::collections::HashMap;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use concord_common::{Address, PacketBuf, PacketSession};
-use concord_quic::DatagramHub;
-use tokio::sync::mpsc;
+use concord_quic::{DatagramHub, Inbox, Sessions};
 
-use super::wire::{Defrag, MAX_UDP, UdpHeader, parse_udp, put_udp_header, udp_header_len};
+use super::wire::{MAX_UDP, UdpHeader, parse_udp, put_udp_header, udp_header_len};
 use crate::util::lock;
 
-const QUEUE: usize = 64;
 /// A domain of 255 bytes with `:65535`, a two-byte length and the fixed header.
 const HEADROOM: usize = 8 + 2 + 255 + 6;
-
-struct Entry {
-    queue: mpsc::Sender<(Address, Bytes)>,
-    defrag: Mutex<Defrag>,
-}
 
 /// Hands the datagrams of one connection to the session they belong to.
 #[derive(Default)]
 pub(crate) struct Hub {
-    sessions: Mutex<HashMap<u32, Arc<Entry>>>,
-    next: Mutex<u32>,
+    sessions: Sessions<String>,
+    next: AtomicU32,
 }
 
 impl Hub {
-    pub(crate) fn register(&self) -> (u32, mpsc::Receiver<(Address, Bytes)>) {
-        let (queue, rx) = mpsc::channel(QUEUE);
-        let mut next = lock(&self.next);
-        let id = *next;
-        *next = next.wrapping_add(1);
-        lock(&self.sessions).insert(
-            id,
-            Arc::new(Entry {
-                queue,
-                defrag: Mutex::new(Defrag::default()),
-            }),
-        );
-        (id, rx)
+    pub(crate) fn register(&self) -> Option<(u32, Inbox)> {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        self.sessions.register(|_| Some(id))
     }
 
     pub(crate) fn remove(&self, id: u32) {
-        lock(&self.sessions).remove(&id);
+        self.sessions.remove(id);
     }
 }
 
 impl DatagramHub for Hub {
     fn close_all(&self) {
-        lock(&self.sessions).clear();
+        self.sessions.clear();
     }
 
     fn dispatch(&self, datagram: &Bytes) {
         let Ok(message) = parse_udp(datagram) else {
             return;
         };
-        let Some(entry) = lock(&self.sessions).get(&message.session).cloned() else {
-            return;
-        };
-        let Some((addr, data)) = lock(&entry.defrag).feed(message) else {
-            return;
-        };
-        let Some(addr) = Address::parse(&addr) else {
-            return;
-        };
-        let _ = entry.queue.try_send((addr, data));
+        self.sessions
+            .deliver(message.session, message.into_fragment(), |addr| {
+                Address::parse(&addr)
+            });
     }
 }
 
@@ -76,7 +52,7 @@ pub(crate) struct Hy2Packets {
     id: u32,
     conn: quinn::Connection,
     hub: Arc<Hub>,
-    incoming: Mutex<mpsc::Receiver<(Address, Bytes)>>,
+    incoming: Mutex<Inbox>,
     packet_id: AtomicU16,
     udp_mtu: usize,
     closed: AtomicBool,
@@ -89,9 +65,11 @@ impl Hy2Packets {
         hub: Arc<Hub>,
         udp_mtu: usize,
         hold: Arc<dyn Send + Sync>,
-    ) -> Self {
-        let (id, incoming) = hub.register();
-        Hy2Packets {
+    ) -> io::Result<Self> {
+        let (id, incoming) = hub
+            .register()
+            .ok_or_else(|| io::Error::other("hysteria2: no free session id"))?;
+        Ok(Hy2Packets {
             id,
             conn,
             hub,
@@ -100,7 +78,7 @@ impl Hy2Packets {
             udp_mtu,
             closed: AtomicBool::new(false),
             _hold: hold,
-        }
+        })
     }
 
     fn send_pieces(&self, payload: &[u8], addr: &str, limit: usize) -> io::Result<()> {

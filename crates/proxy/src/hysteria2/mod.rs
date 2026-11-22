@@ -287,7 +287,7 @@ impl Outbound for Hysteria2 {
             conn.shared.hub.clone(),
             self.udp_mtu,
             conn,
-        )))
+        )?))
     }
 
     fn reset_sessions(&self) {
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(err.to_string(), "UDP disabled by server");
 
         let conn = built.offer(&cx).await.unwrap();
-        let (session, mut packets) = conn.shared.hub.register();
+        let (session, mut packets) = conn.shared.hub.register().unwrap();
         let limit = Duration::from_secs(2);
         let peer = tokio::time::timeout(limit, peers.recv())
             .await
