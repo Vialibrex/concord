@@ -29,6 +29,8 @@ Size every run to the change, and keep the full gate for the two cases below.
 - Before each review round, run `cargo fmt --check`, then clippy and `cargo test` with `-p` for every changed crate,
   every crate that depends on one, and `xtask`, whose source checks hold every change. Add each `cargo xtask` check the
   change touches: `schema --check` for config or the API, `check-layers` and `cargo deny check` for a `Cargo.toml`.
+  A crate with default features (the loop in The Full Gate lists them) also runs both with `--no-default-features`:
+  the workspace build turns those features on, so only a crate built alone shows what they gate.
 - Run the full gate only when the change touches a shared base, or in a branch's last review round; no other round
   runs it. The shared bases are the root `Cargo.toml` and `Cargo.lock`, `rust-toolchain.toml`, `vendor/`,
   `crates/common`, `crates/platform` and `crates/test-support`. Most of the workspace depends on those three crates,
@@ -50,6 +52,10 @@ mihomo or OpenSSH. Run the clippy of every platform whose code the change touche
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+for crate in concord-common concord-engine concord-mitm; do  # every member with default features
+  cargo clippy -p "$crate" --no-default-features --all-targets -- -D warnings
+  cargo test -p "$crate" --no-default-features
+done
 cargo xtask check-layers
 cargo xtask schema --check
 cargo deny check
