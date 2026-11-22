@@ -14,13 +14,13 @@ doctest = false
 [features]
 default = ["io"]
 # `config` and `rules` stay free of tokio, so everything async sits behind this.
-io = ["dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:uuid"]
+io = ["dep:thiserror", "dep:tokio", "dep:tokio-util", "dep:async-trait", "dep:uuid"]
 hyper = ["io", "dep:hyper"]
 
 [dependencies]
 compact_str = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
+thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true, features = ["net", "io-util", "time", "sync", "rt", "macros"] }
 tokio-util = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
