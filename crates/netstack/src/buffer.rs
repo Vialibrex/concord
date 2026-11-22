@@ -30,7 +30,8 @@ impl ChunkPool {
         }
     }
 
-    pub fn cached(&self) -> usize {
+    #[cfg(test)]
+    fn cached(&self) -> usize {
         lock(&self.free).len()
     }
 

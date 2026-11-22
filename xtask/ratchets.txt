@@ -4,7 +4,7 @@ file-lines crates/config/src/proxy/parse.rs 1090 raised from 1088: gost-relay is
 file-lines crates/config/src/share_link/decode.rs 941 raised from 940: subscription text falls back to URL-safe base64 after the standard alphabet; folding the fallback into urlx needs a wider import that wraps onto its own line, so back down when share_link/decode.rs is split
 file-lines crates/proxy/src/vmess/crypto.rs 807
 file-lines crates/tls/src/record.rs 989
-file-lines crates/tun/src/stack/driver.rs 838 raised from 809: the driver drains the adopted UDP sessions' replies each round, offers the queue poller to adopted sessions, polls with the waker that drops its own drain's wakes and ends a round's reads at a byte budget; no split planned yet
+file-lines crates/tun/src/stack/driver.rs 835 raised from 809: the driver drains the adopted UDP sessions' replies each round, offers the queue poller to adopted sessions, polls with the waker that drops its own drain's wakes and ends a round's reads at a byte budget; back down when its receive, transmit and dispatch parts move to their own files
 fn-lines crates/config/src/profile.rs::load_raw 183
 fn-lines crates/config/src/profile.rs::resolve_groups 144 raised from 142: a group in `use` and GLOBAL as a member are refused at load, as mihomo does
 fn-lines crates/config/src/rule.rs::build_cond 125

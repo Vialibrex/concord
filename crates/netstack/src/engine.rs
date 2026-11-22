@@ -242,14 +242,6 @@ impl TcpStack {
         self.live == 0
     }
 
-    pub fn half_open(&self) -> usize {
-        self.half_open
-    }
-
-    pub fn pool(&self) -> &ChunkPool {
-        &self.pool
-    }
-
     pub fn take_accepted(&mut self) -> Option<Accepted> {
         self.accepted.pop_front()
     }

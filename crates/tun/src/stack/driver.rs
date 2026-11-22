@@ -241,10 +241,7 @@ impl<D: Device> Egress for PoolEgress<'_, D> {
                 self.pool.push_filled(slot);
                 self.direct = false;
             }
-            None => {
-                self.pool.note_oversize();
-                self.pool.release(slot);
-            }
+            None => self.pool.release(slot),
         }
         true
     }

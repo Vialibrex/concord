@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 
@@ -61,7 +61,6 @@ impl PoolState {
 pub(crate) struct TxPool {
     state: Mutex<PoolState>,
     driver: AtomicWaker,
-    pub oversize: AtomicU64,
     pub checksum: L4Checksum,
     pub segment_limit: AtomicUsize,
     slots: usize,
@@ -85,7 +84,6 @@ impl TxPool {
                 closed: false,
             }),
             driver: AtomicWaker::new(),
-            oversize: AtomicU64::new(0),
             checksum: L4Checksum::Full,
             segment_limit: AtomicUsize::new(0),
             slots,
@@ -241,10 +239,6 @@ impl TxPool {
         let waiters = std::mem::take(&mut state.waiters);
         drop(state);
         waiters.into_iter().for_each(|waiter| waiter.waker.wake());
-    }
-
-    pub fn note_oversize(&self) {
-        self.oversize.fetch_add(1, Ordering::Relaxed);
     }
 }
 
