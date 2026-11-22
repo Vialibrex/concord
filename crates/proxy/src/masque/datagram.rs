@@ -1,8 +1,3 @@
-#![allow(
-    clippy::indexing_slicing,
-    reason = "wire indices follow fixed header widths and explicit packet length checks"
-)]
-
 use std::io;
 
 use bytes::BytesMut;
@@ -35,10 +30,7 @@ pub(super) fn encode(stream_id: u64, packet: &mut BytesMut) -> io::Result<()> {
     quarter.encode(&mut available);
     VarInt::from_u32(0).encode(&mut available);
     let used = HEADER_MAX - available.len();
-    let len = packet.len();
-    packet.resize(len + used, 0);
-    packet.copy_within(..len, used);
-    packet[..used].copy_from_slice(&header[..used]);
+    super::capsule::prepend(packet, header.get(..used).unwrap_or_default());
     Ok(())
 }
 

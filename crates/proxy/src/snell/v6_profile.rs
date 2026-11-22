@@ -1,8 +1,3 @@
-#![allow(
-    clippy::indexing_slicing,
-    reason = "profile indices and sizes are derived within fixed protocol bounds"
-)]
-
 use blake2::{Blake2b, Digest, digest::consts::U32};
 
 type Blake2b256 = Blake2b<U32>;
@@ -130,7 +125,7 @@ impl Namespaces {
     }
 
     fn for_label(&self, label: u32) -> u64 {
-        self.0[match label {
+        let index = match label {
             label::PADDING
             | label::BIT_PERCENT
             | label::PREFIX_MIN
@@ -161,7 +156,8 @@ impl Namespaces {
             | label::WRITE_JITTER_V
             | label::WRITE_NEXT => 6,
             _ => 0,
-        }]
+        };
+        self.0.get(index).copied().unwrap_or_default()
     }
 
     fn prf(&self, label: u32, a: u32, b: u32) -> u32 {
@@ -183,9 +179,19 @@ impl Namespaces {
                 .wrapping_add(0x0d4cd3e7b14a36d7);
         for (i, chunk) in out.chunks_mut(8).enumerate() {
             let block = mix(seed.wrapping_add((i as u64 + 1).wrapping_mul(GAMMA))).to_le_bytes();
-            chunk.copy_from_slice(&block[..chunk.len()]);
+            chunk
+                .iter_mut()
+                .zip(block)
+                .for_each(|(slot, byte)| *slot = byte);
         }
     }
+}
+
+fn bucket(buckets: &[usize; 8], prf: u32) -> usize {
+    buckets
+        .get(prf as usize % buckets.len())
+        .copied()
+        .unwrap_or_default()
 }
 
 #[derive(Clone)]
@@ -310,7 +316,10 @@ impl Profile {
             size = self.chunk_initial;
         }
         size = match self.chunk_policy {
-            1 => self.chunk_buckets[self.ns.prf(label::CHUNK_SIZE, seq, size as u32) as usize % 8],
+            1 => bucket(
+                &self.chunk_buckets,
+                self.ns.prf(label::CHUNK_SIZE, seq, size as u32),
+            ),
             2 => {
                 (size
                     + self.ns.prf(label::CHUNK_JITTER_V, seq, size as u32) as usize
@@ -375,9 +384,15 @@ impl Profile {
             return frame.min(0xffff);
         }
         let mut target = if seq < self.write_first {
-            self.write_seq[seq as usize]
+            self.write_seq
+                .get(seq as usize)
+                .copied()
+                .unwrap_or_default()
         } else {
-            self.write_buckets[self.ns.prf(label::WRITE_TARGET, seq, frame as u32) as usize % 8]
+            bucket(
+                &self.write_buckets,
+                self.ns.prf(label::WRITE_TARGET, seq, frame as u32),
+            )
         };
         if self.write_policy == 2 {
             let jitter =
@@ -391,8 +406,10 @@ impl Profile {
             target -= spread / 2;
         }
         while frame > target {
-            let next =
-                self.write_buckets[self.ns.prf(label::WRITE_NEXT, seq, target as u32) as usize % 8];
+            let next = bucket(
+                &self.write_buckets,
+                self.ns.prf(label::WRITE_NEXT, seq, target as u32),
+            );
             target = if next > target {
                 next
             } else {
@@ -425,7 +442,11 @@ impl Profile {
             *slot = match self.generator {
                 0 => {
                     let raw = v.wrapping_add(i as u8);
-                    ROTATE[rotate.max(1) * 16 + usize::from((raw ^ v) & 15)]
+                    let row = rotate.max(1) * 16 + usize::from((raw ^ v) & 15);
+                    ROTATE
+                        .get(row)
+                        .copied()
+                        .unwrap_or_default()
                         .rotate_left(u32::from((raw ^ (v >> 4)) & 7))
                 }
                 1 => {
@@ -450,7 +471,8 @@ impl Profile {
                 _ => {
                     let offset = i % self.g[5].max(5);
                     if offset < self.g[5].max(5) - 3 {
-                        ((self.g[4] + 3) * i) as u8 ^ motif[(i % (self.g[4] * 4)) % 32]
+                        let at = (i % (self.g[4] * 4)) % motif.len();
+                        ((self.g[4] + 3) * i) as u8 ^ motif.get(at).copied().unwrap_or_default()
                     } else if offset < self.g[5].max(5) - 1 {
                         0x30 | (v % 10)
                     } else {
@@ -490,15 +512,17 @@ impl Profile {
     }
 
     pub(super) fn put_salt(&self, salt: &[u8; 16], block: &mut [u8]) {
-        for (i, pos) in self.salt_perm().into_iter().take(16).enumerate() {
-            block[pos] = self.salt_mask(i) ^ salt[i];
+        for (i, (pos, byte)) in self.salt_perm().into_iter().zip(salt).enumerate() {
+            if let Some(slot) = block.get_mut(pos) {
+                *slot = self.salt_mask(i) ^ byte;
+            }
         }
     }
 
     pub(super) fn salt(&self, block: &[u8]) -> [u8; 16] {
         let mut salt = [0u8; 16];
-        for (i, pos) in self.salt_perm().into_iter().take(16).enumerate() {
-            salt[i] = self.salt_mask(i) ^ block[pos];
+        for (i, (pos, slot)) in self.salt_perm().into_iter().zip(&mut salt).enumerate() {
+            *slot = self.salt_mask(i) ^ block.get(pos).copied().unwrap_or_default();
         }
         salt
     }
@@ -509,10 +533,11 @@ impl Profile {
             if self.mix_mode == 1 {
                 let block = self.mix_block;
                 for off in ((round as usize & 1) * block..n).step_by(block * 2) {
-                    if off + block <= n {
-                        for i in off..off + block {
-                            std::mem::swap(&mut pad[i], &mut sealed[i]);
-                        }
+                    let span = off..off + block;
+                    if let (Some(pad), Some(sealed)) =
+                        (pad.get_mut(span.clone()), sealed.get_mut(span))
+                    {
+                        pad.swap_with_slice(sealed);
                     }
                 }
             } else {
@@ -524,8 +549,9 @@ impl Profile {
                         + self.mix_offset as u64)
                         % stride as u64) as usize
                 };
-                for i in (offset..n).step_by(stride) {
-                    std::mem::swap(&mut pad[i], &mut sealed[i]);
+                let pairs = pad.iter_mut().zip(sealed.iter_mut());
+                for (pad, sealed) in pairs.skip(offset).step_by(stride) {
+                    std::mem::swap(pad, sealed);
                 }
             }
         }

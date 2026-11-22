@@ -1,8 +1,3 @@
-#![allow(
-    clippy::indexing_slicing,
-    reason = "wire indices follow fixed header widths and explicit packet length checks"
-)]
-
 use std::io;
 
 use bytes::Bytes;
@@ -13,10 +8,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 pub(super) async fn varint(read: &mut (impl AsyncRead + Unpin)) -> io::Result<u64> {
     let first = read.read_u8().await?;
     let size = 1usize << (first >> 6);
-    let mut raw = [0; 8];
-    raw[0] = first;
-    read.read_exact(&mut raw[1..size]).await?;
-    VarInt::decode(&mut &raw[..size])
+    let mut raw = [first, 0, 0, 0, 0, 0, 0, 0];
+    let encoded = raw.get_mut(..size).unwrap_or_default();
+    if let Some(rest) = encoded.get_mut(1..) {
+        read.read_exact(rest).await?;
+    }
+    VarInt::decode(&mut &*encoded)
         .map(VarInt::into_inner)
         .map_err(io::Error::other)
 }
@@ -36,11 +33,8 @@ pub(super) fn encode(kind: u32, payload: &mut bytes::BytesMut) -> io::Result<()>
     VarInt::from_u64(payload.len() as u64)
         .map_err(io::Error::other)?
         .encode(&mut room);
-    let header = 16 - room.len();
-    let len = payload.len();
-    payload.resize(len + header, 0);
-    payload.copy_within(..len, header);
-    payload[..header].copy_from_slice(&raw[..header]);
+    let used = 16 - room.len();
+    prepend(payload, raw.get(..used).unwrap_or_default());
     Ok(())
 }
 
@@ -55,8 +49,8 @@ pub(super) async fn send(
     VarInt::from_u64(payload.len() as u64)
         .map_err(io::Error::other)?
         .encode(&mut room);
-    let len = 16 - room.len();
-    write.write_all(&raw[..len]).await?;
+    let used = 16 - room.len();
+    write.write_all(raw.get(..used).unwrap_or_default()).await?;
     write.write_all(payload).await?;
     write.flush().await
 }
@@ -74,27 +68,44 @@ pub(super) fn routes() -> Bytes {
     body.into()
 }
 
+pub(super) fn prepend(buf: &mut bytes::BytesMut, head: &[u8]) {
+    let len = buf.len();
+    buf.resize(len + head.len(), 0);
+    buf.copy_within(..len, head.len());
+    let (front, _) = buf.split_at_mut(head.len());
+    front.copy_from_slice(head);
+}
+
 pub(super) fn decrement_hop(packet: &mut [u8]) -> bool {
     match packet.first().map(|b| b >> 4) {
-        Some(4) if packet.len() >= 20 && packet[8] > 1 => {
-            packet[8] -= 1;
-            packet[10..12].fill(0);
-            let mut sum: u32 = packet[..20]
+        Some(4) => {
+            let Some(header) = packet.first_chunk_mut::<20>() else {
+                return false;
+            };
+            if header[8] <= 1 {
+                return false;
+            }
+            header[8] -= 1;
+            header[10..12].fill(0);
+            let mut sum: u32 = header
                 .as_chunks::<2>()
                 .0
                 .iter()
-                .map(|word| u32::from(u16::from_be_bytes([word[0], word[1]])))
+                .map(|&word| u32::from(u16::from_be_bytes(word)))
                 .sum();
             while sum >> 16 != 0 {
                 sum = (sum & 0xffff) + (sum >> 16);
             }
-            packet[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+            header[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
             true
         }
-        Some(6) if packet.len() >= 40 && packet[7] > 1 => {
-            packet[7] -= 1;
-            true
-        }
+        Some(6) => match packet.first_chunk_mut::<40>() {
+            Some(header) if header[7] > 1 => {
+                header[7] -= 1;
+                true
+            }
+            _ => false,
+        },
         _ => false,
     }
 }

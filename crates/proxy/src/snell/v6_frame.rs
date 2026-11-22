@@ -1,8 +1,3 @@
-#![allow(
-    clippy::indexing_slicing,
-    reason = "record slices are checked against their wire lengths before access"
-)]
-
 use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -164,7 +159,8 @@ impl Sealer {
             start + salt_len + prefix_len + HEADER + tag_len + pad_len + body_len,
             0,
         );
-        let (salt, rest) = out[start..].split_at_mut(salt_len);
+        let record = out.get_mut(start..).unwrap_or_default();
+        let (salt, rest) = record.split_at_mut(salt_len);
         let (prefix, rest) = rest.split_at_mut(prefix_len);
         let (head, rest) = rest.split_at_mut(HEADER + tag_len);
         let (pad, body) = rest.split_at_mut(pad_len);
@@ -178,14 +174,18 @@ impl Sealer {
         } else if salt_len > 0 {
             salt.copy_from_slice(&self.salt);
         }
-        head[0] = 4;
-        head[3..5].copy_from_slice(&(pad_len as u16).to_be_bytes());
-        head[5..7].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        let [kind, _, _, pad0, pad1, len0, len1, ..] = head else {
+            return Err(invalid_data("snell v6 record header out of room"));
+        };
+        *kind = 4;
+        [*pad0, *pad1] = (pad_len as u16).to_be_bytes();
+        [*len0, *len1] = (payload.len() as u16).to_be_bytes();
         if let Some(aead) = &mut self.aead {
             aead.seal(head, prefix)?;
         }
         if !payload.is_empty() {
-            body[..payload.len()].copy_from_slice(payload);
+            let (sealed, _tag) = body.split_at_mut(payload.len());
+            sealed.copy_from_slice(payload);
             if let Some(aead) = &mut self.aead {
                 aead.seal(body, pad)?;
             }
@@ -211,8 +211,9 @@ impl Encode for Sealer {
         let now = now_seconds();
         while !data.is_empty() {
             let take = self.limit_at(now).min(data.len());
-            self.record(out, &data[..take])?;
-            data = &data[take..];
+            let (chunk, rest) = data.split_at(take);
+            self.record(out, chunk)?;
+            data = rest;
         }
         Ok(())
     }
@@ -267,7 +268,7 @@ impl Opener {
         let salt = if let Some(p) = &self.profile {
             p.salt(&block)
         } else {
-            block[..SALT].try_into().unwrap_or_default()
+            block.first_chunk::<SALT>().copied().unwrap_or_default()
         };
         self.aead = Some(Aead::new(&self.psk, &salt)?);
         Ok(true)
@@ -286,11 +287,14 @@ impl Opener {
         } else {
             sealed
         };
-        if plain[0] != 4 || (self.mode != Mode::Default && (plain[1] != 0 || plain[2] != 0)) {
+        let Some(&[kind, z0, z1, pad0, pad1, len0, len1]) = plain.first_chunk::<HEADER>() else {
+            return Err(invalid_data("snell v6 short record header"));
+        };
+        if kind != 4 || (self.mode != Mode::Default && (z0 != 0 || z1 != 0)) {
             return Err(invalid_data("snell v6 invalid record header"));
         }
-        let padding = usize::from(u16::from_be_bytes([plain[3], plain[4]]));
-        let payload = usize::from(u16::from_be_bytes([plain[5], plain[6]]));
+        let padding = usize::from(u16::from_be_bytes([pad0, pad1]));
+        let payload = usize::from(u16::from_be_bytes([len0, len1]));
         if self.mode != Mode::Default && padding != 0 {
             return Err(invalid_data("snell v6 unexpected record padding"));
         }
