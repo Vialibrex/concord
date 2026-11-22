@@ -389,16 +389,43 @@ impl<S: Stream + ?Sized> Stream for Box<S> {
 /// Replays bytes a sniffer or an inbound parser read ahead, then reads the
 /// stream. Writes pass straight through.
 pub struct PeekedStream<S> {
+    replay: Replay,
+    inner: S,
+}
+
+#[derive(Default)]
+struct Replay {
     head: Vec<u8>,
     offset: usize,
-    inner: S,
+}
+
+impl Replay {
+    fn pending(&self) -> &[u8] {
+        self.head.get(self.offset..).unwrap_or_default()
+    }
+
+    /// False once the head is replayed, leaving `buf` to the stream.
+    fn fill(&mut self, buf: &mut ReadBuf<'_>) -> bool {
+        let pending = self.pending();
+        if pending.is_empty() {
+            return false;
+        }
+        let take = pending.len().min(buf.remaining());
+        if let Some(slice) = pending.get(..take) {
+            buf.put_slice(slice);
+        }
+        self.offset += take;
+        if self.offset == self.head.len() {
+            *self = Replay::default();
+        }
+        true
+    }
 }
 
 impl<S> PeekedStream<S> {
     pub fn new(head: Vec<u8>, inner: S) -> Self {
         PeekedStream {
-            head,
-            offset: 0,
+            replay: Replay { head, offset: 0 },
             inner,
         }
     }
@@ -408,7 +435,7 @@ impl<S> PeekedStream<S> {
     }
 
     pub fn buffered(&self) -> &[u8] {
-        self.head.get(self.offset..).unwrap_or_default()
+        self.replay.pending()
     }
 }
 
@@ -419,17 +446,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for PeekedStream<S> {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let pending = this.head.get(this.offset..).unwrap_or_default();
-        if !pending.is_empty() {
-            let take = pending.len().min(buf.remaining());
-            if let Some(slice) = pending.get(..take) {
-                buf.put_slice(slice);
-            }
-            this.offset += take;
-            if this.offset == this.head.len() {
-                this.head = Vec::new();
-                this.offset = 0;
-            }
+        if this.replay.fill(buf) {
             return Poll::Ready(Ok(()));
         }
         Pin::new(&mut this.inner).poll_read(cx, buf)
@@ -467,8 +484,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PeekedStream<S> {
 }
 
 struct PeekedRead {
-    head: Vec<u8>,
-    offset: usize,
+    replay: Replay,
     inner: BoxRead,
 }
 
@@ -479,17 +495,7 @@ impl AsyncRead for PeekedRead {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let pending = this.head.get(this.offset..).unwrap_or_default();
-        if !pending.is_empty() {
-            let take = pending.len().min(buf.remaining());
-            if let Some(slice) = pending.get(..take) {
-                buf.put_slice(slice);
-            }
-            this.offset += take;
-            if this.offset == this.head.len() {
-                this.head = Vec::new();
-                this.offset = 0;
-            }
+        if this.replay.fill(buf) {
             return Poll::Ready(Ok(()));
         }
         Pin::new(&mut this.inner).poll_read(cx, buf)
@@ -523,20 +529,9 @@ impl<S: Stream> Stream for PeekedStream<S> {
     }
 
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
-        let PeekedStream {
-            head,
-            offset,
-            inner,
-        } = *self;
+        let PeekedStream { replay, inner } = *self;
         let (inner, write) = Box::new(inner).into_split();
-        (
-            Box::new(PeekedRead {
-                head,
-                offset,
-                inner,
-            }),
-            write,
-        )
+        (Box::new(PeekedRead { replay, inner }), write)
     }
 
     /// Once the head is replayed nothing is left above the socket, so `relay` may splice.
