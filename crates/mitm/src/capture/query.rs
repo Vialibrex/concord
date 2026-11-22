@@ -7,7 +7,8 @@ use concord_common::sync::lock;
 use serde::Serialize;
 use time::OffsetDateTime;
 
-use super::{Capture, CaptureStore, Exchange, ExchangeSummary, is_empty, millis, since_format};
+use super::wire::{is_empty, since_format};
+use super::{Capture, CaptureStore, Exchange, ExchangeSummary, millis};
 
 /// One page of `mitm.query`, newest first, with what the page's view needs besides it.
 #[derive(Debug, Serialize)]
