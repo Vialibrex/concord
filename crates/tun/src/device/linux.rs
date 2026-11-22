@@ -32,10 +32,28 @@ impl DeviceIo {
     }
 }
 
+pub(super) struct Offload {
+    pub(super) vnet: bool,
+    pub(super) segment_limit: usize,
+    pub(super) queues: usize,
+    udp_merge: std::sync::atomic::AtomicBool,
+}
+
+impl Default for Offload {
+    fn default() -> Self {
+        Offload {
+            vnet: false,
+            segment_limit: 0,
+            queues: 1,
+            udp_merge: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+}
+
 impl TunDevice {
     fn open_queue(&self) -> io::Result<Self> {
         let inner = self.inner.try_clone()?;
-        if self.vnet {
+        if self.offload.vnet {
             use std::os::fd::AsRawFd;
 
             // Opening a queue re-applies tun-rs's offload set, UDP segmentation included.
@@ -45,10 +63,11 @@ impl TunDevice {
             inner,
             name: self.name.clone(),
             index: self.index,
-            vnet: self.vnet,
-            segment_limit: self.segment_limit,
-            queues: 1,
-            udp_merge: std::sync::atomic::AtomicBool::new(true),
+            offload: Offload {
+                vnet: self.offload.vnet,
+                segment_limit: self.offload.segment_limit,
+                ..Offload::default()
+            },
         })
     }
 
@@ -78,34 +97,10 @@ impl TunDevice {
 }
 
 impl Device for TunDevice {
-    fn prepare(self) -> io::Result<Self> {
-        self.queued()
-    }
-
-    fn socket_owner(&self) -> Option<std::sync::Arc<dyn concord_netstack::SocketOwner>> {
-        self.queue_owner()
-    }
-
-    fn socket_watcher(
-        &self,
-    ) -> Option<std::sync::Arc<dyn concord_common::SocketWatcher + Send + Sync>> {
-        self.queue_watcher()
-    }
-
-    fn poll_io(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_queue(cx, false)
-    }
-
-    fn poll_park(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        self.poll_queue(cx, true)
-    }
-
-    fn set_busy(&self, busy: bool) -> io::Result<bool> {
-        self.set_queue_busy(busy)
-    }
+    queued_device!();
 
     fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-        if self.vnet {
+        if self.offload.vnet {
             let read = ready!(self.inner.poll_recv(cx, buf))?;
             return Poll::Ready(Ok(crate::vnet::packet_len(buf, read)));
         }
@@ -113,18 +108,18 @@ impl Device for TunDevice {
     }
 
     fn poll_send(&self, cx: &mut Context<'_>, packet: &[u8]) -> Poll<io::Result<usize>> {
-        if self.vnet {
+        if self.offload.vnet {
             return self.poll_send_vnet(cx, packet, 0);
         }
         self.inner.poll_send(cx, packet)
     }
 
     fn segment_limit(&self) -> usize {
-        self.segment_limit
+        self.offload.segment_limit
     }
 
     fn send_batch(&self) -> usize {
-        if self.vnet {
+        if self.offload.vnet {
             crate::vnet::UDP_RUN_LIMIT
         } else {
             Self::BATCH
@@ -137,7 +132,7 @@ impl Device for TunDevice {
         packets: &[&[u8]],
         failed: &mut usize,
     ) -> Poll<usize> {
-        if !self.vnet || packets.is_empty() {
+        if !self.offload.vnet || packets.is_empty() {
             return send_one(self, cx, packets, failed);
         }
         loop {
@@ -145,9 +140,10 @@ impl Device for TunDevice {
                 *failed += 1;
                 return Poll::Ready(1);
             }
-            let sent = crate::vnet::send_packets(packets, &self.udp_merge, failed, |parts| {
-                self.inner.try_send_vectored(parts)
-            });
+            let sent =
+                crate::vnet::send_packets(packets, &self.offload.udp_merge, failed, |parts| {
+                    self.inner.try_send_vectored(parts)
+                });
             if sent > 0 {
                 return Poll::Ready(sent);
             }
@@ -155,8 +151,8 @@ impl Device for TunDevice {
     }
 
     fn into_queues(self) -> Vec<Self> {
-        let mut extra = Vec::with_capacity(self.queues.saturating_sub(1));
-        for _ in 1..self.queues {
+        let mut extra = Vec::with_capacity(self.offload.queues.saturating_sub(1));
+        for _ in 1..self.offload.queues {
             match self.open_queue() {
                 Ok(queue) => extra.push(queue),
                 Err(err) => {
@@ -183,7 +179,7 @@ impl Device for TunDevice {
         const MAX_PARTS: usize = 10;
         let Some(head) = parts
             .first()
-            .filter(|_| self.vnet && parts.len() < MAX_PARTS)
+            .filter(|_| self.offload.vnet && parts.len() < MAX_PARTS)
         else {
             return Err(io::ErrorKind::Unsupported.into());
         };
@@ -198,7 +194,7 @@ impl Device for TunDevice {
     }
 
     fn rx_offset(&self) -> usize {
-        if self.vnet {
+        if self.offload.vnet {
             crate::vnet::HEADER_LEN
         } else {
             0
@@ -206,6 +202,6 @@ impl Device for TunDevice {
     }
 
     fn checksum_offload(&self) -> bool {
-        self.vnet
+        self.offload.vnet
     }
 }

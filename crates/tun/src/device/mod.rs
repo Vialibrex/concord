@@ -13,6 +13,8 @@ mod linux;
 mod other;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod queued;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use self::queued::queued_device;
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
@@ -210,26 +212,8 @@ pub struct TunDevice {
     inner: DeviceIo,
     name: String,
     index: Option<u32>,
-    #[cfg_attr(
-        not(target_os = "linux"),
-        allow(dead_code, reason = "offload is Linux-only")
-    )]
-    vnet: bool,
-    #[cfg_attr(
-        not(target_os = "linux"),
-        allow(dead_code, reason = "offload is Linux-only")
-    )]
-    segment_limit: usize,
-    #[cfg_attr(
-        not(target_os = "linux"),
-        allow(dead_code, reason = "multi-queue is Linux-only")
-    )]
-    queues: usize,
-    #[cfg_attr(
-        not(target_os = "linux"),
-        allow(dead_code, reason = "offload is Linux-only")
-    )]
-    udp_merge: std::sync::atomic::AtomicBool,
+    #[cfg(target_os = "linux")]
+    offload: linux::Offload,
 }
 
 impl TunDevice {
@@ -298,14 +282,14 @@ impl TunDevice {
             use std::os::fd::AsRawFd;
 
             crate::vnet::restrict_to_tcp(tun.inner.as_raw_fd())?;
-            tun.vnet = true;
+            tun.offload.vnet = true;
             if tun.inner.tcp_gso() {
-                tun.segment_limit = crate::vnet::SEGMENT_LIMIT;
+                tun.offload.segment_limit = crate::vnet::SEGMENT_LIMIT;
             }
         }
         #[cfg(target_os = "linux")]
         {
-            tun.queues = queues;
+            tun.offload.queues = queues;
         }
         Ok(tun)
     }
@@ -339,10 +323,8 @@ impl TunDevice {
             inner: DeviceIo::Tokio(inner),
             name,
             index,
-            vnet: false,
-            segment_limit: 0,
-            queues: 1,
-            udp_merge: std::sync::atomic::AtomicBool::new(true),
+            #[cfg(target_os = "linux")]
+            offload: linux::Offload::default(),
         }
     }
 

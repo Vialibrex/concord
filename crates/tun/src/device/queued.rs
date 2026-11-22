@@ -6,6 +6,38 @@ use std::sync::Arc;
 
 use super::*;
 
+/// The `Device` methods a device on its own poller takes from it, on Linux and Android alike.
+macro_rules! queued_device {
+    () => {
+        fn prepare(self) -> io::Result<Self> {
+            self.queued()
+        }
+
+        fn socket_owner(&self) -> Option<std::sync::Arc<dyn concord_netstack::SocketOwner>> {
+            self.queue_owner()
+        }
+
+        fn socket_watcher(
+            &self,
+        ) -> Option<std::sync::Arc<dyn concord_common::SocketWatcher + Send + Sync>> {
+            self.queue_watcher()
+        }
+
+        fn poll_io(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.poll_queue(cx, false)
+        }
+
+        fn poll_park(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            self.poll_queue(cx, true)
+        }
+
+        fn set_busy(&self, busy: bool) -> io::Result<bool> {
+            self.set_queue_busy(busy)
+        }
+    };
+}
+pub(super) use queued_device;
+
 impl DeviceIo {
     fn queued(self) -> io::Result<Self> {
         let Self::Tokio(device) = self else {
