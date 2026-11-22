@@ -1,0 +1,73 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use quinn::congestion::ControllerFactory;
+use quinn::{IdleTimeout, TransportConfig, VarInt};
+
+use crate::{INITIAL_PACKET_SIZE, datagram_buffer, transport_config};
+
+/// quic-go's `DefaultIdleTimeout`, which mihomo's QUIC clients and sing-quic's Hysteria2 keep.
+pub const MAX_IDLE: Duration = Duration::from_secs(30);
+/// mihomo's `DefaultStreamReceiveWindow` for its TUIC, ShadowQUIC and Hysteria clients.
+pub const STREAM_WINDOW: u64 = 15_728_640;
+/// mihomo's `DefaultConnectionReceiveWindow` for the same clients.
+pub const CONN_WINDOW: u64 = 67_108_864;
+/// mihomo's BBR initial window when a node sets no `cwnd`, in packets.
+pub const DEFAULT_CWND: u64 = 32;
+
+/// `value`, or `fallback` when the profile left it at zero.
+pub fn or_default(value: impl Into<u64>, fallback: u64) -> u64 {
+    match value.into() {
+        0 => fallback,
+        value => value,
+    }
+}
+
+/// The BBR initial window in bytes for a node's `cwnd` in packets.
+pub fn bbr_window(cwnd: u32) -> u64 {
+    or_default(cwnd, DEFAULT_CWND) * INITIAL_PACKET_SIZE
+}
+
+/// What a QUIC outbound sets on top of [`transport_config`].
+pub struct Transport {
+    pub stream_window: u64,
+    pub conn_window: u64,
+    /// Lets twice the connection window of writes wait for acknowledgement.
+    pub double_send_window: bool,
+    pub keep_alive: Option<Duration>,
+    /// The `max_datagram_frame_size` the connection advertises, which sizes its receive buffer.
+    pub datagram_frame: u64,
+    /// The concurrent bidirectional and unidirectional streams the peer may open.
+    pub streams: Option<u64>,
+    pub mtu_discovery: bool,
+    pub congestion: Option<Arc<dyn ControllerFactory + Send + Sync>>,
+}
+
+impl Transport {
+    pub fn build(self) -> Arc<TransportConfig> {
+        let varint = |value: u64| VarInt::from_u64(value).unwrap_or(VarInt::MAX);
+        let conn_window = varint(self.conn_window);
+        let mut config = transport_config();
+        config
+            .max_idle_timeout(IdleTimeout::try_from(MAX_IDLE).ok())
+            .keep_alive_interval(self.keep_alive)
+            .stream_receive_window(varint(self.stream_window))
+            .receive_window(conn_window)
+            .datagram_receive_buffer_size(Some(datagram_buffer(self.datagram_frame)));
+        if self.double_send_window {
+            config.send_window(conn_window.into_inner().saturating_mul(2));
+        }
+        if let Some(streams) = self.streams {
+            config
+                .max_concurrent_bidi_streams(varint(streams))
+                .max_concurrent_uni_streams(varint(streams));
+        }
+        if !self.mtu_discovery {
+            config.mtu_discovery_config(None);
+        }
+        if let Some(factory) = self.congestion {
+            config.congestion_controller_factory(factory);
+        }
+        Arc::new(config)
+    }
+}

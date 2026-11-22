@@ -12,9 +12,12 @@ use concord_common::{
     Address, BoxStream, DialCx, Outbound, OutboundInfo, OutboundKind, PacketSession,
 };
 use concord_config::proxy::{ProxyDef, TuicOpts};
-use concord_quic::{BbrProfile, ObfsSpec, QuicStream, bbr_factory, io_error};
+use concord_quic::{
+    BbrProfile, CONN_WINDOW, ObfsSpec, QuicStream, STREAM_WINDOW, Transport, bbr_factory,
+    bbr_window, io_error, or_default,
+};
+use quinn::TransportConfig;
 use quinn::congestion::ControllerFactory;
-use quinn::{IdleTimeout, TransportConfig, VarInt};
 
 use self::conn::Pool;
 use self::stream::{V4Response, check_response};
@@ -26,13 +29,9 @@ use crate::node::{Egress, info_for};
 use crate::quic::{QuicLink, node_crypto};
 use crate::uot;
 
-const DEFAULT_STREAM_WINDOW: u64 = 15_728_640;
-const DEFAULT_CONN_WINDOW: u64 = 67_108_864;
 const MAX_FRAME: usize = 1400;
 const UDP_PACKET: usize = 1252;
 const MAX_OPEN_STREAMS: u32 = 100;
-const MAX_IDLE: Duration = Duration::from_secs(30);
-const DEFAULT_CWND: u64 = 32;
 const MAX_FRAG_V5: usize = 1200 - wire::V5_OVERHEAD - 3;
 
 pub(crate) struct Shared {
@@ -131,32 +130,16 @@ impl Outbound for Tuic {
     }
 }
 
-fn controller(
-    opts: &TuicOpts,
-) -> Result<Option<Arc<dyn ControllerFactory + Send + Sync>>, BuildError> {
-    let cwnd = if opts.cwnd == 0 {
-        DEFAULT_CWND
-    } else {
-        u64::from(opts.cwnd)
-    };
-    Ok(match opts.congestion_controller.as_str() {
+fn controller(opts: &TuicOpts) -> Option<Arc<dyn ControllerFactory + Send + Sync>> {
+    match opts.congestion_controller.as_str() {
         "cubic" => Some(Arc::new(concord_quic::cubic())),
         "new_reno" => Some(Arc::new(concord_quic::new_reno())),
         "bbr" | "bbr_meta_v1" | "bbr_meta_v2" => Some(bbr_factory(
             BbrProfile::parse(&opts.bbr_profile),
-            cwnd * concord_quic::INITIAL_PACKET_SIZE,
+            bbr_window(opts.cwnd),
         )),
         _ => None,
-    })
-}
-
-fn window(value: u32, fallback: u64) -> VarInt {
-    VarInt::from_u64(if value == 0 {
-        fallback
-    } else {
-        u64::from(value)
-    })
-    .unwrap_or(VarInt::MAX)
+    }
 }
 
 fn transport(
@@ -164,26 +147,18 @@ fn transport(
     heartbeat: Duration,
     max_open: u32,
     frame: usize,
-) -> Result<Arc<TransportConfig>, BuildError> {
-    let mut config = concord_quic::transport_config();
-    let streams = u64::from(max_open + max_open.div_ceil(10));
-    config
-        .max_idle_timeout(IdleTimeout::try_from(MAX_IDLE).ok())
-        .keep_alive_interval(Some(heartbeat))
-        .stream_receive_window(window(opts.recv_window_conn, DEFAULT_STREAM_WINDOW))
-        .receive_window(window(opts.recv_window, DEFAULT_CONN_WINDOW))
-        .max_concurrent_bidi_streams(VarInt::from_u64(streams).unwrap_or(VarInt::MAX))
-        .max_concurrent_uni_streams(VarInt::from_u64(streams).unwrap_or(VarInt::MAX))
-        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(
-            u64::try_from(frame).unwrap_or(u64::MAX),
-        )));
-    if opts.disable_mtu_discovery {
-        config.mtu_discovery_config(None);
+) -> Arc<TransportConfig> {
+    Transport {
+        stream_window: or_default(opts.recv_window_conn, STREAM_WINDOW),
+        conn_window: or_default(opts.recv_window, CONN_WINDOW),
+        double_send_window: false,
+        keep_alive: Some(heartbeat),
+        datagram_frame: u64::try_from(frame).unwrap_or(u64::MAX),
+        streams: Some(u64::from(max_open + max_open.div_ceil(10))),
+        mtu_discovery: !opts.disable_mtu_discovery,
+        congestion: controller(opts),
     }
-    if let Some(factory) = controller(opts)? {
-        config.congestion_controller_factory(factory);
-    }
-    Ok(Arc::new(config))
+    .build()
 }
 
 fn parse_uuid(text: &str) -> Result<[u8; 16], BuildError> {
@@ -277,7 +252,7 @@ pub(crate) fn build(
         server: Address::new(host, opts.port),
         server_name: (!opts.disable_sni).then_some(server_name),
         crypto: tls,
-        transport: transport(opts, heartbeat, client_max_open, frame)?,
+        transport: transport(opts, heartbeat, client_max_open, frame),
         obfs: ObfsSpec::None,
         hop: None,
         datagram_frame: u64::try_from(frame).ok(),

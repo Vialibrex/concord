@@ -17,10 +17,11 @@ use concord_common::{
 };
 use concord_config::proxy::{HysteriaOpts, ProxyDef};
 use concord_quic::{
-    Brutal, Hop, ObfsSpec, QuicConn, QuicStream, SharedConn, SwitchFactory, io_error,
+    Brutal, CONN_WINDOW, Hop, ObfsSpec, QuicConn, QuicStream, STREAM_WINDOW, SharedConn,
+    SwitchFactory, Transport, io_error,
 };
 use quinn::congestion::ControllerFactory;
-use quinn::{IdleTimeout, SendStream, TransportConfig, VarInt};
+use quinn::{SendStream, TransportConfig, VarInt};
 use tokio::io::AsyncWriteExt;
 
 use self::stream::FastOpen;
@@ -32,10 +33,7 @@ use crate::quic::{QuicLink, node_crypto};
 use crate::session_slot::SessionSlot;
 use crate::util::{parse_bps, parse_ports};
 
-const DEFAULT_STREAM_WINDOW: u64 = 15_728_640;
-const DEFAULT_CONN_WINDOW: u64 = 67_108_864;
 const QUIC_STREAM_WINDOW: u64 = 6 * 1024 * 1024;
-const MAX_IDLE: Duration = Duration::from_secs(30);
 const KEEP_ALIVE: Duration = Duration::from_secs(10);
 const PROTOCOL_TIMEOUT: Duration = Duration::from_secs(10);
 const DEFAULT_HOP_SECS: u64 = 10;
@@ -222,8 +220,8 @@ impl Outbound for Hysteria {
 }
 
 fn transport(opts: &HysteriaOpts, controllers: Arc<SwitchFactory>) -> Arc<TransportConfig> {
-    let (stream, conn) = if opts.recv_window == 0 {
-        (DEFAULT_STREAM_WINDOW, DEFAULT_CONN_WINDOW)
+    let (stream_window, conn_window) = if opts.recv_window == 0 {
+        (STREAM_WINDOW, CONN_WINDOW)
     } else if opts.recv_window_conn == 0 {
         (QUIC_STREAM_WINDOW, u64::from(opts.recv_window))
     } else {
@@ -232,19 +230,17 @@ fn transport(opts: &HysteriaOpts, controllers: Arc<SwitchFactory>) -> Arc<Transp
             u64::from(opts.recv_window),
         )
     };
-    let mut config = concord_quic::transport_config();
-    config
-        .max_idle_timeout(IdleTimeout::try_from(MAX_IDLE).ok())
-        .keep_alive_interval(Some(KEEP_ALIVE))
-        .stream_receive_window(VarInt::from_u64(stream).unwrap_or(VarInt::MAX))
-        .receive_window(VarInt::from_u64(conn).unwrap_or(VarInt::MAX))
-        .send_window(conn.saturating_mul(2))
-        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(DATAGRAM_FRAME)))
-        .congestion_controller_factory(controllers);
-    if opts.disable_mtu_discovery {
-        config.mtu_discovery_config(None);
+    Transport {
+        stream_window,
+        conn_window,
+        double_send_window: true,
+        keep_alive: Some(KEEP_ALIVE),
+        datagram_frame: DATAGRAM_FRAME,
+        streams: None,
+        mtu_discovery: !opts.disable_mtu_discovery,
+        congestion: Some(controllers),
     }
-    Arc::new(config)
+    .build()
 }
 
 fn auth(opts: &HysteriaOpts) -> Result<Vec<u8>, BuildError> {

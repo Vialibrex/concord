@@ -15,10 +15,11 @@ use concord_common::{
 };
 use concord_config::proxy::{ProxyDef, ShadowQuicOpts};
 use concord_quic::{
-    BbrProfile, Brutal, ObfsSpec, QuicStream, SharedConn, SwitchFactory, bbr_factory, io_error,
+    BbrProfile, Brutal, CONN_WINDOW, ObfsSpec, QuicStream, STREAM_WINDOW, SharedConn,
+    SwitchFactory, Transport, bbr_factory, bbr_window, io_error, or_default,
 };
 use quinn::congestion::ControllerFactory;
-use quinn::{IdleTimeout, TransportConfig, VarInt};
+use quinn::{TransportConfig, VarInt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 
@@ -34,12 +35,8 @@ use crate::quic::{Crypto, QuicLink};
 use crate::session_slot::SessionSlot;
 use crate::util::parse_bps;
 
-const DEFAULT_STREAM_WINDOW: u64 = 15_728_640;
-const DEFAULT_CONN_WINDOW: u64 = 67_108_864;
 const DEFAULT_FRAME: u64 = 1400;
-const DEFAULT_STREAMS: u32 = 1024;
-const DEFAULT_CWND: u64 = 32;
-const MAX_IDLE: Duration = Duration::from_secs(30);
+const DEFAULT_STREAMS: u64 = 1024;
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(10);
 const BRUTAL_MTU: u16 = 1200;
 
@@ -67,7 +64,8 @@ struct Settings {
     over_stream: bool,
     up: u64,
     down: u64,
-    cwnd: u64,
+    /// The BBR initial window in bytes.
+    window: u64,
     profile: BbrProfile,
 }
 
@@ -124,11 +122,7 @@ async fn negotiate(
         switch.replace(Box::new(Brutal::new(rate, BRUTAL_MTU, Instant::now())));
     } else {
         switch.replace(
-            bbr_factory(
-                settings.profile,
-                settings.cwnd * concord_quic::INITIAL_PACKET_SIZE,
-            )
-            .build(Instant::now(), BRUTAL_MTU),
+            bbr_factory(settings.profile, settings.window).build(Instant::now(), BRUTAL_MTU),
         );
     }
 }
@@ -247,59 +241,33 @@ impl Outbound for ShadowQuic {
 
 fn controller(
     name: &str,
-    cwnd: u64,
+    window: u64,
     profile: BbrProfile,
 ) -> Arc<dyn ControllerFactory + Send + Sync> {
     match name {
         "new_reno" => Arc::new(concord_quic::new_reno()),
-        "bbr" | "bbr_meta_v1" | "bbr_meta_v2" => {
-            bbr_factory(profile, cwnd * concord_quic::INITIAL_PACKET_SIZE)
-        }
+        "bbr" | "bbr_meta_v1" | "bbr_meta_v2" => bbr_factory(profile, window),
         _ => Arc::new(concord_quic::cubic()),
     }
 }
 
-fn window(value: u32, fallback: u64) -> VarInt {
-    VarInt::from_u64(if value == 0 {
-        fallback
-    } else {
-        u64::from(value)
-    })
-    .unwrap_or(VarInt::MAX)
-}
-
 fn datagram_frame(opts: &ShadowQuicOpts) -> u64 {
-    match opts.max_datagram_frame_size {
-        0 => DEFAULT_FRAME,
-        size => u64::from(size),
-    }
+    or_default(opts.max_datagram_frame_size, DEFAULT_FRAME)
 }
 
 fn transport(opts: &ShadowQuicOpts, controllers: Arc<SwitchFactory>) -> Arc<TransportConfig> {
-    let streams = VarInt::from_u32(match opts.max_open_streams {
-        0 => DEFAULT_STREAMS,
-        count => count,
-    });
-    let conn_window = window(opts.recv_window, DEFAULT_CONN_WINDOW);
-    let mut config = concord_quic::transport_config();
-    config
-        .max_idle_timeout(IdleTimeout::try_from(MAX_IDLE).ok())
-        .stream_receive_window(window(opts.recv_window_conn, DEFAULT_STREAM_WINDOW))
-        .receive_window(conn_window)
-        .send_window(conn_window.into_inner().saturating_mul(2))
-        .max_concurrent_bidi_streams(streams)
-        .max_concurrent_uni_streams(streams)
-        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(datagram_frame(opts))))
-        .congestion_controller_factory(controllers);
-    if opts.keep_alive_interval > 0 {
-        config.keep_alive_interval(Some(Duration::from_millis(u64::from(
-            opts.keep_alive_interval,
-        ))));
+    Transport {
+        stream_window: or_default(opts.recv_window_conn, STREAM_WINDOW),
+        conn_window: or_default(opts.recv_window, CONN_WINDOW),
+        double_send_window: true,
+        keep_alive: (opts.keep_alive_interval > 0)
+            .then(|| Duration::from_millis(u64::from(opts.keep_alive_interval))),
+        datagram_frame: datagram_frame(opts),
+        streams: Some(or_default(opts.max_open_streams, DEFAULT_STREAMS)),
+        mtu_discovery: !opts.disable_mtu_discovery,
+        congestion: Some(controllers),
     }
-    if opts.disable_mtu_discovery {
-        config.mtu_discovery_config(None);
-    }
-    Arc::new(config)
+    .build()
 }
 
 /// `Ok(true)` when QUIC version 1 is among the requested ones.
@@ -344,14 +312,10 @@ pub(crate) fn build(
     };
     let jls = JlsClient::new(user, &alpn)
         .map_err(|err| BuildError::invalid(format!("shadowquic tls: {err}")))?;
-    let cwnd = if opts.cwnd == 0 {
-        DEFAULT_CWND
-    } else {
-        u64::from(opts.cwnd)
-    };
+    let window = bbr_window(opts.cwnd);
     let controllers = SwitchFactory::new(controller(
         &opts.congestion_controller,
-        cwnd,
+        window,
         BbrProfile::parse(&opts.bbr_profile),
     ));
     let link = QuicLink {
@@ -376,7 +340,7 @@ pub(crate) fn build(
             over_stream: opts.udp_over_stream,
             up: parse_bps(&opts.up),
             down: parse_bps(&opts.down),
-            cwnd,
+            window,
             profile: BbrProfile::parse(&opts.bbr_profile),
         },
         controllers,

@@ -232,7 +232,11 @@ fn client_link(port: u16) -> QuicLink {
     };
     let tls = concord_tls::quic_client_config(&options, TrustStore::new(b"", Vec::new()), &["h3"])
         .unwrap();
-    let controllers = SwitchFactory::new(controller("", 32, BbrProfile::Standard));
+    let controllers = SwitchFactory::new(controller(
+        "",
+        concord_quic::bbr_window(0),
+        BbrProfile::Standard,
+    ));
     let mut link = QuicLink {
         tasks: Default::default(),
         egress: Egress::new("sq", &Default::default()),
@@ -259,7 +263,11 @@ fn outbound(port: u16, settings: Settings) -> ShadowQuic {
         ),
         link: client_link(port),
         settings,
-        controllers: SwitchFactory::new(controller("", 32, BbrProfile::Standard)),
+        controllers: SwitchFactory::new(controller(
+            "",
+            concord_quic::bbr_window(0),
+            BbrProfile::Standard,
+        )),
         current: crate::session_slot::SessionSlot::default(),
         connecting: tokio::sync::Mutex::new(()),
     }
@@ -270,7 +278,7 @@ fn plain() -> Settings {
         over_stream: false,
         up: 0,
         down: 0,
-        cwnd: 32,
+        window: concord_quic::bbr_window(0),
         profile: BbrProfile::Standard,
     }
 }

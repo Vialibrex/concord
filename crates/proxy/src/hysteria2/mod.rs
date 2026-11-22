@@ -14,10 +14,11 @@ use concord_common::{
 };
 use concord_config::proxy::{Hysteria2Opts, ProxyDef};
 use concord_quic::{
-    BbrProfile, Brutal, Hop, ObfsSpec, QuicStream, SharedConn, SwitchFactory, bbr_factory, io_error,
+    BbrProfile, Brutal, Hop, ObfsSpec, QuicStream, SharedConn, SwitchFactory, Transport,
+    bbr_factory, bbr_window, io_error, or_default,
 };
+use quinn::TransportConfig;
 use quinn::congestion::ControllerFactory;
-use quinn::{IdleTimeout, TransportConfig, VarInt};
 use tokio::sync::watch;
 
 use self::realm::Realm;
@@ -35,13 +36,11 @@ use crate::util::{lock, parse_bps, parse_ports};
 const DATAGRAM_FRAME: u64 = 16_383;
 const DEFAULT_STREAM_WINDOW: u64 = 8 * 1024 * 1024;
 const DEFAULT_CONN_WINDOW: u64 = DEFAULT_STREAM_WINDOW * 5 / 2;
-const MAX_IDLE: Duration = Duration::from_secs(30);
 const KEEP_ALIVE: Duration = Duration::from_secs(10);
 const DEFAULT_UDP_MTU: usize = 1200 - 3;
 const MIN_HOP: u64 = 5;
 const DEFAULT_HOP: u64 = 30;
 const AUTH_OK: u16 = 233;
-const DEFAULT_CWND: u32 = 32;
 
 struct Hy2Conn {
     shared: SharedConn<Hub>,
@@ -325,34 +324,22 @@ fn hop_interval(text: &str) -> Result<(Duration, Duration), BuildError> {
     Ok((Duration::from_secs(start), Duration::from_secs(end)))
 }
 
-fn window(value: u64, fallback: u64) -> VarInt {
-    VarInt::from_u64(if value == 0 { fallback } else { value }).unwrap_or(VarInt::MAX)
-}
-
 fn transport(opts: &Hysteria2Opts, controllers: Arc<SwitchFactory>) -> Arc<TransportConfig> {
-    let mut config = concord_quic::transport_config();
-    let stream_window = window(opts.max_stream_receive_window, DEFAULT_STREAM_WINDOW);
-    let conn_window = window(opts.max_connection_receive_window, DEFAULT_CONN_WINDOW);
-    config
-        .max_idle_timeout(IdleTimeout::try_from(MAX_IDLE).ok())
-        .keep_alive_interval(Some(KEEP_ALIVE))
-        .stream_receive_window(stream_window)
-        .receive_window(conn_window)
-        .send_window(conn_window.into_inner().saturating_mul(2))
-        .datagram_receive_buffer_size(Some(concord_quic::datagram_buffer(DATAGRAM_FRAME)))
-        .congestion_controller_factory(controllers);
-    Arc::new(config)
+    Transport {
+        stream_window: or_default(opts.max_stream_receive_window, DEFAULT_STREAM_WINDOW),
+        conn_window: or_default(opts.max_connection_receive_window, DEFAULT_CONN_WINDOW),
+        double_send_window: true,
+        keep_alive: Some(KEEP_ALIVE),
+        datagram_frame: DATAGRAM_FRAME,
+        streams: None,
+        mtu_discovery: true,
+        congestion: Some(controllers),
+    }
+    .build()
 }
 
 fn initial_controller(opts: &Hysteria2Opts) -> Arc<dyn ControllerFactory + Send + Sync> {
-    bbr_factory(
-        BbrProfile::parse(&opts.bbr_profile),
-        u64::from(if opts.cwnd == 0 {
-            DEFAULT_CWND
-        } else {
-            opts.cwnd
-        }) * concord_quic::INITIAL_PACKET_SIZE,
-    )
+    bbr_factory(BbrProfile::parse(&opts.bbr_profile), bbr_window(opts.cwnd))
 }
 
 fn obfs_spec(opts: &Hysteria2Opts) -> Result<ObfsSpec, BuildError> {
