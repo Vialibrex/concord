@@ -105,7 +105,6 @@ impl Engine {
         Ok(())
     }
 
-    /// `StopTun`.
     pub async fn stop_vpn_tun(&self) {
         {
             let mut slot = self.tun.lock().await;

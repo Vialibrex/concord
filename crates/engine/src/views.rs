@@ -13,28 +13,22 @@ pub struct MemoryStats {
     pub runtime_other: u64,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default)]
 pub struct Capabilities {
-    #[serde(rename = "impl")]
     pub implementation: &'static str,
     pub version: &'static str,
-    #[serde(rename = "proxy-types")]
     pub proxy_types: Vec<&'static str>,
     pub transports: Vec<&'static str>,
-    #[serde(rename = "rule-types")]
     pub rule_types: Vec<&'static str>,
-    #[serde(rename = "ss-plugins")]
     pub ss_plugins: Vec<&'static str>,
-    #[serde(rename = "congestion-controllers")]
     pub congestion_controllers: Vec<&'static str>,
     pub features: Features,
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Default)]
 pub struct Features {
     pub mitm: bool,
     pub ech: bool,
-    #[serde(rename = "system-stack")]
     pub system_stack: bool,
 }
 

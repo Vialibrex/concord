@@ -109,7 +109,6 @@ pub struct Engine {
     running: AtomicBool,
     sdk_version: AtomicI32,
     route: Arc<RouteCounters>,
-    android: bool,
     shared: Shared,
     table: Arc<ConnTable>,
     listeners: Listeners,
@@ -211,7 +210,6 @@ impl Engine {
             running: AtomicBool::new(false),
             sdk_version: AtomicI32::new(0),
             route,
-            android: config.android,
             shared,
             table: table.clone(),
             listeners: Listeners::native(),
@@ -239,7 +237,7 @@ impl Engine {
     }
 
     pub fn is_android(&self) -> bool {
-        self.android
+        self.shared.android
     }
 
     fn runtime(&self) -> Option<Arc<concord_tunnel::Runtime>> {
@@ -487,7 +485,7 @@ impl Engine {
             return;
         }
         let mut write_to_system = ntp.write_to_system;
-        if write_to_system && self.android {
+        if write_to_system && self.shared.android {
             tracing::warn!(
                 "ntp write-to-system ignored: Android does not let apps set the system time"
             );

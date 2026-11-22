@@ -1639,14 +1639,14 @@ async fn many_flows_leave_nothing_behind() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capabilities_report_ss_plugins_and_congestion_controllers() {
     let rig = Rig::new();
-    let value = serde_json::to_value(rig.engine.capabilities()).unwrap();
+    let capabilities = rig.engine.capabilities();
     assert_eq!(
-        value["ss-plugins"],
-        serde_json::json!(["obfs", "v2ray-plugin", "shadow-tls", "jls", "gost-plugin"])
+        capabilities.ss_plugins,
+        ["obfs", "v2ray-plugin", "shadow-tls", "jls", "gost-plugin"]
     );
     assert_eq!(
-        value["congestion-controllers"],
-        serde_json::json!(["cubic", "reno", "bbr"])
+        capabilities.congestion_controllers,
+        ["cubic", "reno", "bbr"]
     );
     rig.engine.shutdown().await;
 }

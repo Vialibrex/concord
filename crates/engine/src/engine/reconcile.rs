@@ -71,7 +71,7 @@ impl Engine {
         }
         self.faults
             .set_listeners(errors.iter().map(ServiceFault::listener).collect());
-        if !self.android {
+        if !self.shared.android {
             self.reconcile_tun(applied).await;
         }
     }
@@ -94,7 +94,7 @@ impl Engine {
         self.faults.set_listeners(Vec::new());
         *self.dns_server.lock().await = None;
         self.faults.set_dns(None);
-        if !self.android {
+        if !self.shared.android {
             let mut slot = self.tun.lock().await;
             self.close_tun(&mut slot).await;
             self.faults.set_tun(None);
