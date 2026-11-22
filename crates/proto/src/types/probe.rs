@@ -76,7 +76,7 @@ dto! {
     pub struct MitmCertificate {
         /// Absent while no certificate authority exists.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub certificate: Option<Json>,
+        pub certificate: Option<MitmCertificateInfo>,
     }
 
     pub struct MitmValidateParams {
@@ -104,8 +104,51 @@ dto! {
         pub name: String,
     }
 
-    pub struct MitmResult {
-        pub result: Json,
+    pub struct MitmScriptResult {
+        pub result: MitmScriptOutput,
+    }
+
+    /// What a script the user ran wrote, and its `$done` value as JSON.
+    pub struct MitmScriptOutput {
+        pub logs: Vec<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        pub result: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        pub error: String,
+    }
+
+    pub struct MitmExchangesResult {
+        pub result: MitmExchangeList,
+    }
+
+    pub struct MitmExchangeList {
+        pub capturing: bool,
+        /// When the oldest held exchange started, or capture was turned on (RFC 3339).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub since: Option<String>,
+        pub exchanges: Vec<MitmExchangeSummary>,
+        /// The connection had closed when its list was taken, so the list is whole.
+        pub closed: bool,
+    }
+
+    /// `null` when the capture no longer holds the exchange.
+    pub struct MitmExchangeResult {
+        pub result: Option<MitmExchange>,
+    }
+
+    /// `null` when the capture no longer holds the body.
+    pub struct MitmBodyResult {
+        pub result: Option<MitmBody>,
+    }
+
+    /// A body as kept, decoded unless `encoding` names a coding left on it.
+    pub struct MitmBody {
+        /// Base64.
+        pub data: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub truncated: bool,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        pub encoding: String,
     }
 
     pub struct MitmExchangesParams {
@@ -310,6 +353,65 @@ pub struct MitmExchangeSummary {
     pub connection_id: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<MitmApp>,
+}
+
+/// One request as the rules left it: the headers sent upstream and those answered to the
+/// client. The sizes and the protocol are the client's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub struct MitmExchange {
+    #[serde(flatten)]
+    pub summary: MitmExchangeSummary,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub connection: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub original_url: String,
+    pub proto: String,
+    /// The response's reason phrase as the client got it; none for a status without one.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    pub ttfb: i64,
+    pub request_header: BTreeMap<String, Vec<String>>,
+    /// `null` until a response came.
+    pub response_header: Option<BTreeMap<String, Vec<String>>>,
+    pub actions: Vec<MitmAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<MitmRouteNote>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MitmAction {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// The module whose line acted; none for the profile's own.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub module: String,
+}
+
+/// The rule that decided the request and the chain it left through, exit first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub struct MitmRouteNote {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rule: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rule_payload: String,
+    pub chains: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub struct MitmCertificateInfo {
+    pub pem: String,
+    pub fingerprint: String,
+    pub subject: String,
+    /// RFC 3339.
+    pub not_before: String,
+    /// RFC 3339.
+    pub not_after: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

@@ -67,13 +67,13 @@ async fn setup(rules: &[&str]) -> Setup {
          mitm:\n  enable: true\n  hostname: ['localhost:{tls}', 'localhost:{plain}']\n  \
          ca-fingerprint: {}\n  skip-server-cert-verify: true\n\
          rules:\n{rules}",
-        info["fingerprint"].as_str().unwrap()
+        info.fingerprint
     );
     rig.apply(&config).await.unwrap();
     rig.engine.start_listeners().await;
     Setup {
         rig,
-        ca: info["pem"].as_str().unwrap().to_string(),
+        ca: info.pem,
         tls,
         plain,
         a,

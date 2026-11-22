@@ -1,3 +1,4 @@
+use concord_common::exchange_query::{ContentKind, StatusClass};
 use serde::{Serialize, Serializer};
 use time::OffsetDateTime;
 
@@ -34,9 +35,10 @@ pub struct ExchangeSummary {
     /// The response's, without parameters, in lower case.
     #[serde(rename = "content-type", skip_serializing_if = "is_empty")]
     pub content_type: String,
-    #[serde(rename = "status-class")]
-    pub status_class: &'static str,
-    pub kind: &'static str,
+    #[serde(rename = "status-class", serialize_with = "status_name")]
+    pub status_class: StatusClass,
+    #[serde(serialize_with = "kind_name")]
+    pub kind: ContentKind,
     /// A rewrite, a local map or a script acted on it.
     #[serde(skip_serializing_if = "is_false")]
     pub rewritten: bool,
@@ -143,6 +145,14 @@ pub struct Body {
     pub truncated: bool,
     #[serde(skip_serializing_if = "is_empty")]
     pub encoding: String,
+}
+
+fn status_name<S: Serializer>(status: &StatusClass, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(status.name())
+}
+
+fn kind_name<S: Serializer>(kind: &ContentKind, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(kind.name())
 }
 
 fn base64_bytes<S: Serializer>(data: &[u8], serializer: S) -> Result<S::Ok, S::Error> {

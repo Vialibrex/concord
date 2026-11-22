@@ -57,6 +57,8 @@ mod tun;
 mod update;
 mod views;
 
+#[cfg(feature = "mitm")]
+pub use mitm::ConnectionExchanges;
 pub use mitm::MitmService;
 pub use providers::Providers;
 

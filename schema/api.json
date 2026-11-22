@@ -815,7 +815,7 @@
         "$ref": "#/$defs/MitmScriptParams"
       },
       "result": {
-        "$ref": "#/$defs/MitmResult"
+        "$ref": "#/$defs/MitmScriptResult"
       }
     },
     {
@@ -827,7 +827,7 @@
         "$ref": "#/$defs/MitmExchangesParams"
       },
       "result": {
-        "$ref": "#/$defs/MitmResult"
+        "$ref": "#/$defs/MitmExchangesResult"
       }
     },
     {
@@ -851,7 +851,7 @@
         "$ref": "#/$defs/MitmExchangeParams"
       },
       "result": {
-        "$ref": "#/$defs/MitmResult"
+        "$ref": "#/$defs/MitmExchangeResult"
       }
     },
     {
@@ -863,7 +863,7 @@
         "$ref": "#/$defs/MitmBodyParams"
       },
       "result": {
-        "$ref": "#/$defs/MitmResult"
+        "$ref": "#/$defs/MitmBodyResult"
       }
     }
   ],
@@ -4859,9 +4859,46 @@
       "type": "object",
       "properties": {
         "certificate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MitmCertificateInfo"
+            },
+            {
+              "type": "null"
+            }
+          ],
           "description": "Absent while no certificate authority exists."
         }
       }
+    },
+    "MitmCertificateInfo": {
+      "type": "object",
+      "properties": {
+        "pem": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "subject": {
+          "type": "string"
+        },
+        "not-before": {
+          "type": "string",
+          "description": "RFC 3339."
+        },
+        "not-after": {
+          "type": "string",
+          "description": "RFC 3339."
+        }
+      },
+      "required": [
+        "pem",
+        "fingerprint",
+        "subject",
+        "not-before",
+        "not-after"
+      ]
     },
     "MitmValidateParams": {
       "type": "object",
@@ -6566,14 +6603,37 @@
         "name"
       ]
     },
-    "MitmResult": {
+    "MitmScriptResult": {
       "type": "object",
       "properties": {
-        "result": true
+        "result": {
+          "$ref": "#/$defs/MitmScriptOutput"
+        }
       },
       "required": [
         "result"
       ]
+    },
+    "MitmScriptOutput": {
+      "type": "object",
+      "properties": {
+        "logs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "result": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "logs"
+      ],
+      "description": "What a script the user ran wrote, and its `$done` value as JSON."
     },
     "MitmExchangesParams": {
       "type": "object",
@@ -6588,6 +6648,250 @@
       "required": [
         "connection"
       ]
+    },
+    "MitmExchangesResult": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "$ref": "#/$defs/MitmExchangeList"
+        }
+      },
+      "required": [
+        "result"
+      ]
+    },
+    "MitmExchangeList": {
+      "type": "object",
+      "properties": {
+        "capturing": {
+          "type": "boolean"
+        },
+        "since": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "When the oldest held exchange started, or capture was turned on (RFC 3339)."
+        },
+        "exchanges": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MitmExchangeSummary"
+          }
+        },
+        "closed": {
+          "type": "boolean",
+          "description": "The connection had closed when its list was taken, so the list is whole."
+        }
+      },
+      "required": [
+        "capturing",
+        "exchanges",
+        "closed"
+      ]
+    },
+    "MitmExchangeSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "start": {
+          "type": "string",
+          "description": "RFC 3339."
+        },
+        "pending": {
+          "type": "boolean"
+        },
+        "duration": {
+          "type": "integer",
+          "format": "int64",
+          "description": "Milliseconds; for one in progress, how long it had waited when listed."
+        },
+        "method": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        },
+        "status": {
+          "type": "integer",
+          "format": "int32",
+          "description": "0 until a response came."
+        },
+        "request-size": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "response-size": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "error": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "description": "With its query."
+        },
+        "content-type": {
+          "type": "string",
+          "description": "The response's, without parameters, in lower case."
+        },
+        "status-class": {
+          "$ref": "#/$defs/MitmStatus"
+        },
+        "kind": {
+          "$ref": "#/$defs/MitmKind"
+        },
+        "rewritten": {
+          "type": "boolean",
+          "description": "A rewrite, a local map or a script acted on it."
+        },
+        "action-kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "The kinds of the actions `mitm.exchange` lists, each once, in the order they first\nacted."
+        },
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MitmAnswer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What answered it in place of its server; absent when the request went to the server."
+        },
+        "connection-id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0,
+          "description": "The connection it went out on, as `connection.watch` numbers it."
+        },
+        "app": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MitmApp"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "start",
+        "duration",
+        "method",
+        "url",
+        "status",
+        "request-size",
+        "response-size",
+        "host",
+        "path",
+        "status-class",
+        "kind"
+      ],
+      "description": "One exchange as `mitm.query` and `mitm.exchanges` list it."
+    },
+    "MitmStatus": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "1xx",
+            "2xx",
+            "3xx",
+            "4xx",
+            "5xx"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "failed",
+          "description": "No response: the request failed, was aborted or its connection broke."
+        },
+        {
+          "type": "string",
+          "const": "pending",
+          "description": "Still waiting for its response."
+        }
+      ]
+    },
+    "MitmKind": {
+      "type": "string",
+      "enum": [
+        "json",
+        "html",
+        "script",
+        "css",
+        "image",
+        "font",
+        "media",
+        "text",
+        "other"
+      ],
+      "description": "What a response holds, read from its `Content-Type`; `other` also takes a response\nwithout one and a request not answered yet."
+    },
+    "MitmAnswer": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "map-local"
+          ]
+        },
+        {
+          "type": "string",
+          "const": "reject",
+          "description": "The rules rejected it, a `REJECT` policy or a `url-rewrite` reject line; a\n`REJECT-DROP` answers nothing."
+        },
+        {
+          "type": "string",
+          "const": "redirect",
+          "description": "A `url-rewrite` 302 or 307 line."
+        },
+        {
+          "type": "string",
+          "const": "script",
+          "description": "A request script answered or aborted it."
+        }
+      ]
+    },
+    "MitmApp": {
+      "type": "object",
+      "properties": {
+        "process": {
+          "type": "string"
+        },
+        "process-path": {
+          "type": "string"
+        },
+        "uid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "process"
+      ],
+      "description": "The process behind the connection an exchange went out on, kept after it closed."
     },
     "MitmQueryParams": {
       "type": "object",
@@ -6715,45 +7019,6 @@
       },
       "description": "An empty list or an absent field lets every exchange through; a list keeps the\nexchanges that match any of its items."
     },
-    "MitmStatus": {
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "1xx",
-            "2xx",
-            "3xx",
-            "4xx",
-            "5xx"
-          ]
-        },
-        {
-          "type": "string",
-          "const": "failed",
-          "description": "No response: the request failed, was aborted or its connection broke."
-        },
-        {
-          "type": "string",
-          "const": "pending",
-          "description": "Still waiting for its response."
-        }
-      ]
-    },
-    "MitmKind": {
-      "type": "string",
-      "enum": [
-        "json",
-        "html",
-        "script",
-        "css",
-        "image",
-        "font",
-        "media",
-        "text",
-        "other"
-      ],
-      "description": "What a response holds, read from its `Content-Type`; `other` also takes a response\nwithout one and a request not answered yet."
-    },
     "MitmQueryAnswer": {
       "type": "object",
       "properties": {
@@ -6849,7 +7114,109 @@
       ],
       "description": "One page of `mitm.query`, newest first, with what a view of the capture needs besides."
     },
-    "MitmExchangeSummary": {
+    "MitmFacets": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "description": "Keyed as `MitmStatus` names them."
+        },
+        "method": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "description": "Keyed in upper case."
+        },
+        "kind": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "description": "Keyed as `MitmKind` names them."
+        },
+        "app": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "description": "Keyed by process; `\"\"` holds the exchanges of no known app."
+        }
+      },
+      "required": [
+        "status",
+        "method",
+        "kind",
+        "app"
+      ],
+      "description": "Each dimension counts the matches of every other part of the filter, so a view can\noffer the other values of a dimension it already narrowed."
+    },
+    "MitmRateBucket": {
+      "type": "object",
+      "properties": {
+        "t": {
+          "type": "integer",
+          "format": "int64",
+          "description": "The second's start, in Unix milliseconds."
+        },
+        "requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "errors": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0,
+          "description": "Failed, or answered 4xx or 5xx."
+        }
+      },
+      "required": [
+        "t",
+        "requests",
+        "errors"
+      ]
+    },
+    "MitmExchangeParams": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "MitmExchangeResult": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MitmExchange"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "`null` when the capture no longer holds the exchange."
+    },
+    "MitmExchange": {
       "type": "object",
       "properties": {
         "id": {
@@ -6947,6 +7314,61 @@
               "type": "null"
             }
           ]
+        },
+        "connection": {
+          "type": "string"
+        },
+        "original-url": {
+          "type": "string"
+        },
+        "proto": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "description": "The response's reason phrase as the client got it; none for a status without one."
+        },
+        "ttfb": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "request-header": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "response-header": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "description": "`null` until a response came."
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MitmAction"
+          }
+        },
+        "route": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MitmRouteNote"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -6961,143 +7383,55 @@
         "host",
         "path",
         "status-class",
-        "kind"
-      ],
-      "description": "One exchange as `mitm.query` and `mitm.exchanges` list it."
-    },
-    "MitmAnswer": {
-      "oneOf": [
-        {
-          "type": "string",
-          "enum": [
-            "map-local"
-          ]
-        },
-        {
-          "type": "string",
-          "const": "reject",
-          "description": "The rules rejected it, a `REJECT` policy or a `url-rewrite` reject line; a\n`REJECT-DROP` answers nothing."
-        },
-        {
-          "type": "string",
-          "const": "redirect",
-          "description": "A `url-rewrite` 302 or 307 line."
-        },
-        {
-          "type": "string",
-          "const": "script",
-          "description": "A request script answered or aborted it."
-        }
-      ]
-    },
-    "MitmApp": {
-      "type": "object",
-      "properties": {
-        "process": {
-          "type": "string"
-        },
-        "process-path": {
-          "type": "string"
-        },
-        "uid": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "process"
-      ],
-      "description": "The process behind the connection an exchange went out on, kept after it closed."
-    },
-    "MitmFacets": {
-      "type": "object",
-      "properties": {
-        "status": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "description": "Keyed as `MitmStatus` names them."
-        },
-        "method": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "description": "Keyed in upper case."
-        },
-        "kind": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "description": "Keyed as `MitmKind` names them."
-        },
-        "app": {
-          "type": "object",
-          "additionalProperties": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          },
-          "description": "Keyed by process; `\"\"` holds the exchanges of no known app."
-        }
-      },
-      "required": [
-        "status",
-        "method",
         "kind",
-        "app"
+        "proto",
+        "ttfb",
+        "request-header",
+        "actions"
       ],
-      "description": "Each dimension counts the matches of every other part of the filter, so a view can\noffer the other values of a dimension it already narrowed."
+      "description": "One request as the rules left it: the headers sent upstream and those answered to the\nclient. The sizes and the protocol are the client's."
     },
-    "MitmRateBucket": {
+    "MitmAction": {
       "type": "object",
       "properties": {
-        "t": {
-          "type": "integer",
-          "format": "int64",
-          "description": "The second's start, in Unix milliseconds."
+        "kind": {
+          "type": "string"
         },
-        "requests": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0
+        "phase": {
+          "type": "string"
         },
-        "errors": {
-          "type": "integer",
-          "format": "uint64",
-          "minimum": 0,
-          "description": "Failed, or answered 4xx or 5xx."
+        "detail": {
+          "type": "string"
+        },
+        "module": {
+          "type": "string",
+          "description": "The module whose line acted; none for the profile's own."
         }
       },
       "required": [
-        "t",
-        "requests",
-        "errors"
+        "kind"
       ]
     },
-    "MitmExchangeParams": {
+    "MitmRouteNote": {
       "type": "object",
       "properties": {
-        "id": {
-          "type": "integer",
-          "format": "int64"
+        "rule": {
+          "type": "string"
+        },
+        "rule-payload": {
+          "type": "string"
+        },
+        "chains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
-        "id"
-      ]
+        "chains"
+      ],
+      "description": "The rule that decided the request and the chain it left through, exit first."
     },
     "MitmBodyParams": {
       "type": "object",
@@ -7114,6 +7448,41 @@
       "required": [
         "id"
       ]
+    },
+    "MitmBodyResult": {
+      "type": "object",
+      "properties": {
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MitmBody"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "description": "`null` when the capture no longer holds the body."
+    },
+    "MitmBody": {
+      "type": "object",
+      "properties": {
+        "data": {
+          "type": "string",
+          "description": "Base64."
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "encoding": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "description": "A body as kept, decoded unless `encoding` names a coding left on it."
     },
     "ErrorObject": {
       "type": "object",

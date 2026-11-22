@@ -12,7 +12,8 @@ use concord_config::mitm::module::{Environment, ModuleInput};
 use concord_config::mitm::modules::{AppliedModule, compose};
 use concord_group::Fetcher;
 use concord_mitm::{
-    CaError, EVENT_NETWORK_CHANGED, LocalClock, Mitm, MitmEnv, RawConfig as MitmConfig,
+    Body, CaError, CertificateInfo, EVENT_NETWORK_CHANGED, Exchange, ExchangeList, LocalClock,
+    Mitm, MitmEnv, QueryAnswer, RawConfig as MitmConfig, ScriptOutput,
 };
 use concord_platform::HomeDir;
 use concord_tls::TrustStore;
@@ -25,6 +26,12 @@ use crate::error::Failure;
 
 mod status;
 mod store;
+
+/// The exchanges of one connection, and whether it had closed when they were read.
+pub struct ConnectionExchanges {
+    pub list: ExchangeList,
+    pub closed: bool,
+}
 
 /// The MITM engine and the host settings that outlive it.
 pub struct MitmService {
@@ -196,14 +203,12 @@ impl MitmService {
             .ok_or_else(|| Failure::core(NOT_INITIALIZED))
     }
 
-    pub fn certificate(&self) -> Result<Option<Value>, Failure> {
-        let certificate = self.started()?.certificate().map_err(ca_failure)?;
-        Ok(certificate.map(|info| serde_json::to_value(info).unwrap_or(Value::Null)))
+    pub fn certificate(&self) -> Result<Option<CertificateInfo>, Failure> {
+        self.started()?.certificate().map_err(ca_failure)
     }
 
-    pub fn generate_certificate(&self) -> Result<Value, Failure> {
-        let info = self.started()?.generate_certificate().map_err(ca_failure)?;
-        Ok(serde_json::to_value(info).unwrap_or(Value::Null))
+    pub fn generate_certificate(&self) -> Result<CertificateInfo, Failure> {
+        self.started()?.generate_certificate().map_err(ca_failure)
     }
 
     pub fn issue_certificate(&self, host: &str) -> Result<String, Failure> {
@@ -239,40 +244,31 @@ impl MitmService {
         Ok(serde_json::to_value(view).unwrap_or(Value::Null))
     }
 
-    pub async fn run_script(&self, name: &str) -> Result<Value, Failure> {
-        let output = self
-            .started()?
+    pub async fn run_script(&self, name: &str) -> Result<ScriptOutput, Failure> {
+        self.started()?
             .run_script(name)
             .await
-            .map_err(|err| Failure::core(err.to_string()))?;
-        Ok(serde_json::to_value(output).unwrap_or(Value::Null))
+            .map_err(|err| Failure::core(err.to_string()))
     }
 
     /// Closed is read first, so a closed connection's list already holds every request
     /// it carried.
-    pub fn exchanges(&self, id: &str) -> Result<Value, Failure> {
+    pub fn exchanges(&self, id: &str) -> Result<ConnectionExchanges, Failure> {
         let closed = !self.table.is_open(id);
         let list = self.started()?.exchanges(id);
-        let mut value = serde_json::to_value(list).unwrap_or(Value::Null);
-        if let Value::Object(map) = &mut value {
-            map.insert("closed".into(), Value::Bool(closed));
-        }
-        Ok(value)
+        Ok(ConnectionExchanges { list, closed })
     }
 
-    pub fn query(&self, query: &ExchangeQuery) -> Result<Value, Failure> {
-        let answer = self.started()?.query(query);
-        Ok(serde_json::to_value(answer).unwrap_or(Value::Null))
+    pub fn query(&self, query: &ExchangeQuery) -> Result<QueryAnswer, Failure> {
+        Ok(self.started()?.query(query))
     }
 
-    pub fn exchange(&self, id: i64) -> Result<Value, Failure> {
-        let exchange = self.started()?.exchange(id);
-        Ok(serde_json::to_value(exchange).unwrap_or(Value::Null))
+    pub fn exchange(&self, id: i64) -> Result<Option<Exchange>, Failure> {
+        Ok(self.started()?.exchange(id))
     }
 
-    pub fn body(&self, id: i64, response: bool) -> Result<Value, Failure> {
-        let body = self.started()?.body(id, response);
-        Ok(serde_json::to_value(body).unwrap_or(Value::Null))
+    pub fn body(&self, id: i64, response: bool) -> Result<Option<Body>, Failure> {
+        Ok(self.started()?.body(id, response))
     }
 
     /// `tunnel.UpdateMITM`: the profile's section, followed by its modules' lines, each remote

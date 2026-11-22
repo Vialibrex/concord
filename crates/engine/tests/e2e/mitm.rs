@@ -1,5 +1,4 @@
-use concord_common::exchange_query::ExchangeQuery;
-use concord_proto::types::{MitmQueryAnswer, MitmStatus};
+use concord_common::exchange_query::{ExchangeQuery, StatusClass};
 
 use super::*;
 
@@ -250,8 +249,8 @@ async fn mitm_decrypts_a_listed_host_under_its_own_certificate() {
     let server = tls_server("over tls").await;
     let rig = Rig::new();
     let info = rig.engine.mitm().generate_certificate().unwrap();
-    let fingerprint = info["fingerprint"].as_str().unwrap().to_string();
-    let certificate_pem = info["pem"].as_str().unwrap().to_string();
+    let fingerprint = info.fingerprint;
+    let certificate_pem = info.pem;
     let config = format!(
         "hosts:\n  mitm.test: 127.0.0.1\n{}rules:\n  - MATCH,DIRECT\n",
         mitm_section(
@@ -473,10 +472,10 @@ async fn mitm_makes_its_certificate_on_request_and_its_leaves_verify() {
     );
     let generated = rig.engine.mitm().generate_certificate().unwrap();
     let info = rig.engine.mitm().certificate().unwrap().unwrap();
-    assert_eq!(info["fingerprint"], generated["fingerprint"]);
+    assert_eq!(info.fingerprint, generated.fingerprint);
     assert!(rig.home.path().join("mitm/ca.crt").exists());
     let leaf = rig.engine.mitm().issue_certificate("check.test").unwrap();
-    verify_leaf(info["pem"].as_str().unwrap(), &leaf, "check.test").unwrap();
+    verify_leaf(&info.pem, &leaf, "check.test").unwrap();
 
     let validation = rig
         .engine
@@ -512,7 +511,7 @@ async fn decrypting_rig(rules: &str, lines: &str, capture: bool) -> (Rig, Socket
             server.port(),
             &format!(
                 "  ca-fingerprint: {}\n  skip-server-cert-verify: true\n{lines}",
-                info["fingerprint"].as_str().unwrap()
+                info.fingerprint
             )
         )
     );
@@ -527,16 +526,19 @@ async fn decrypting_rig(rules: &str, lines: &str, capture: bool) -> (Rig, Socket
     .await
     .unwrap();
     rig.engine.start_listeners().await;
-    (rig, server, info["pem"].as_str().unwrap().to_string())
+    (rig, server, info.pem)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mitm_decrypts_under_its_pinned_ca_only_while_the_host_finds_it_trusted() {
     let (rig, server, ca) = decrypting_rig("  - MATCH,DIRECT\n", "", false).await;
-    let fingerprint = rig.engine.mitm().certificate().unwrap().unwrap()["fingerprint"]
-        .as_str()
+    let fingerprint = rig
+        .engine
+        .mitm()
+        .certificate()
         .unwrap()
-        .to_string();
+        .unwrap()
+        .fingerprint;
     for (trusted, decrypts) in [
         (Some(String::new()), false),
         (Some(fingerprint), true),
@@ -583,33 +585,30 @@ async fn mitm_captures_the_exchanges_of_a_decrypted_connection() {
         .find(|record| record.mitm.load(Ordering::SeqCst))
         .expect("no connection is marked as decrypted");
     let id = decrypted.id.clone();
-    let mut list = serde_json::Value::Null;
+    let mut list = None;
     assert!(
         eventually(|| {
-            list = rig.engine.mitm().exchanges(&id).unwrap();
-            list["exchanges"]
-                .as_array()
-                .is_some_and(|all| all.len() == 1 && all[0].get("pending").is_none())
+            let read = rig.engine.mitm().exchanges(&id).unwrap();
+            let done = read.list.exchanges.len() == 1 && !read.list.exchanges[0].pending;
+            list = Some(read);
+            done
         })
         .await,
-        "exchanges of {id}: {list}"
+        "exchanges of {id}: {:?}",
+        list.map(|read| read.list)
     );
-    assert_eq!(
-        (&list["capturing"], &list["closed"]),
-        (&serde_json::json!(true), &serde_json::json!(false))
-    );
-    let exchange_id = list["exchanges"][0]["id"].as_i64().unwrap();
-    let answer: MitmQueryAnswer = serde_json::from_value(
-        rig.engine
-            .mitm()
-            .query(&ExchangeQuery {
-                facets: true,
-                rate_from_ms: Some(0),
-                ..ExchangeQuery::default()
-            })
-            .unwrap(),
-    )
-    .expect("the answer decodes as the schema types it");
+    let list = list.unwrap();
+    assert_eq!((list.list.capturing, list.closed), (true, false));
+    let exchange_id = list.list.exchanges[0].id;
+    let answer = rig
+        .engine
+        .mitm()
+        .query(&ExchangeQuery {
+            facets: true,
+            rate_from_ms: Some(0),
+            ..ExchangeQuery::default()
+        })
+        .unwrap();
     let page = answer
         .exchanges
         .iter()
@@ -617,29 +616,29 @@ async fn mitm_captures_the_exchanges_of_a_decrypted_connection() {
         .expect("the decrypted request is in the capture");
     assert_eq!(
         (page.host.as_str(), page.path.as_str(), page.status_class),
-        ("mitm.test", "/page", MitmStatus::Success)
+        ("mitm.test", "/page", StatusClass::Success)
     );
     assert_eq!(page.connection_id, Some(decrypted.seq));
     assert_eq!(answer.facets.unwrap().method.get("GET"), Some(&2));
-    let found = rig.engine.mitm().exchange(exchange_id).unwrap();
-    assert_eq!(found["connection"], serde_json::json!(id));
-    assert_eq!(found["status"], 200);
-    assert_eq!(
-        found["request-header"]["X-Mitm"],
-        serde_json::json!(["yes"])
-    );
-    let body = rig.engine.mitm().body(exchange_id, true).unwrap();
-    assert_eq!(body["data"], "L3BhZ2V8eWVz", "base64 of /page|yes");
+    let found = rig.engine.mitm().exchange(exchange_id).unwrap().unwrap();
+    assert_eq!(found.connection, id);
+    assert_eq!(found.summary.status, 200);
+    assert_eq!(found.request_header["X-Mitm"], ["yes"]);
+    let body = rig.engine.mitm().body(exchange_id, true).unwrap().unwrap();
+    assert_eq!(body.data, b"/page|yes");
 
     drop(stream);
     assert!(
-        eventually(|| rig.engine.mitm().exchanges(&id).unwrap()["closed"] == true).await,
+        eventually(|| rig.engine.mitm().exchanges(&id).unwrap().closed).await,
         "{id} is still listed open"
     );
     assert_eq!(
-        rig.engine.mitm().exchanges(&id).unwrap()["exchanges"]
-            .as_array()
+        rig.engine
+            .mitm()
+            .exchanges(&id)
             .unwrap()
+            .list
+            .exchanges
             .len(),
         1
     );
@@ -676,12 +675,17 @@ async fn mitm_lists_the_requests_it_answers_or_the_rules_reject() {
     let mut listed: Vec<(String, String)> = rejected
         .iter()
         .filter_map(|record| {
-            let list = rig.engine.mitm().exchanges(&record.id).unwrap();
-            let exchanges = list["exchanges"].as_array()?;
+            let exchanges = rig
+                .engine
+                .mitm()
+                .exchanges(&record.id)
+                .unwrap()
+                .list
+                .exchanges;
             (exchanges.len() == 1).then(|| {
                 (
                     format!("{}({})", record.rule, record.rule_payload),
-                    exchanges[0]["url"].as_str().unwrap().to_string(),
+                    exchanges[0].url.clone(),
                 )
             })
         })
@@ -783,7 +787,7 @@ async fn mitm_drops_quic_to_a_listed_host_by_name_or_fake_ip() {
         "dns:\n  enable: true\n  listen: 127.0.0.1:{dns}\n  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n  nameserver:\n    - {nameserver}\n\
          mitm:\n  enable: true\n  hostname: ['quic.test:{port}', 'faked.test:{port}']\n  ca-fingerprint: {}\n\
          rules:\n  - MATCH,DIRECT\n",
-        info["fingerprint"].as_str().unwrap()
+        info.fingerprint
     );
     rig.apply(&config).await.unwrap();
     rig.engine.start_listeners().await;
@@ -850,8 +854,8 @@ async fn mitm_tasks_follow_the_core_and_reach_the_network() {
     .await
     .unwrap();
     let output = rig.engine.mitm().run_script("Tool").await.unwrap();
-    assert_eq!(output["result"], r#"{"title":"button"}"#, "{output}");
-    assert_eq!(output["logs"], serde_json::json!(["pong"]));
+    assert_eq!(output.result, r#"{"title":"button"}"#, "{output:?}");
+    assert_eq!(output.logs, ["pong"]);
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 
     rig.engine.network_changed();

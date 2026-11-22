@@ -1715,12 +1715,8 @@ async fn mitm_off_leaves_flows_alone_and_capabilities_say_whether_it_is_built() 
         rig.engine.capabilities().features.mitm,
         cfg!(feature = "mitm")
     );
-    let certificate = rig.engine.mitm().certificate();
-    if cfg!(feature = "mitm") {
-        assert!(certificate.unwrap().is_none());
-    } else {
-        assert!(certificate.is_err());
-    }
+    #[cfg(feature = "mitm")]
+    assert!(rig.engine.mitm().certificate().unwrap().is_none());
     rig.engine.shutdown().await;
 }
 

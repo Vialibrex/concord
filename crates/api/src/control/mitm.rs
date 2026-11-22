@@ -1,9 +1,10 @@
-use concord_common::exchange_query::{ContentKind, ExchangeFilter, ExchangeQuery, StatusClass};
+use concord_common::exchange_query::{ExchangeFilter, ExchangeQuery};
 use concord_engine::{Engine, Failure};
 use concord_proto::ApiError;
 use concord_proto::types::*;
 
 use super::{Control, core_error};
+use crate::convert;
 
 impl Control {
     async fn blocking<T: Send + 'static>(
@@ -22,7 +23,9 @@ impl Control {
         _params: Empty,
     ) -> Result<MitmCertificate, ApiError> {
         let certificate = self.blocking(|engine| engine.mitm().certificate()).await?;
-        Ok(MitmCertificate { certificate })
+        Ok(MitmCertificate {
+            certificate: certificate.map(convert::mitm_certificate),
+        })
     }
 
     pub(super) async fn mitm_generate_certificate(
@@ -33,7 +36,7 @@ impl Control {
             .blocking(|engine| engine.mitm().generate_certificate())
             .await?;
         Ok(MitmCertificate {
-            certificate: Some(certificate),
+            certificate: Some(convert::mitm_certificate(certificate)),
         })
     }
 
@@ -99,26 +102,30 @@ impl Control {
     pub(super) async fn mitm_run_script(
         &self,
         params: MitmScriptParams,
-    ) -> Result<MitmResult, ApiError> {
-        let result = self
+    ) -> Result<MitmScriptResult, ApiError> {
+        let output = self
             .engine
             .mitm()
             .run_script(&params.name)
             .await
             .map_err(core_error)?;
-        Ok(MitmResult { result })
+        Ok(MitmScriptResult {
+            result: convert::script_output(output),
+        })
     }
 
     pub(super) async fn mitm_exchanges(
         &self,
         params: MitmExchangesParams,
-    ) -> Result<MitmResult, ApiError> {
+    ) -> Result<MitmExchangesResult, ApiError> {
         let id = self
             .engine
             .connection_id(params.connection)
             .ok_or_else(|| ApiError::not_found("connection", params.connection.to_string()))?;
-        let result = self.engine.mitm().exchanges(&id).map_err(core_error)?;
-        Ok(MitmResult { result })
+        let exchanges = self.engine.mitm().exchanges(&id).map_err(core_error)?;
+        Ok(MitmExchangesResult {
+            result: convert::exchange_list(exchanges),
+        })
     }
 
     pub(super) async fn mitm_query(
@@ -127,25 +134,31 @@ impl Control {
     ) -> Result<MitmQueryAnswer, ApiError> {
         let query = exchange_query(params)?;
         let answer = self.engine.mitm().query(&query).map_err(core_error)?;
-        serde_json::from_value(answer)
-            .map_err(|err| ApiError::internal(format!("the capture's answer: {err}")))
+        Ok(convert::query_answer(answer))
     }
 
     pub(super) async fn mitm_exchange(
         &self,
         params: MitmExchangeParams,
-    ) -> Result<MitmResult, ApiError> {
-        let result = self.engine.mitm().exchange(params.id).map_err(core_error)?;
-        Ok(MitmResult { result })
+    ) -> Result<MitmExchangeResult, ApiError> {
+        let exchange = self.engine.mitm().exchange(params.id).map_err(core_error)?;
+        Ok(MitmExchangeResult {
+            result: exchange.map(convert::exchange),
+        })
     }
 
-    pub(super) async fn mitm_body(&self, params: MitmBodyParams) -> Result<MitmResult, ApiError> {
-        let result = self
+    pub(super) async fn mitm_body(
+        &self,
+        params: MitmBodyParams,
+    ) -> Result<MitmBodyResult, ApiError> {
+        let body = self
             .engine
             .mitm()
             .body(params.id, params.response)
             .map_err(core_error)?;
-        Ok(MitmResult { result })
+        Ok(MitmBodyResult {
+            result: body.map(convert::body),
+        })
     }
 }
 
@@ -205,9 +218,17 @@ fn exchange_query(params: MitmQueryParams) -> Result<ExchangeQuery, ApiError> {
     }
     Ok(ExchangeQuery {
         filter: ExchangeFilter {
-            statuses: filter.statuses.into_iter().map(status_class).collect(),
+            statuses: filter
+                .statuses
+                .into_iter()
+                .map(convert::status_class)
+                .collect(),
             methods: filter.methods,
-            kinds: filter.kinds.into_iter().map(content_kind).collect(),
+            kinds: filter
+                .kinds
+                .into_iter()
+                .map(convert::content_kind)
+                .collect(),
             hosts: filter.hosts,
             apps: filter.apps,
             rewritten: filter.rewritten,
@@ -224,34 +245,9 @@ fn exchange_query(params: MitmQueryParams) -> Result<ExchangeQuery, ApiError> {
     })
 }
 
-fn status_class(status: MitmStatus) -> StatusClass {
-    match status {
-        MitmStatus::Informational => StatusClass::Informational,
-        MitmStatus::Success => StatusClass::Success,
-        MitmStatus::Redirect => StatusClass::Redirect,
-        MitmStatus::ClientError => StatusClass::ClientError,
-        MitmStatus::ServerError => StatusClass::ServerError,
-        MitmStatus::Failed => StatusClass::Failed,
-        MitmStatus::Pending => StatusClass::Pending,
-    }
-}
-
-fn content_kind(kind: MitmKind) -> ContentKind {
-    match kind {
-        MitmKind::Json => ContentKind::Json,
-        MitmKind::Html => ContentKind::Html,
-        MitmKind::Script => ContentKind::Script,
-        MitmKind::Css => ContentKind::Css,
-        MitmKind::Image => ContentKind::Image,
-        MitmKind::Font => ContentKind::Font,
-        MitmKind::Media => ContentKind::Media,
-        MitmKind::Text => ContentKind::Text,
-        MitmKind::Other => ContentKind::Other,
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use concord_common::exchange_query::{ContentKind, StatusClass};
     use concord_proto::ErrorData;
 
     use super::*;

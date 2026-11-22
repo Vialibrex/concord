@@ -301,8 +301,8 @@ impl Capture {
         summary.request_size = self.request_size.load(Ordering::Relaxed);
         summary.response_size = self.response_size.load(Ordering::Relaxed);
         summary.duration = view.duration;
-        summary.status_class = view.status().name();
-        summary.kind = view.kind().name();
+        summary.status_class = view.status();
+        summary.kind = view.kind();
         summary.rewritten = view.exchange.rewritten();
         for action in &view.exchange.actions {
             if !summary.action_kinds.contains(&action.kind) {
@@ -708,7 +708,7 @@ mod tests {
         let third = &answer.exchanges[1];
         assert_eq!(
             (third.connection_id, third.status_class, third.kind),
-            (Some(8), "2xx", "json")
+            (Some(8), StatusClass::Success, ContentKind::Json)
         );
         let app = third.app.as_ref().unwrap();
         assert_eq!((app.process.as_str(), app.uid), ("curl", Some(10_008)));

@@ -23,8 +23,14 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+mod capture;
 mod probe;
 mod profile;
+
+pub use self::capture::{
+    body, certificate as mitm_certificate, content_kind, exchange, exchange_list, query_answer,
+    script_output, status_class,
+};
 
 pub use self::probe::{outbound_ip, service_item};
 pub use self::profile::{profile_inspect, profile_outbounds};

@@ -1009,12 +1009,14 @@ dependencies = [
 name = "concord-api"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "concord-common",
  "concord-engine",
  "concord-platform",
  "concord-proto",
  "concord-test-support",
  "futures-util",
+ "serde",
  "serde_json",
  "tempfile",
  "time",
@@ -1155,7 +1157,6 @@ dependencies = [
  "concord-mitm",
  "concord-net",
  "concord-platform",
- "concord-proto",
  "concord-proxy",
  "concord-rules",
  "concord-test-support",

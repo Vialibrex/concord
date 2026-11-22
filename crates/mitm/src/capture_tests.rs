@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use concord_common::exchange_query::ExchangeQuery;
+use concord_common::exchange_query::{ContentKind, ExchangeQuery, StatusClass};
 use concord_common::sync::lock;
 use http_body_util::{BodyExt, StreamBody};
 use serde_json::json;
@@ -227,7 +227,10 @@ async fn the_capture_across_connections_names_the_app_and_connection_of_each_exc
     );
     assert_eq!(
         [(page.kind, page.status_class), (ad.kind, ad.status_class)],
-        [("other", "2xx"), ("image", "2xx")]
+        [
+            (ContentKind::Other, StatusClass::Success),
+            (ContentKind::Image, StatusClass::Success)
+        ]
     );
 }
 
