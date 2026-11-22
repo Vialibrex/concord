@@ -11,7 +11,7 @@ use hyper::body::Incoming;
 use hyper::upgrade::OnUpgrade;
 
 use crate::body::{Body, Buffered, Tap, buffer_body, empty, failing, file_body, full, full_with};
-use crate::capture::{PHASE_REQUEST, PHASE_RESPONSE};
+use crate::capture::{Cap, PHASE_REQUEST, PHASE_RESPONSE};
 use crate::exchange::{
     OutRequest, ReplyError, Sent, Target, Unsent, has_response_body, set_length,
 };
@@ -21,7 +21,7 @@ use crate::headers::{
 use crate::heads::Heads;
 use crate::limits::{BODY_WAIT, PRESSURE_NO_BODIES};
 use crate::pattern::Pattern;
-use crate::rules::{BodyRewrite, LocalBody};
+use crate::rules::{BodyRewrite, HeaderRewrite, LocalBody};
 use crate::script::DEFAULT_SCRIPT_TIMEOUT;
 use crate::session::{PoolKey, Routed, Sender, Session};
 use crate::target::TargetUrl;
@@ -67,19 +67,17 @@ impl Session {
                 .rules
                 .header_rewrites_for(&out.url.raw, false, &heads)
         };
-        let mut rewritten = Vec::new();
+        let mut rewritten = false;
         for rule in header_rules {
             if match rule.whole_head() {
                 Some((pattern, with)) => replace_request_head(out, target.version, pattern, with),
                 None => rule.apply(&mut out.headers),
             } {
-                rewritten.push(rule.module.clone());
+                rewritten = true;
+                note_header(&target.cap, PHASE_REQUEST, rule);
             }
         }
-        if !rewritten.is_empty() {
-            target
-                .cap
-                .note_each("header-rewrite", PHASE_REQUEST, &rewritten);
+        if rewritten {
             tracing::info!("[MITM] rewrite request headers of {}", out.url.raw);
         }
     }
@@ -117,13 +115,11 @@ impl Session {
                 .await
         {
             let body = std::mem::replace(&mut out.body, empty());
-            let modules = modules_of(&body_rules);
+            let notes = body_notes(&target.cap, &body_rules);
             match rewrite_body(&mut out.headers, body, out.length, max_body, body_rules).await {
                 Ok((body, length)) => {
                     out.set_body(body, length);
-                    target
-                        .cap
-                        .note_each("body-rewrite", PHASE_REQUEST, &modules);
+                    note_body(&target.cap, PHASE_REQUEST, notes);
                     tracing::info!("[MITM] rewrite request body of {address}");
                 }
                 Err(err) => {
@@ -219,19 +215,17 @@ impl Session {
                 rules.script_for(&address, true, &heads),
             )
         };
-        let mut rewritten = Vec::new();
+        let mut rewritten = false;
         for rule in header_rules {
             if match rule.whole_head() {
                 Some((pattern, with)) => replace_response_head(head, pattern, with),
                 None => rule.apply(&mut head.headers),
             } {
-                rewritten.push(rule.module.clone());
+                rewritten = true;
+                note_header(&target.cap, PHASE_RESPONSE, rule);
             }
         }
-        if !rewritten.is_empty() {
-            target
-                .cap
-                .note_each("header-rewrite", PHASE_RESPONSE, &rewritten);
+        if rewritten {
             tracing::info!("[MITM] rewrite response headers of {address}");
         }
         if head.status == StatusCode::SWITCHING_PROTOCOLS {
@@ -247,14 +241,12 @@ impl Session {
                 .await
         {
             let source = std::mem::replace(body, empty());
-            let modules = modules_of(&body_rules);
+            let notes = body_notes(&target.cap, &body_rules);
             let (rewritten, length) =
                 rewrite_body(&mut head.headers, source, length, max_body, body_rules).await?;
             *body = rewritten;
             set_length(&mut head.headers, length);
-            target
-                .cap
-                .note_each("body-rewrite", PHASE_RESPONSE, &modules);
+            note_body(&target.cap, PHASE_RESPONSE, notes);
             tracing::info!("[MITM] rewrite response body of {address}");
         }
         if let Some(script) = script {
@@ -494,12 +486,36 @@ fn adapt(
     Ok(())
 }
 
-/// A body over the limit, not UTF-8, or in an encoding it cannot decode is
-/// passed on unchanged.
-fn modules_of(rules: &[Arc<BodyRewrite>]) -> Vec<Option<Arc<str>>> {
-    rules.iter().map(|rule| rule.module.clone()).collect()
+fn note_header(cap: &Cap, phase: &str, rule: &HeaderRewrite) {
+    if cap.is_some() {
+        cap.note(
+            "header-rewrite",
+            phase,
+            &rule.note(),
+            rule.module.as_deref(),
+        );
+    }
 }
 
+/// Read before the rules go to the rewrite, and only while capture is on.
+fn body_notes(cap: &Cap, rules: &[Arc<BodyRewrite>]) -> Vec<(String, Option<Arc<str>>)> {
+    if !cap.is_some() {
+        return Vec::new();
+    }
+    rules
+        .iter()
+        .map(|rule| (rule.note(), rule.module.clone()))
+        .collect()
+}
+
+fn note_body(cap: &Cap, phase: &str, notes: Vec<(String, Option<Arc<str>>)>) {
+    for (detail, module) in notes {
+        cap.note("body-rewrite", phase, &detail, module.as_deref());
+    }
+}
+
+/// A body over the limit, not UTF-8, or in an encoding it cannot decode is
+/// passed on unchanged.
 pub(crate) async fn rewrite_body(
     headers: &mut HeaderMap,
     body: Body,

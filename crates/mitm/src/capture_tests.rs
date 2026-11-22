@@ -142,9 +142,11 @@ async fn exchanges_are_filed_under_the_connection_they_went_out_on() {
         rewritten
             .actions
             .contains(&action("url-rewrite", "", "header"))
-            && rewritten
-                .actions
-                .contains(&action("header-rewrite", "request", "")),
+            && rewritten.actions.contains(&action(
+                "header-rewrite",
+                "request",
+                "header-add X-Added yes"
+            )),
         "{:?}",
         rewritten.actions
     );
@@ -686,7 +688,7 @@ async fn bodies_count_against_the_byte_limit() {
 }
 
 #[tokio::test]
-async fn each_action_names_the_module_whose_line_it_was() {
+async fn each_action_names_its_line_and_the_module_it_came_from() {
     let (_server, rig) = tls_rig(echo(), &["http/1.1"]).await;
     let section = |value| MitmDef::read(&serde_json::from_value(value).unwrap());
     let mut def = section(json!({
@@ -694,17 +696,20 @@ async fn each_action_names_the_module_whose_line_it_was() {
         "hostname": ["example.test"],
         "skip-server-cert-verify": true,
         "header-rewrite": [r"http-request ^https://example\.test header-add X-Added yes"],
+        "body-rewrite": [r"http-response ^https://example\.test/new yes YES"],
     }));
     let mut module = section(json!({
         "url-rewrite": [r"^https://example\.test/old/(.*) https://example.test/new/$1"],
         "header-rewrite": [
             r"http-request ^https://example\.test header-add X-Sample 1",
-            r"http-request ^https://example\.test header-add X-Sample-Too 1",
+            r"http-request ^https://example\.test header-del X-Sample-Too",
         ],
+        "body-rewrite": [r"http-response-jq ^https://example\.test/new '.a'"],
     }));
     module.mark_origin(&Arc::from("Sample"));
     def.url_rewrite.append(&mut module.url_rewrite);
     def.header_rewrite.append(&mut module.header_rewrite);
+    def.body_rewrite.append(&mut module.body_rewrite);
     assert!(
         rig.mitm
             .apply_section(Some(def), concord_common::Tasks::default())
@@ -714,7 +719,10 @@ async fn each_action_names_the_module_whose_line_it_was() {
     let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
         .await
         .unwrap();
-    client.get("/old/x").await;
+    assert_eq!(
+        client.get("/old/x").await.text(),
+        "example.test|/new/x|YES|"
+    );
 
     let exchanges = settled(&rig, "conn-1", 1).await;
     let actions = rig.mitm.exchange(exchanges[0].id).unwrap().actions;
@@ -725,9 +733,16 @@ async fn each_action_names_the_module_whose_line_it_was() {
     assert_eq!(
         actions,
         [
-            from("header-rewrite", "request", "", ""),
-            from("header-rewrite", "request", "", "Sample"),
+            from("header-rewrite", "request", "header-add X-Added yes", ""),
+            from(
+                "header-rewrite",
+                "request",
+                "header-add X-Sample 1",
+                "Sample"
+            ),
             from("url-rewrite", "", "header", "Sample"),
+            from("body-rewrite", "response", "yes YES", ""),
+            from("body-rewrite", "response", "jq .a", "Sample"),
         ]
     );
 }

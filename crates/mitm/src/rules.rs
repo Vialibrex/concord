@@ -170,6 +170,18 @@ pub(crate) fn compile_header_rewrite(def: &HeaderRewriteDef) -> Result<HeaderRew
     })
 }
 
+impl HeaderEdit {
+    fn keyword(&self) -> &'static str {
+        match self {
+            HeaderEdit::Add(..) => "header-add",
+            HeaderEdit::Del(_) => "header-del",
+            HeaderEdit::Replace(..) => "header-replace",
+            HeaderEdit::ReplaceRegex(..) => "header-replace-regex",
+            HeaderEdit::Text(..) => "header-text-replace",
+        }
+    }
+}
+
 impl HeaderRewrite {
     /// The pattern and replacement of a rule that rewrites the whole head, which its caller
     /// applies as only it knows the first line.

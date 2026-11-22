@@ -14,6 +14,17 @@ fn source(pattern: &Pattern) -> String {
     pattern.source().to_string()
 }
 
+fn header_text(value: &http::HeaderValue) -> String {
+    String::from_utf8_lossy(value.as_bytes()).into_owned()
+}
+
+fn body_regex(pattern: &Pattern) -> &str {
+    pattern
+        .source()
+        .strip_prefix(MULTILINE)
+        .unwrap_or(pattern.source())
+}
+
 impl HeadConditions {
     pub(crate) fn sources(&self) -> (Option<String>, Option<String>) {
         (
@@ -48,35 +59,45 @@ impl HeaderRewrite {
             regex: None,
             replacement: None,
         };
-        let value =
-            |value: &http::HeaderValue| String::from_utf8_lossy(value.as_bytes()).into_owned();
+        view.action = self.edit.keyword();
         match &self.edit {
             HeaderEdit::Add(name, text) | HeaderEdit::Replace(name, text) => {
-                view.action = if matches!(self.edit, HeaderEdit::Add(..)) {
-                    "header-add"
-                } else {
-                    "header-replace"
-                };
                 view.name = Some(canonical_header(name.as_str()));
-                view.value = Some(value(text));
+                view.value = Some(header_text(text));
             }
-            HeaderEdit::Del(name) => {
-                view.action = "header-del";
-                view.name = Some(canonical_header(name.as_str()));
-            }
+            HeaderEdit::Del(name) => view.name = Some(canonical_header(name.as_str())),
             HeaderEdit::ReplaceRegex(name, regex, replacement) => {
-                view.action = "header-replace-regex";
                 view.name = Some(canonical_header(name.as_str()));
                 view.regex = Some(source(regex));
                 view.replacement = Some(replacement.clone());
             }
             HeaderEdit::Text(regex, replacement) => {
-                view.action = "header-text-replace";
                 view.regex = Some(source(regex));
                 view.replacement = Some(replacement.clone());
             }
         }
         LineView::HeaderRewrite(view)
+    }
+
+    /// The edit as its line writes it after the URL pattern, for the capture's action detail.
+    pub(crate) fn note(&self) -> String {
+        let keyword = self.edit.keyword();
+        match &self.edit {
+            HeaderEdit::Add(name, text) | HeaderEdit::Replace(name, text) => format!(
+                "{keyword} {} {}",
+                canonical_header(name.as_str()),
+                header_text(text)
+            ),
+            HeaderEdit::Del(name) => format!("{keyword} {}", canonical_header(name.as_str())),
+            HeaderEdit::ReplaceRegex(name, regex, replacement) => format!(
+                "{keyword} {} {} {replacement}",
+                canonical_header(name.as_str()),
+                regex.source()
+            ),
+            HeaderEdit::Text(regex, replacement) => {
+                format!("{keyword} {} {replacement}", regex.source())
+            }
+        }
     }
 }
 
@@ -88,12 +109,7 @@ impl BodyRewrite {
                 pairs
                     .iter()
                     .map(|pair| BodyReplacementView {
-                        regex: pair
-                            .pattern
-                            .source()
-                            .strip_prefix(MULTILINE)
-                            .unwrap_or(pair.pattern.source())
-                            .to_string(),
+                        regex: body_regex(&pair.pattern).to_string(),
                         replacement: pair.with.clone(),
                     })
                     .collect(),
@@ -109,6 +125,19 @@ impl BodyRewrite {
             replacements,
             jq,
         })
+    }
+
+    /// The rewrite as its line writes it after the URL pattern, a jq one led by `jq`, for the
+    /// capture's action detail.
+    pub(crate) fn note(&self) -> String {
+        match &self.action {
+            BodyAction::Replace(pairs) => pairs
+                .iter()
+                .map(|pair| format!("{} {}", body_regex(&pair.pattern), pair.with))
+                .collect::<Vec<_>>()
+                .join(" "),
+            BodyAction::Jq(jq) => format!("jq {}", jq.code()),
+        }
     }
 }
 

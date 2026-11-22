@@ -365,7 +365,7 @@ impl Exchange {
         let actions: usize = self
             .actions
             .iter()
-            .map(|action| action.phase.len() + action.detail.len())
+            .map(|action| action.phase.len() + action.detail.len() + action.module.len())
             .sum();
         let route = self.route.as_ref().map_or(0, |route| {
             route.rule.len()
@@ -506,17 +506,6 @@ impl Cap {
                     module: module.unwrap_or_default().to_string(),
                 })
             });
-        }
-    }
-
-    /// One action for each module among those whose lines acted, the profile's own as one.
-    pub fn note_each(&self, kind: &'static str, phase: &str, modules: &[Option<Arc<str>>]) {
-        let mut seen: Vec<Option<&str>> = Vec::new();
-        for module in modules.iter().map(Option::as_deref) {
-            if !seen.contains(&module) {
-                seen.push(module);
-                self.note(kind, phase, "", module);
-            }
         }
     }
 
