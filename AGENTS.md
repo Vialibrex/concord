@@ -7,7 +7,7 @@ Entry point for coding agents working in Concord. Keep it small: detailed guidan
 Read these before changing code:
 
 - [.agents/project.md](.agents/project.md): what Concord is, its scope, and where its boundary with the host app runs.
-- [.agents/commands.md](.agents/commands.md): build, the full gate, benchmarks, and the target directory.
+- [.agents/commands.md](.agents/commands.md): build, test scope, the full gate, benchmarks, and the target directory.
 - [.agents/rules.md](.agents/rules.md): layering and ownership, how a fix is shaped, mihomo alignment, the basis
   every tunable needs, commits.
 
@@ -46,7 +46,8 @@ belongs in `.agents/`.
   results ignore it too or the host owns it, with that reason beside its list and an entry in `docs/compatibility.md`.
 - Keep the layering: `cargo xtask check-layers` holds each crate to its exact dependencies and release `opt-level`.
   Every outbound socket goes through `concord_net::Sockets`; `clippy.toml` rejects the bypasses.
-- Before reporting a change done, run the full gate in `commands.md`. Name any check you could not run and why.
+- Before reporting a change done, run the checks Test Scope in `commands.md` gives it: the full gate only after a
+  shared-base change or in a branch's last review round. Name any check you could not run and why.
 - Worktrees share the main checkout's `target/`, each build under its own `--cfg` (Target Directory And Disk in
   `commands.md`); clean what you build when you are done with it.
 - Comments carry only what the code cannot say; see `rules.md`. No agent trailers in commits, and no machine-local

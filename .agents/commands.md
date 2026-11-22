@@ -20,9 +20,27 @@ assembly AES-GCM is about 150 times slower, and BoringSSL sees no AES hardware a
 browser. `BUILD_TESTING` is off because BoringSSL's benchmark feature check fails under `/W4 /WX` once `cmake-rs`
 drops `/EHsc`.
 
+## Test Scope
+
+Size every run to the change, and keep the full gate for the two cases below.
+
+- While editing, run `cargo test -p <crate>` for the crates you changed, narrowed with `--test <file>` or a test name
+  where that covers the change; never `--workspace`.
+- Before each review round, run `cargo fmt --check`, then clippy and `cargo test` with `-p` for every changed crate,
+  every crate that depends on one, and `xtask`, whose source checks hold every change. Add each `cargo xtask` check the
+  change touches: `schema --check` for config or the API, `check-layers` and `cargo deny check` for a `Cargo.toml`.
+- Run the full gate only when the change touches a shared base, or in a branch's last review round; no other round
+  runs it. The shared bases are the root `Cargo.toml` and `Cargo.lock`, `rust-toolchain.toml`, `vendor/`,
+  `crates/common`, `crates/platform` and `crates/test-support`. Most of the workspace depends on those three crates,
+  so `-p` would name it anyway.
+- Keep the last round's full gate: CI runs only on `main` and pull requests, and in a private repository only when
+  started by hand, so nothing else runs it before a branch lands.
+- Run a test that only runs on another platform (a `cfg(target_os = ...)` test, the Windows tests) on a machine of
+  that platform; on the host, run only that platform's clippy.
+
 ## The Full Gate
 
-A change is done when all of these pass. `.github/workflows/ci.yaml` runs them on Linux with `--locked`, split into
+A branch is done when all of these pass; Test Scope says which rounds run them. `.github/workflows/ci.yaml` runs them on Linux with `--locked`, split into
 parallel jobs, and fails if they changed a tracked file; it also runs clippy and the tests on macOS, clippy for the
 three Android ABIs FlClash ships and for Windows (the Windows job does not fail the run yet), the arm64-v8a release
 `libconcord.so` against its size budget, and the interop tests that need only mihomo or OpenSSH. Run the clippy of
