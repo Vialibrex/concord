@@ -30,6 +30,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | boring | Read-only `SslRef` record-layer accessors | None | None planned: the change stays in the vendored copy |
 | h3 | Bound frame and DATA read-ahead | hyperium/h3#344, `c916ed5a` (frame headers); #328 and #386 are related | Backport #344; propose the DATA-body extension to hyperium/h3 |
 | h3 | Opt-in draft-00 datagram SETTINGS for WARP | None | Propose the default-off client builder switch to hyperium/h3 |
+| h3 | Allow warnings in the manifest | None | None planned: it gives the path dependency a crates.io dependency's lint cap |
 | h2 | Ignore DATA and HEADERS on forgotten client streams | None as of 0.4.20 | Issue and PR to hyperium/h2 with the delayed-DATA-after-reset transport test |
 | mio | High-resolution timed waits on Windows | None | PR to tokio-rs/mio, citing Go's default poller path |
 | quinn | `MAX_TRANSMIT_DATAGRAMS` 80 (`MAX_TRANSMIT_SEGMENTS` back to upstream's 10) | n0-computer/noq#636 (noq) | The segment cap is upstream's again; propose only the datagram limit to quinn-rs/quinn |
@@ -277,3 +278,7 @@ The package archive checksum is `10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662
   setting as a receive-side alias.
 - `src/shared_state.rs`, `src/client/connection.rs`: a read-only poll for received peer datagram SETTINGS lets
   CONNECT-IP wait for and validate peer support without enabling h3's internal API feature.
+- `Cargo.toml`: `[lints.rust] warnings = "allow"`. A path dependency is built without the `--cap-lints` a
+  crates.io dependency gets, so 0.0.8's own warnings under the current toolchain (unused imports and variables
+  without the `tracing` feature, elided lifetimes) reached every workspace build and the editor. This also hides
+  warnings in the patches above: after changing one, run `cargo clippy` in `vendor/h3` with the line removed.

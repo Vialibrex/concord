@@ -135,3 +135,6 @@ features = [
     "tracing-log",
 ]
 default-features = false
+
+[lints.rust]
+warnings = "allow"
