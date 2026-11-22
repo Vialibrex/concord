@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use concord_common::Tasks;
+use concord_common::{BoxStream, Tasks};
 use rustls_pki_types::ServerName;
 
 use super::stream::RealityStream;
@@ -28,6 +28,7 @@ impl Browser {
 
 async fn browse(browser: &Browser, stream: RealityStream, host: String) -> Option<()> {
     let user_agent = browser.user_agent;
+    let stream: BoxStream = Box::new(stream);
     let (sender, connection) = h2::client::handshake(stream).await.ok()?;
     let _driver = AbortOnDrop(h2_driver(&browser.tasks, connection));
     let padding = "0".repeat(rand::random_range(30..62usize));
@@ -55,6 +56,7 @@ async fn jls_fallback(
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let padding = "0".repeat(rand::random_range(30..62usize));
     if stream.negotiated_alpn() == Some(b"h2") {
+        let stream: BoxStream = Box::new(stream);
         let Ok((sender, connection)) = h2::client::handshake(stream).await else {
             return;
         };
@@ -90,7 +92,7 @@ async fn jls_fallback(
 
 fn h2_driver(
     tasks: &Tasks,
-    connection: h2::client::Connection<RealityStream, bytes::Bytes>,
+    connection: h2::client::Connection<BoxStream, bytes::Bytes>,
 ) -> tokio::task::JoinHandle<()> {
     tasks.spawn(async move {
         let _ = connection.await;
