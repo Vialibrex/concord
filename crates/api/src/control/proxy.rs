@@ -1,5 +1,5 @@
 use concord_common::Origin;
-use concord_engine::StatusRanges;
+use concord_engine::{SelectError, Selected, StatusRanges};
 use concord_proto::ApiError;
 use concord_proto::types::*;
 
@@ -24,22 +24,18 @@ impl Control {
         origin: Origin,
         params: ProxySelectParams,
     ) -> Result<ProxySelectResult, ApiError> {
-        let outcome = self
+        match self
             .engine
             .select_as(origin, &params.group, &params.proxy)
-            .await;
-        match outcome.message.as_str() {
-            "" => Ok(ProxySelectResult {
-                changed: outcome.changed,
-                seq: outcome.seq,
-            }),
-            "Not found group" => Err(ApiError::not_found("group", params.group)),
-            "proxy not exist" => Err(ApiError::not_found("proxy", params.proxy)),
-            "Group is not selectable" => Err(ApiError::conflict(
+            .await
+        {
+            Ok(Selected { changed, seq }) => Ok(ProxySelectResult { changed, seq }),
+            Err(SelectError::NoGroup) => Err(ApiError::not_found("group", params.group)),
+            Err(SelectError::NoProxy) => Err(ApiError::not_found("proxy", params.proxy)),
+            Err(SelectError::NotSelectable) => Err(ApiError::conflict(
                 "not_selectable",
                 format!("group {} is not selectable", params.group),
             )),
-            other => Err(ApiError::conflict("select", other)),
         }
     }
 

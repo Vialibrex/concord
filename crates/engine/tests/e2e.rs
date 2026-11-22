@@ -523,8 +523,7 @@ async fn rules_pick_a_group_and_a_selection_moves_it() {
     assert_eq!(lock(&seen).len(), 1);
     assert_eq!(lock(&seen)[0], echo.to_string());
 
-    let outcome = rig.engine.select("G", "DIRECT").await;
-    assert!(outcome.changed);
+    assert!(rig.engine.select("G", "DIRECT").await.unwrap().changed);
     let mut stream = socks_connect(rig.mixed, echo).await.unwrap();
     round_trip(&mut stream).await;
     assert_eq!(
@@ -1310,7 +1309,7 @@ async fn a_probe_reports_where_it_left_and_the_route_can_be_rechecked() {
     let (_, held) = rig.engine.check_routes(vec![vec![hit.clone()]]).await;
     assert_eq!(held, [true]);
 
-    rig.engine.select("G", "DIRECT").await;
+    rig.engine.select("G", "DIRECT").await.unwrap();
     let (_, held) = rig.engine.check_routes(vec![vec![hit]]).await;
     assert_eq!(held, [false], "the selection moved the exit");
     rig.engine.shutdown().await;

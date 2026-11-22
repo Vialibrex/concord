@@ -41,9 +41,8 @@ pub struct WarningView {
 }
 
 /// `seq` is the change this select made, or the last change when it made none.
-#[derive(Clone, Debug, Default)]
-pub struct SelectOutcome {
-    pub message: String,
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Selected {
     pub changed: bool,
     pub seq: u64,
 }

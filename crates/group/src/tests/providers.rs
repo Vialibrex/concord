@@ -216,7 +216,7 @@ async fn an_update_swaps_the_members_the_pick_and_the_exit() {
     write_file(&rig, &list(&["n1", "n2"]));
     let provider = rig.out.provider("p").unwrap();
     provider.initial().await.unwrap();
-    rig.out.select("g", "n2").await;
+    rig.out.select("g", "n2").await.unwrap();
     assert_eq!(rig.leaf("g"), "n2");
     let before = rig.out.exit_identity(&rig.resolve("g")).unwrap();
     let moved = rig.moved.count();

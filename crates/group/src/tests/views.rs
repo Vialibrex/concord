@@ -99,7 +99,7 @@ async fn a_selector_view_lists_members_and_hides_the_default_test_url() {
 #[tokio::test]
 async fn url_test_and_fallback_views_carry_the_url_the_fixed_pick_and_the_icon() {
     let rig = Rig::new(CONFIG);
-    rig.out.select("ut", "b").await;
+    rig.out.select("ut", "b").await.unwrap();
     let ut = group(&rig, "ut");
     assert_eq!(ut.kind, "URLTest");
     assert_eq!(ut.test_url, TEST_URL);

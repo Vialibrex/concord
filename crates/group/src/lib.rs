@@ -35,7 +35,7 @@ pub use fetch::{FetchHead, FetchRequest, FetchResponse, Fetcher};
 pub use group::{Emptiness, Group, Members, Pick, Policy, Touch};
 pub use health::{DelayRecord, HealthSnapshot, NodeHealth, Outcome, StatusRanges, UrlHealth};
 pub use node::{Ghost, Item, Leaf, Node};
-pub use outbounds::{Outbounds, Resolved, SelectOutcome, Staged, load_balancer_exit, node_exit};
+pub use outbounds::{Outbounds, Resolved, SelectError, Staged, load_balancer_exit, node_exit};
 pub use provider::{ProviderNodes, ProviderView, ProxyProvider, SubscriptionInfo, VehicleType};
 pub use selection::SelectionStore;
 pub use smart::{FlowEnd, SmartFlow};

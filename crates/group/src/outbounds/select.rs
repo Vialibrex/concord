@@ -10,10 +10,13 @@ use crate::selection::Probing;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SelectOutcome {
-    pub message: String,
-    pub changed: bool,
+/// Why a pick was refused; mihomo says `Not found group`, `Group is not selectable` and
+/// `proxy not exist`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectError {
+    NoGroup,
+    NotSelectable,
+    NoProxy,
 }
 
 pub struct Staged {
@@ -37,14 +40,11 @@ impl Outbounds {
             .unwrap_or_default()
     }
 
-    pub async fn select(&self, group: &str, proxy: &str) -> SelectOutcome {
-        match self.stage_selection(group, proxy) {
-            Ok(staged) => {
-                self.probe_selection(&staged).await;
-                self.settle_selection(staged)
-            }
-            Err(failed) => failed,
-        }
+    /// Whether routing moved.
+    pub async fn select(&self, group: &str, proxy: &str) -> Result<bool, SelectError> {
+        let staged = self.stage_selection(group, proxy)?;
+        self.probe_selection(&staged).await;
+        Ok(self.settle_selection(staged))
     }
 
     /// Stores the pick, as mihomo's `Set` does before it tests a fallback
@@ -52,18 +52,14 @@ impl Outbounds {
     /// moved once `probe_selection` has run. A fallback member believed dead is
     /// marked under test before it is stored, so routing in between cannot drop
     /// the pick before the test decides.
-    pub fn stage_selection(&self, group: &str, proxy: &str) -> Result<Staged, SelectOutcome> {
-        let fail = |message: &str| SelectOutcome {
-            message: message.to_string(),
-            changed: false,
-        };
+    pub fn stage_selection(&self, group: &str, proxy: &str) -> Result<Staged, SelectError> {
         let target = match self.lookup(group) {
             Some(Found::Node(Node::Group(target))) => target,
-            Some(_) => return Err(fail("Group is not selectable")),
-            None => return Err(fail("Not found group")),
+            Some(_) => return Err(SelectError::NotSelectable),
+            None => return Err(SelectError::NoGroup),
         };
         if !target.is_selectable() {
-            return Err(fail("Group is not selectable"));
+            return Err(SelectError::NotSelectable);
         }
         let before = target.now(&dummy_flow(Address::new("", 0), Network::Tcp));
         let store = &self.shared.selections;
@@ -80,7 +76,7 @@ impl Outbounds {
                 || (members.emptiness() == Emptiness::Fallback
                     && target.empty_fallback().name().as_ref() == proxy);
             if !listed {
-                return Err(fail("proxy not exist"));
+                return Err(SelectError::NoProxy);
             }
             if matches!(target.policy(), Policy::Fallback)
                 && members
@@ -111,7 +107,8 @@ impl Outbounds {
         }
     }
 
-    pub fn settle_selection(&self, staged: Staged) -> SelectOutcome {
+    /// Whether routing moved.
+    pub fn settle_selection(&self, staged: Staged) -> bool {
         let Staged {
             target,
             before,
@@ -121,9 +118,6 @@ impl Outbounds {
         drop(probing);
         let changed = target.now(&dummy_flow(Address::new("", 0), Network::Tcp)) != before;
         self.refresh_picks();
-        SelectOutcome {
-            message: String::new(),
-            changed,
-        }
+        changed
     }
 }

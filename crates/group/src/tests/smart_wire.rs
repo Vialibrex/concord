@@ -258,7 +258,7 @@ async fn the_last_member_left_and_a_pinned_group_get_no_budget() {
         None,
         "every member was tried"
     );
-    rig.out.select("s", "a").await;
+    rig.out.select("s", "a").await.unwrap();
     assert_eq!(rig.out.selection("s"), "a");
     assert_eq!(budget(&rig, &on_a, &chain(&["a"])), None);
 }
@@ -295,7 +295,7 @@ async fn an_ejected_member_left_untried_does_not_cut_an_attempt_short() {
 #[tokio::test(start_paused = true)]
 async fn a_pinned_smart_group_does_not_redial() {
     let rig = Rig::new(&config());
-    rig.out.select("s", "b").await;
+    rig.out.select("s", "b").await.unwrap();
     assert_eq!(rig.out.selection("s"), "b");
     let first = chain(&["b", "s", "o"]);
     let meta = Rig::flow("example.com");

@@ -191,8 +191,8 @@ async fn repeating_a_mode_moves_the_route_once_and_a_pick_never_moves_the_epoch(
     assert_eq!(after_mode.epoch, before.epoch);
     assert_eq!(after_mode.version, before.version + 1);
 
-    assert!(rig.engine.select("G", "REJECT").await.changed);
-    assert!(!rig.engine.select("G", "REJECT").await.changed);
+    assert!(rig.engine.select("G", "REJECT").await.unwrap().changed);
+    assert!(!rig.engine.select("G", "REJECT").await.unwrap().changed);
     let after_pick = rig.stamp();
     assert_eq!(after_pick.epoch, before.epoch);
     assert_eq!(after_pick.version, after_mode.version + 1);

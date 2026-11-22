@@ -2,13 +2,13 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use concord_common::{Change, DelayResult, Origin};
-use concord_group::{NodeStateView, ProxyViews, StatusRanges};
+use concord_group::{NodeStateView, ProxyViews, SelectError, StatusRanges};
 use serde_json::Value;
 
 use super::{Engine, NOT_INITIALIZED};
 use crate::error::Failure;
 use crate::ops;
-use crate::views::SelectOutcome;
+use crate::views::Selected;
 
 const DEFAULT_DELAY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -31,30 +31,20 @@ impl Engine {
             .unwrap_or_default()
     }
 
-    pub async fn select(&self, group: &str, proxy: &str) -> SelectOutcome {
+    pub async fn select(&self, group: &str, proxy: &str) -> Result<Selected, SelectError> {
         self.select_as(Origin::Host, group, proxy).await
     }
 
-    pub async fn select_as(&self, origin: Origin, group: &str, proxy: &str) -> SelectOutcome {
+    pub async fn select_as(
+        &self,
+        origin: Origin,
+        group: &str,
+        proxy: &str,
+    ) -> Result<Selected, SelectError> {
         let mut seq = self.intent.lock().await;
-        let Some(outbounds) = self.outbounds() else {
-            return SelectOutcome {
-                message: "Not found group".to_string(),
-                changed: false,
-                seq: *seq,
-            };
-        };
+        let outbounds = self.outbounds().ok_or(SelectError::NoGroup)?;
         let before = outbounds.selection(group);
-        let staged = match outbounds.stage_selection(group, proxy) {
-            Ok(staged) => staged,
-            Err(failed) => {
-                return SelectOutcome {
-                    message: failed.message,
-                    changed: false,
-                    seq: *seq,
-                };
-            }
-        };
+        let staged = outbounds.stage_selection(group, proxy)?;
         let after = outbounds.selection(group);
         if after != before {
             let group = group.to_string();
@@ -70,12 +60,10 @@ impl Engine {
         let made = *seq;
         drop(seq);
         outbounds.probe_selection(&staged).await;
-        let outcome = outbounds.settle_selection(staged);
-        SelectOutcome {
-            message: outcome.message,
-            changed: outcome.changed,
+        Ok(Selected {
+            changed: outbounds.settle_selection(staged),
             seq: made,
-        }
+        })
     }
 
     pub async fn proxy_definition(&self, name: String) -> Result<Option<Value>, Failure> {

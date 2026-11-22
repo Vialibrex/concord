@@ -165,7 +165,7 @@ async fn a_pinned_smart_group_does_not_redial_another_member() {
     );
     rig.apply(&config).await.unwrap();
     rig.engine.start_listeners().await;
-    rig.engine.select("s", "dead").await;
+    rig.engine.select("s", "dead").await.unwrap();
     assert_eq!(rig.selected("s").as_deref(), Some("dead"));
     assert!(refused(rig.mixed, echo).await);
     assert_eq!(carried(&seen, echo), 0, "the flow left the pinned member");

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use super::*;
-use crate::{GroupError, Policy};
+use crate::{GroupError, Policy, SelectError};
 
 const NODES: &str = "proxies:
   - {name: a, type: direct}
@@ -42,26 +42,25 @@ fn with_provider(groups: &str) -> String {
 async fn a_selector_starts_on_its_first_member_and_follows_select() {
     let rig = Rig::new(&config("  - {name: g, type: select, proxies: [a, b, c]}\n"));
     assert_eq!(rig.leaf("g"), "a");
-    let outcome = rig.out.select("g", "c").await;
-    assert!(outcome.changed && outcome.message.is_empty());
+    assert_eq!(rig.out.select("g", "c").await, Ok(true));
     assert_eq!(rig.leaf("g"), "c");
     assert_eq!(rig.store.get("g").as_deref(), Some("c"));
 }
 
 #[tokio::test]
-async fn select_reports_the_go_messages() {
+async fn select_refuses_a_missing_group_or_proxy_and_a_group_without_picks() {
     let rig = Rig::new(&config(
         "  - {name: g, type: select, proxies: [a, b]}\n  - {name: lb, type: load-balance, proxies: [a, b]}\n",
     ));
-    assert_eq!(rig.out.select("g", "zzz").await.message, "proxy not exist");
-    assert_eq!(rig.out.select("nope", "a").await.message, "Not found group");
+    assert_eq!(rig.out.select("g", "zzz").await, Err(SelectError::NoProxy));
+    assert_eq!(rig.out.select("nope", "a").await, Err(SelectError::NoGroup));
     assert_eq!(
-        rig.out.select("lb", "a").await.message,
-        "Group is not selectable"
+        rig.out.select("lb", "a").await,
+        Err(SelectError::NotSelectable)
     );
     assert_eq!(
-        rig.out.select("a", "a").await.message,
-        "Group is not selectable"
+        rig.out.select("a", "a").await,
+        Err(SelectError::NotSelectable)
     );
     assert_eq!(rig.store.get("g"), None);
 }
@@ -69,9 +68,8 @@ async fn select_reports_the_go_messages() {
 #[tokio::test]
 async fn clearing_a_selector_stores_an_empty_pick_and_lands_on_the_first_member() {
     let rig = Rig::new(&config("  - {name: g, type: select, proxies: [a, b]}\n"));
-    rig.out.select("g", "b").await;
-    let outcome = rig.out.select("g", "").await;
-    assert!(outcome.changed);
+    rig.out.select("g", "b").await.unwrap();
+    assert_eq!(rig.out.select("g", "").await, Ok(true));
     assert_eq!(rig.store.get("g").as_deref(), Some(""));
     assert_eq!(rig.leaf("g"), "a");
 }
@@ -79,10 +77,10 @@ async fn clearing_a_selector_stores_an_empty_pick_and_lands_on_the_first_member(
 #[tokio::test]
 async fn select_moves_the_route_once_per_change() {
     let rig = Rig::new(&config("  - {name: g, type: select, proxies: [a, b]}\n"));
-    rig.out.select("g", "b").await;
+    rig.out.select("g", "b").await.unwrap();
     let after_first = rig.moved.count();
     assert!(after_first >= 1);
-    rig.out.select("g", "b").await;
+    rig.out.select("g", "b").await.unwrap();
     assert_eq!(rig.moved.count(), after_first);
 }
 
@@ -137,7 +135,7 @@ async fn a_pinned_fallback_member_is_dropped_once_it_dies() {
     let rig = Rig::new(&config(&format!(
         "  - {{name: f, type: fallback, proxies: [a, b], url: '{TEST_URL}'}}\n"
     )));
-    rig.out.select("f", "b").await;
+    rig.out.select("f", "b").await.unwrap();
     assert_eq!(rig.leaf("f"), "b");
     rig.book.get("b").fail.store(true, Ordering::SeqCst);
     rig.test("b").await;
@@ -156,8 +154,7 @@ async fn selecting_a_dead_fallback_member_probes_it_first() {
     let node = rig.out.node("b").unwrap();
     node.health()
         .record(TEST_URL, 0, true, false, &rig.out.shared.health_epoch);
-    let outcome = rig.out.select("f", "b").await;
-    assert!(outcome.message.is_empty());
+    rig.out.select("f", "b").await.unwrap();
     assert_eq!(rig.book.get("b").connects.load(Ordering::SeqCst), 1);
     assert_eq!(rig.leaf("f"), "a");
 }
@@ -173,8 +170,7 @@ async fn routing_before_the_probe_of_a_dead_pick_leaves_the_pick_to_the_probe() 
     let staged = rig.out.stage_selection("f", "b").unwrap();
     assert_eq!(rig.leaf("f"), "a");
     rig.out.probe_selection(&staged).await;
-    let outcome = rig.out.settle_selection(staged);
-    assert!(outcome.changed);
+    assert!(rig.out.settle_selection(staged));
     assert_eq!(rig.leaf("f"), "b");
     assert_eq!(rig.store.get("f").as_deref(), Some("b"));
 }
@@ -222,7 +218,7 @@ async fn a_url_test_group_skips_dead_members_and_honors_a_pin() {
         rig.test(name).await;
     }
     assert_eq!(rig.leaf("u"), "c");
-    rig.out.select("u", "b").await;
+    rig.out.select("u", "b").await.unwrap();
     assert_eq!(rig.leaf("u"), "b");
     assert_eq!(rig.out.group("u").unwrap().fixed(), "b");
 }
@@ -402,6 +398,6 @@ async fn pass_and_pass_rule_resolve_to_their_own_variants_through_a_group() {
     assert!(matches!(rig.resolve("PASS"), Resolved::Pass));
     assert!(matches!(rig.resolve("PASS-RULE"), Resolved::PassRule));
     assert!(matches!(rig.resolve("g"), Resolved::Pass));
-    rig.out.select("g", "PASS-RULE").await;
+    rig.out.select("g", "PASS-RULE").await.unwrap();
     assert!(matches!(rig.resolve("g"), Resolved::PassRule));
 }

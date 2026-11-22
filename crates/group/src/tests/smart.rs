@@ -39,8 +39,8 @@ async fn a_smart_group_without_priority_picks_like_url_test_for_a_new_site() {
     assert_eq!(same_pick(&rig), "b");
     delays(&rig, &[("a", 40)]).await;
     assert_eq!(same_pick(&rig), "b");
-    rig.out.select("u", "b").await;
-    rig.out.select("s", "b").await;
+    rig.out.select("u", "b").await.unwrap();
+    rig.out.select("s", "b").await.unwrap();
     assert_eq!(same_pick(&rig), "b");
 }
 
@@ -97,7 +97,7 @@ async fn a_smart_group_is_named_smart_and_shows_its_pin_as_fixed() {
     assert!(matches!(group.policy(), Policy::Smart { .. }));
     assert!(group.is_selectable());
     assert_eq!(group.fixed(), "");
-    assert!(rig.out.select("s", "b").await.changed);
+    assert_eq!(rig.out.select("s", "b").await, Ok(true));
     assert_eq!(group.fixed(), "b");
     let view = match rig
         .out

@@ -100,8 +100,8 @@ async fn changes_carry_their_origin_and_are_numbered_in_the_order_they_took_effe
     let picked = rig
         .engine
         .select_as(Origin::Controller, "G", "REJECT")
-        .await;
-    assert!(picked.message.is_empty());
+        .await
+        .unwrap();
     assert_eq!(picked.seq, start + 1);
     let moved = rig
         .engine
@@ -138,7 +138,11 @@ async fn changes_carry_their_origin_and_are_numbered_in_the_order_they_took_effe
         .unwrap();
     assert_eq!(unchanged, start + 2);
     assert_eq!(
-        rig.engine.select_as(Origin::Host, "G", "REJECT").await.seq,
+        rig.engine
+            .select_as(Origin::Host, "G", "REJECT")
+            .await
+            .unwrap()
+            .seq,
         start + 2
     );
     assert!(rig.taken().is_empty());
@@ -238,8 +242,7 @@ rules:
     .expect("an update must not wait for another origin's probe")
     .unwrap();
 
-    let picked = select.await.unwrap();
-    assert!(picked.message.is_empty());
+    let picked = select.await.unwrap().unwrap();
     assert!(picked.seq < moved);
     let changes = rig.taken();
     assert_eq!(changes.len(), 1);
@@ -276,8 +279,11 @@ rules:
     assert!(dead.value < 0);
     rig.taken();
 
-    let picked = rig.engine.select_as(Origin::Host, "F", "gone").await;
-    assert!(picked.message.is_empty());
+    let picked = rig
+        .engine
+        .select_as(Origin::Host, "F", "gone")
+        .await
+        .unwrap();
     let mut changes = Vec::new();
     for _ in 0..100 {
         changes.extend(rig.taken());

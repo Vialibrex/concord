@@ -27,7 +27,7 @@ use crate::node::{Ghost, Item, Leaf, Node};
 use crate::provider::{self, ProxyProvider};
 use crate::shared::Shared;
 
-pub use self::select::{SelectOutcome, Staged};
+pub use self::select::{SelectError, Staged};
 
 pub(crate) enum Entry {
     Leaf(Arc<Leaf>),

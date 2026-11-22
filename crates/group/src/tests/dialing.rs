@@ -46,7 +46,7 @@ proxy-groups:
   - {name: g, type: select, proxies: [y, z]}
 ",
     );
-    rig.out.select("g", "z").await;
+    rig.out.select("g", "z").await.unwrap();
     assert!(dial(&rig, "x").await.is_ok());
     assert_eq!((connects(&rig, "y"), connects(&rig, "z")), (0, 1));
 }
@@ -85,7 +85,7 @@ proxy-groups:
   - {name: g, type: select, proxies: [y], use: [p]}
 ",
     );
-    rig.out.select("g", "x").await;
+    rig.out.select("g", "x").await.unwrap();
     let err = dial(&rig, "x").await.err().expect("a loop");
     assert!(err.to_string().contains("loop"), "{err}");
     assert_eq!(rig.events.loops(), ["x"]);

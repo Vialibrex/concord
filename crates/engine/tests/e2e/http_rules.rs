@@ -225,12 +225,12 @@ async fn requests_on_one_connection_leave_through_their_own_nodes() {
 async fn a_group_switch_moves_the_next_request() {
     let setup = setup(&["URL-REGEX,/g,G", "MATCH,DIRECT"]).await;
     for https in [true, false] {
-        setup.rig.engine.select("G", "A").await;
+        setup.rig.engine.select("G", "A").await.unwrap();
         let before = setup.seen();
         let (mut stream, port) = setup.open(https).await;
         body_of(&mut stream, port, "/g").await;
         assert_eq!(setup.seen(), (before.0 + 1, before.1));
-        assert!(setup.rig.engine.select("G", "B").await.changed);
+        assert!(setup.rig.engine.select("G", "B").await.unwrap().changed);
         assert_eq!(body_of(&mut stream, port, "/g").await.1, "/g|");
         assert_eq!(
             setup.seen(),
