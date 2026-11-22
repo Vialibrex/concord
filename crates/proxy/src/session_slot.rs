@@ -1,6 +1,9 @@
 use std::future::Future;
 use std::io;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::sync::watch;
 
 use crate::util::lock;
 
@@ -36,6 +39,36 @@ pub(crate) fn overtaken() -> io::Error {
     )
 }
 
+/// A shared dial's failure as each waiting caller gets it, with the error it carries whole, so
+/// that one saying the process ran out of descriptors still says so.
+#[derive(Debug)]
+struct SharedFailure(Arc<io::Error>);
+
+impl std::fmt::Display for SharedFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SharedFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&*self.0)
+    }
+}
+
+type Outcome<T> = Option<Result<Arc<T>, Arc<io::Error>>>;
+
+fn dropped() -> io::Error {
+    io::Error::other("the shared dial was dropped")
+}
+
+/// A dial `offer_detached` started, for the task that runs it to `settle`.
+pub(crate) struct Dial<T> {
+    ticket: Ticket,
+    done: watch::Sender<Outcome<T>>,
+    mine: watch::Receiver<Outcome<T>>,
+}
+
 /// A node's one shared connection.
 pub(crate) struct SessionSlot<T> {
     held: Mutex<Held<T>>,
@@ -44,6 +77,7 @@ pub(crate) struct SessionSlot<T> {
 struct Held<T> {
     resets: Resets,
     conn: Option<Arc<T>>,
+    detached: Option<watch::Receiver<Outcome<T>>>,
 }
 
 impl<T> Default for SessionSlot<T> {
@@ -52,6 +86,7 @@ impl<T> Default for SessionSlot<T> {
             held: Mutex::new(Held {
                 resets: Resets::default(),
                 conn: None,
+                detached: None,
             }),
         }
     }
@@ -114,9 +149,86 @@ impl<T> SessionSlot<T> {
         self.adopt(ticket, establish().await?, discard)
     }
 
+    /// Like `offer`, but the dial runs on a task of its own, which `start` spawns with the
+    /// [`Dial`] it then settles. A caller that stops waiting after `wait` leaves the dial running
+    /// for the callers after it, as sing-quic's offer does; a reset detaches it, so the callers that
+    /// come after the reset start their own and the ones already waiting get its failure.
+    pub(crate) async fn offer_detached(
+        &self,
+        usable: impl Fn(&T) -> bool,
+        wait: Option<Duration>,
+        start: impl FnOnce(Dial<T>),
+    ) -> io::Result<Arc<T>> {
+        let (mut outcome, dial) = {
+            let mut held = lock(&self.held);
+            if let Some(conn) = held.conn.as_ref().filter(|conn| usable(conn)) {
+                return Ok(conn.clone());
+            }
+            match &held.detached {
+                Some(running) => (running.clone(), None),
+                None => {
+                    let (done, mine) = watch::channel(None);
+                    held.detached = Some(mine.clone());
+                    let ticket = held.resets.ticket();
+                    let dial = Dial {
+                        ticket,
+                        done,
+                        mine: mine.clone(),
+                    };
+                    (mine, Some(dial))
+                }
+            }
+        };
+        if let Some(dial) = dial {
+            start(dial);
+        }
+        let settled = outcome.wait_for(Option::is_some);
+        let settled = match wait {
+            Some(left) => tokio::time::timeout(left, settled)
+                .await
+                .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?,
+            None => settled.await,
+        };
+        match settled.map_err(|_| dropped())?.clone() {
+            Some(Ok(conn)) => Ok(conn),
+            Some(Err(err)) => Err(io::Error::new(err.kind(), SharedFailure(err))),
+            None => Err(dropped()),
+        }
+    }
+
+    /// Ends `dial` with what it `made`, kept as `offer` keeps a connection, and hands the
+    /// outcome to its waiting callers.
+    pub(crate) fn settle(
+        &self,
+        dial: Dial<T>,
+        made: io::Result<Arc<T>>,
+        discard: impl FnOnce(Arc<T>),
+    ) {
+        let outcome = made
+            .and_then(|conn| self.adopt(dial.ticket, conn, discard))
+            .map_err(Arc::new);
+        {
+            let mut held = lock(&self.held);
+            if held
+                .detached
+                .as_ref()
+                .is_some_and(|running| running.same_channel(&dial.mine))
+            {
+                held.detached = None;
+            }
+        }
+        let _ = dial.done.send(Some(outcome));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dialing_detached(&self) -> bool {
+        lock(&self.held).detached.is_some()
+    }
+
     pub(crate) fn reset(&self) -> Option<Arc<T>> {
         let mut held = lock(&self.held);
         held.resets.bump();
+        held.detached = None;
         held.conn.take()
     }
 
@@ -195,6 +307,58 @@ mod tests {
             .unwrap();
         assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
         assert!(discarded.load(Ordering::SeqCst));
+        assert!(slot.get(|_| true).0.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_detached_dial_outlives_the_caller_that_gave_up_and_serves_the_next() {
+        let slot = Arc::new(SessionSlot::default());
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let runner = slot.clone();
+        let start = move |dial: Dial<u8>| {
+            tokio::spawn(async move {
+                let _ = released.await;
+                runner.settle(dial, Ok(Arc::new(3)), |_| {});
+            });
+        };
+        let gave_up = slot
+            .offer_detached(|_| true, Some(std::time::Duration::from_millis(10)), start)
+            .await;
+        assert_eq!(
+            gave_up.err().map(|err| err.kind()),
+            Some(io::ErrorKind::TimedOut)
+        );
+        assert!(slot.dialing_detached());
+        let waiting = slot.offer_detached(|_| true, None, |_| panic!("a second dial started"));
+        let _ = release.send(());
+        assert_eq!(*waiting.await.unwrap(), 3);
+        assert!(!slot.dialing_detached());
+        assert_eq!(slot.get(|_| true).0.as_deref(), Some(&3));
+    }
+
+    #[tokio::test]
+    async fn a_reset_detaches_a_running_dial_and_fails_its_callers() {
+        let slot = Arc::new(SessionSlot::default());
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let runner = slot.clone();
+        let start = move |dial: Dial<u8>| {
+            tokio::spawn(async move {
+                let _ = released.await;
+                runner.settle(dial, Ok(Arc::new(4)), |_| {});
+            });
+        };
+        let waiting = tokio::spawn({
+            let slot = slot.clone();
+            async move { slot.offer_detached(|_| true, None, start).await }
+        });
+        while !slot.dialing_detached() {
+            tokio::task::yield_now().await;
+        }
+        slot.reset();
+        assert!(!slot.dialing_detached());
+        let _ = release.send(());
+        let err = waiting.await.unwrap().err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionAborted);
         assert!(slot.get(|_| true).0.is_none());
     }
 }

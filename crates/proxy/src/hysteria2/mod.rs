@@ -4,7 +4,7 @@ mod udp;
 mod wire;
 
 use std::io;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -19,7 +19,6 @@ use concord_quic::{
 };
 use quinn::TransportConfig;
 use quinn::congestion::ControllerFactory;
-use tokio::sync::watch;
 
 use self::realm::Realm;
 use self::stream::Hy2Stream;
@@ -28,8 +27,8 @@ use crate::ctx::{BuildCtx, BuildError};
 use crate::lazy::{HeadFirst, Kick};
 use crate::node::{Egress, info_for};
 use crate::quic::{QuicLink, node_crypto};
-use crate::session_slot::{SessionSlot, Ticket};
-use crate::util::{lock, parse_bps, parse_ports};
+use crate::session_slot::{Dial, SessionSlot};
+use crate::util::{parse_bps, parse_ports};
 
 /// quic-go's MaxDatagramSize, the `max_datagram_frame_size` a Hysteria2 server sees from
 /// sing-box and mihomo; quinn would advertise its receive buffer instead.
@@ -57,25 +56,6 @@ impl Hy2Conn {
     }
 }
 
-type Offer = Option<Result<Arc<Hy2Conn>, Arc<io::Error>>>;
-
-/// A shared handshake's failure as each waiting caller gets it, with the error it carries
-/// whole, so that one saying the process ran out of descriptors still says so.
-#[derive(Debug)]
-struct SharedFailure(Arc<io::Error>);
-
-impl std::fmt::Display for SharedFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl std::error::Error for SharedFailure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&*self.0)
-    }
-}
-
 struct Hysteria2 {
     me: Weak<Hysteria2>,
     info: OutboundInfo,
@@ -89,7 +69,6 @@ struct Hysteria2 {
     controllers: Arc<SwitchFactory>,
     current: SessionSlot<Hy2Conn>,
     connecting: tokio::sync::Mutex<()>,
-    pending: Mutex<Option<watch::Receiver<Offer>>>,
 }
 
 struct AuthReply {
@@ -189,73 +168,30 @@ impl Hysteria2 {
                     )
                     .await
             }
-            Some(limit) => match self.current.get(Hy2Conn::alive) {
-                (Some(conn), _) => Ok(conn),
-                (None, _) => self.shared_offer(cx, limit).await,
-            },
-        }
-    }
-
-    /// sing-quic's offer with a handshake timeout: the handshake runs on its own under
-    /// that limit and callers share it, so one that gives up stops waiting without
-    /// cancelling a connection later dials can still use.
-    async fn shared_offer(&self, cx: &DialCx<'_>, limit: Duration) -> io::Result<Arc<Hy2Conn>> {
-        let mut offer = {
-            let mut pending = lock(&self.pending);
-            let (held, ticket) = self.current.get(Hy2Conn::alive);
-            if let Some(conn) = held {
-                return Ok(conn);
+            Some(limit) => {
+                self.current
+                    .offer_detached(Hy2Conn::alive, cx.remaining(), |dial| {
+                        self.start_dial(cx.env.clone(), limit, dial);
+                    })
+                    .await
             }
-            pending
-                .get_or_insert_with(|| self.start_offer(cx.env.clone(), limit, ticket))
-                .clone()
-        };
-        let settled = offer.wait_for(Option::is_some);
-        let settled = match cx.remaining() {
-            Some(left) => tokio::time::timeout(left, settled)
-                .await
-                .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?,
-            None => settled.await,
-        };
-        match settled
-            .map_err(|_| io::Error::other("hysteria2 handshake was dropped"))?
-            .clone()
-        {
-            Some(Ok(conn)) => Ok(conn),
-            Some(Err(err)) => Err(io::Error::new(err.kind(), SharedFailure(err))),
-            None => Err(io::Error::other("hysteria2 handshake was dropped")),
         }
     }
 
-    /// A reset detaches the offer, so the callers that come after it start their own; the ones
-    /// already waiting get the failure.
-    fn start_offer(&self, env: DialEnv, limit: Duration, ticket: Ticket) -> watch::Receiver<Offer> {
-        let (done, offer) = watch::channel(None);
+    /// sing-quic's offer with a handshake timeout: the handshake runs on its own under that
+    /// limit, so a caller that gives up does not cancel a connection later dials can still use.
+    fn start_dial(&self, env: DialEnv, limit: Duration, dial: Dial<Hy2Conn>) {
         let me = self.me.clone();
-        let mine = offer.clone();
         self.link.tasks.spawn(async move {
             let Some(me) = me.upgrade() else {
                 return;
             };
             let cx = DialCx::new(&env, Initiator::Proxy, None);
-            let result = tokio::time::timeout(limit, me.establish(&cx))
+            let made = tokio::time::timeout(limit, me.establish(&cx))
                 .await
                 .unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut)));
-            let outcome = result
-                .and_then(|conn| me.current.adopt(ticket, conn, |conn| conn.close()))
-                .map_err(Arc::new);
-            {
-                let mut pending = lock(&me.pending);
-                if pending
-                    .as_ref()
-                    .is_some_and(|held| held.same_channel(&mine))
-                {
-                    *pending = None;
-                }
-            }
-            let _ = done.send(Some(outcome));
+            me.current.settle(dial, made, |conn| conn.close());
         });
-        offer
     }
 }
 
@@ -291,7 +227,6 @@ impl Outbound for Hysteria2 {
     }
 
     fn reset_sessions(&self) {
-        *lock(&self.pending) = None;
         if let Some(conn) = self.current.reset() {
             conn.close();
         }
@@ -439,7 +374,6 @@ fn build_hy2(
         controllers,
         current: SessionSlot::default(),
         connecting: tokio::sync::Mutex::new(()),
-        pending: Mutex::new(None),
     }))
 }
 
@@ -527,12 +461,12 @@ mod tests {
         let cx = DialCx::new(&env, Initiator::Other, Some(soon));
         let err = built.offer(&cx).await.err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        assert!(lock(&built.pending).is_some());
+        assert!(built.current.dialing_detached());
 
         let cx = DialCx::new(&env, Initiator::Other, None);
         let err = built.offer(&cx).await.err().unwrap();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        assert!(lock(&built.pending).is_none());
+        assert!(!built.current.dialing_detached());
     }
 
     /// A server that lets every client in and counts the connections it accepts.
