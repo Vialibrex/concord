@@ -157,20 +157,33 @@ impl QuicLink {
         remote
     }
 
-    async fn connect_to(&self, cx: &DialCx<'_>, remote: SocketAddr) -> io::Result<QuicConn> {
+    async fn connect_to(
+        &self,
+        cx: &DialCx<'_>,
+        remote: SocketAddr,
+        endpoint: EndpointConfig,
+    ) -> io::Result<QuicConn> {
         let remote = self.first_port(remote);
         let raw = self.open_socket(cx, remote).await?;
-        self.handshake(cx, raw, remote, EndpointConfig::default())
-            .await
+        self.handshake(cx, raw, remote, endpoint).await
     }
 
     /// Dials the server's first address and completes the QUIC handshake, as mihomo's
     /// hysteria does. The hop schedule and the obfuscation are cloned, so one link can
     /// connect again after a drop.
     pub(crate) async fn connect(&self, cx: &DialCx<'_>) -> io::Result<QuicConn> {
+        self.connect_endpoint(cx, EndpointConfig::default()).await
+    }
+
+    /// Like `connect`, with an endpoint of its own configuration.
+    pub(crate) async fn connect_endpoint(
+        &self,
+        cx: &DialCx<'_>,
+        endpoint: EndpointConfig,
+    ) -> io::Result<QuicConn> {
         let proxy_cx = DialCx::new(cx.env, Initiator::Proxy, cx.deadline);
         let remote = resolve_server(&proxy_cx, &self.server, self.egress.version()).await?;
-        self.connect_to(cx, remote).await
+        self.connect_to(cx, remote, endpoint).await
     }
 
     /// Like `connect`, but over every address of the server the way mihomo's dialer
@@ -183,20 +196,9 @@ impl QuicLink {
         let proxy_cx = DialCx::new(cx.env, Initiator::Proxy, cx.deadline);
         let sockets = &cx.env.sockets;
         dial_each(&proxy_cx, &self.server, self.egress.version(), |addr| {
-            self.connect_to(cx, sockets.ip4p(addr))
+            self.connect_to(cx, sockets.ip4p(addr), EndpointConfig::default())
         })
         .await
-    }
-
-    pub(crate) async fn connect_endpoint(
-        &self,
-        cx: &DialCx<'_>,
-        endpoint: EndpointConfig,
-    ) -> io::Result<QuicConn> {
-        let proxy_cx = DialCx::new(cx.env, Initiator::Proxy, cx.deadline);
-        let remote = resolve_server(&proxy_cx, &self.server, self.egress.version()).await?;
-        let socket = self.open_socket(cx, remote).await?;
-        self.handshake(cx, socket, remote, endpoint).await
     }
 
     /// Like `connect`, over a socket that already reaches `remote`.
