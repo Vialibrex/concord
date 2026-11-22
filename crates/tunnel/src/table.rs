@@ -6,6 +6,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use concord_common::sync::lock;
 use concord_common::{ConnEnd, ConnRecord, CoreEvent, EndReason, EventSink, Tasks, TrafficDelta};
+use concord_net::Direction;
 use dashmap::DashMap;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -47,17 +48,11 @@ struct Totals {
     down: AtomicU64,
 }
 
-#[derive(Clone, Copy)]
-enum Direction {
-    Up,
-    Down,
-}
-
 impl Totals {
     fn of(&self, direction: Direction) -> &AtomicU64 {
         match direction {
-            Direction::Up => &self.up,
-            Direction::Down => &self.down,
+            Direction::Upload => &self.up,
+            Direction::Download => &self.down,
         }
     }
 }
@@ -112,13 +107,15 @@ pub struct Tracked {
 impl Tracked {
     pub fn uploaded(self: &Arc<Self>, bytes: u64) {
         self.record.upload.fetch_add(bytes, Ordering::Relaxed);
-        self.table.push(Direction::Up, self.record.direct, bytes);
+        self.table
+            .push(Direction::Upload, self.record.direct, bytes);
         self.mark_dirty();
     }
 
     pub fn downloaded(self: &Arc<Self>, bytes: u64) {
         self.record.download.fetch_add(bytes, Ordering::Relaxed);
-        self.table.push(Direction::Down, self.record.direct, bytes);
+        self.table
+            .push(Direction::Download, self.record.direct, bytes);
         self.mark_dirty();
     }
 
@@ -248,7 +245,7 @@ impl ConnTable {
     /// `list`: MITM decides how a decrypted connection shows once its client answers.
     pub fn prepare(self: &Arc<Self>, record: Arc<ConnRecord>, initial_upload: u64) -> Registration {
         if initial_upload > 0 {
-            self.push(Direction::Up, record.direct, initial_upload);
+            self.push(Direction::Upload, record.direct, initial_upload);
         }
         Registration {
             tracked: Arc::new(Tracked {
@@ -418,14 +415,11 @@ impl ConnTable {
         if batch.is_empty() {
             return false;
         }
-        if !self.events.enabled() {
-            for tracked in &batch {
-                tracked.dirty.store(false, Ordering::Relaxed);
-            }
-            return false;
-        }
         for tracked in &batch {
             tracked.dirty.store(false, Ordering::Relaxed);
+        }
+        if !self.events.enabled() {
+            return false;
         }
         let announcing = lock(&self.announcing);
         let deltas: Vec<_> = batch
