@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use concord_common::CoreOptions;
-use concord_test_support::{free_port, tcp_echo};
+use concord_test_support::{port_to_bind_later, tcp_echo};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, timeout};
@@ -116,8 +116,8 @@ async fn engine_with_every_service() -> (Arc<Engine>, Ports, Fetched, tempfile::
         counting_origin("proxies:\n  - {name: n, type: socks5, server: 127.0.0.1, port: 1}\n")
             .await;
     let ports = Ports {
-        mixed: free_port(),
-        dns: free_port(),
+        mixed: port_to_bind_later(),
+        dns: port_to_bind_later(),
     };
     let home = tempfile::tempdir().unwrap();
     let config = format!(

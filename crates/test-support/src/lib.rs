@@ -1,6 +1,7 @@
 //! Helpers that several crates' tests share. A dev-dependency only.
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::thread;
 
@@ -13,6 +14,26 @@ pub fn free_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+/// A loopback port, free for TCP and UDP, for a listener the code under test binds only later.
+/// It lies below the range the OS hands out to `bind(0)` and to outgoing connections (from 32768
+/// on Linux, 49152 on macOS), where [`free_port`]'s come from and where any socket the run opens
+/// meanwhile could take it. Each call in a process gets a different port.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a loopback probe is never protected"
+)]
+pub fn port_to_bind_later() -> u16 {
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let first = 20_000 + u16::try_from(std::process::id() % 4_000).unwrap_or_default();
+    (0..8_000)
+        .map(|_| first + NEXT.fetch_add(1, Ordering::Relaxed) % 8_000)
+        .find(|&port| {
+            std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+                && std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, port)).is_ok()
+        })
+        .expect("no loopback port free below the ephemeral range")
 }
 
 /// A connected loopback TCP pair: the dialing end, then the accepted end.
