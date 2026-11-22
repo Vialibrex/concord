@@ -8,7 +8,7 @@ use concord_common::{
 };
 use concord_engine::{
     DelayRecord as EngineDelay, Failure, GeneralView, GroupView, NodeStateView, NodeView,
-    ProviderView, QueryView, RecordView, Service,
+    ProviderView, QueryError, QueryView, RecordView, Service,
 };
 use concord_proto::ApiError;
 use concord_proto::types::{
@@ -484,7 +484,8 @@ pub fn api_error(failure: Failure, blame: Blame) -> ApiError {
     match failure {
         Failure::ConfigRejected(_) => ApiError::rejected(message, true),
         Failure::InvalidArguments(_) => ApiError::invalid_params(message),
-        Failure::InvalidQuery(_) => ApiError::invalid_field("qtype", message),
+        Failure::InvalidQuery(QueryError::Name) => ApiError::invalid_field("name", message),
+        Failure::InvalidQuery(QueryError::Type) => ApiError::invalid_field("qtype", message),
         Failure::ProviderNotFound { provider } => ApiError::not_found("provider", provider),
         Failure::ProviderUpdating { .. } | Failure::GeoUpdating(_) => {
             ApiError::conflict("updating", message)
@@ -501,12 +502,14 @@ pub fn api_error(failure: Failure, blame: Blame) -> ApiError {
         Failure::Open { path, source } if source.kind() == std::io::ErrorKind::NotFound => {
             ApiError::not_found("file", path)
         }
-        Failure::Open { .. } | Failure::Config(_) | Failure::Io(_) | Failure::Core(_) => {
-            match blame {
-                Blame::Data => ApiError::rejected(message, false),
-                Blame::Core => ApiError::internal(message),
-            }
-        }
+        Failure::Open { .. }
+        | Failure::Config(_)
+        | Failure::Io(_)
+        | Failure::InvalidQuery(QueryError::Exchange(_))
+        | Failure::Core(_) => match blame {
+            Blame::Data => ApiError::rejected(message, false),
+            Blame::Core => ApiError::internal(message),
+        },
     }
 }
 
@@ -685,6 +688,17 @@ mod tests {
         assert_eq!(
             api_error(request(true), Blame::Core).data,
             ErrorData::Timeout { after: None }
+        );
+        let field = |path: &str| ErrorData::InvalidParams {
+            path: Some(path.into()),
+        };
+        assert_eq!(
+            api_error(Failure::InvalidQuery(QueryError::Name), Blame::Core).data,
+            field("name")
+        );
+        assert_eq!(
+            api_error(Failure::InvalidQuery(QueryError::Type), Blame::Core).data,
+            field("qtype")
         );
         assert_eq!(
             api_error(Failure::UnknownGeo(text("FOO")), Blame::Core).data,
