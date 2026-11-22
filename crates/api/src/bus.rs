@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Context, Poll, Waker};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use concord_common::sync::lock;
 use concord_common::{ConnEnd, ConnRecord, CoreEvent as EngineEvent, EventSink, TrafficDelta};
@@ -111,12 +111,6 @@ impl<T> QueueSub<T> {
             self.queue.push(item);
         }
     }
-}
-
-fn unix_millis(at: SystemTime) -> i64 {
-    at.duration_since(UNIX_EPOCH).map_or(0, |elapsed| {
-        i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
-    })
 }
 
 struct Closed {
@@ -421,7 +415,7 @@ impl EventSink for EventBus {
                 if self.log.active() {
                     let entry = LogEntry {
                         level: convert::log_level(record.level),
-                        time: unix_millis(SystemTime::now()),
+                        time: convert::unix_millis(SystemTime::now()),
                         text: record.payload,
                     };
                     self.log.each(|sub| sub.push(entry.clone()));
@@ -663,7 +657,7 @@ mod tests {
         let mut stream = bus.watch_connections(false);
         let (told, closed, failed) = (record(), record(), record());
         let mut remote = concord_common::ConnEnd::new(concord_common::EndReason::Remote);
-        remote.at = UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123);
+        remote.at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_700_000_000_123);
         told.set_end(remote);
         closed.close();
         failed.set_end(concord_common::ConnEnd::of_error(&std::io::Error::from(
