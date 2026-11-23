@@ -1,7 +1,7 @@
 use std::io;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll, ready};
 
 use concord_common::stream_buffer::{self, BufferRequirements, ReadBufferOptions, StreamBuffer};
