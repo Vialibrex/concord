@@ -28,7 +28,9 @@ pub enum Workload {
     TcpRr,
     TcpCrr,
     UdpStream,
+    UdpMulti,
     UdpRr,
+    UdpCrr,
     MitmRr,
     MitmH2Rr,
     MitmCrr,
@@ -40,14 +42,16 @@ pub enum Workload {
 }
 
 impl Workload {
-    pub const ALL: [Workload; 15] = [
+    pub const ALL: [Workload; 17] = [
         Workload::TcpDown,
         Workload::TcpUp,
         Workload::TcpMulti,
         Workload::TcpRr,
         Workload::TcpCrr,
         Workload::UdpStream,
+        Workload::UdpMulti,
         Workload::UdpRr,
+        Workload::UdpCrr,
         Workload::MitmRr,
         Workload::MitmH2Rr,
         Workload::MitmCrr,
@@ -66,7 +70,9 @@ impl Workload {
             Workload::TcpRr => "tcp-rr",
             Workload::TcpCrr => "tcp-crr",
             Workload::UdpStream => "udp-stream",
+            Workload::UdpMulti => "udp-multi",
             Workload::UdpRr => "udp-rr",
+            Workload::UdpCrr => "udp-crr",
             Workload::MitmRr => "mitm-rr",
             Workload::MitmH2Rr => "mitm-h2-rr",
             Workload::MitmCrr => "mitm-crr",
@@ -86,7 +92,11 @@ impl Workload {
             Workload::TcpRr => "64-byte request and response on one connection: per-packet latency",
             Workload::TcpCrr => "connect, one byte each way, close: handshake latency and rate",
             Workload::UdpStream => "windowed UDP echo: goodput, loss and RTT",
+            Workload::UdpMulti => "parallel windowed UDP echoes: aggregate goodput and fairness",
             Workload::UdpRr => "one UDP ping in flight: RTT and loss",
+            Workload::UdpCrr => {
+                "a fresh UDP socket, one ping, close: many short sessions, as a port scan opens them"
+            }
             Workload::MitmRr => {
                 "mitm cases: 64-byte HTTP/1.1 POST and answer over one TLS connection"
             }
@@ -113,7 +123,10 @@ impl Workload {
     }
 
     pub fn needs_udp(self) -> bool {
-        matches!(self, Workload::UdpStream | Workload::UdpRr)
+        matches!(
+            self,
+            Workload::UdpStream | Workload::UdpMulti | Workload::UdpRr | Workload::UdpCrr
+        )
     }
 
     /// Speaks HTTP to the origin's HTTPS or HTTP port, so it runs on the mitm cases only.
@@ -370,8 +383,13 @@ pub async fn run(workload: Workload, ctx: &Ctx) -> Io<Metrics> {
         Workload::TcpMulti => stream(ctx, Direction::Down, ctx.flows).await,
         Workload::TcpRr => rr(ctx).await,
         Workload::TcpCrr => crr(ctx).await,
-        Workload::UdpStream => udp(ctx, ctx.udp_size, ctx.udp_window).await,
-        Workload::UdpRr => udp(ctx, 64, 1).await,
+        Workload::UdpStream => udp(ctx, ctx.udp_size, ctx.udp_window, 1).await,
+        Workload::UdpMulti => udp(ctx, ctx.udp_size, ctx.udp_window, ctx.flows).await,
+        Workload::UdpRr => udp(ctx, 64, 1, 1).await,
+        Workload::UdpCrr => {
+            let (entry, target) = (ctx.entry, ctx.at(ctx.ports.udp));
+            crr_with(ctx, "udp-crr", move || udp_crr_once(entry, target)).await
+        }
         Workload::MitmRr => mitm::rr(ctx, Wire::H1).await,
         Workload::MitmH2Rr => mitm::rr(ctx, Wire::H2).await,
         Workload::MitmCrr => {
@@ -816,55 +834,106 @@ async fn crr_once(entry: Entry, target: SocketAddr) -> Result<u64, String> {
 
 const LOSS_AFTER: Duration = Duration::from_millis(250);
 
-/// `window` packets of `size` bytes in flight; one missing for `LOSS_AFTER` counts
-/// as lost and frees its slot.
-async fn udp(ctx: &Ctx, size: usize, window: usize) -> Io<Metrics> {
-    let flow = Udp::open(ctx.entry, ctx.at(ctx.ports.udp))
-        .await
-        .map_err(io("udp associate"))?;
-    let header = flow.header_len();
+/// What one UDP flow counted inside the measured window.
+#[derive(Default)]
+struct UdpTally {
+    sent: u64,
+    received: u64,
+    lost: u64,
+    rtts: Vec<u64>,
+}
+
+/// `flows` UDP flows, each with `window` packets of `size` bytes in flight; one missing for
+/// `LOSS_AFTER` counts as lost and frees its slot.
+async fn udp(ctx: &Ctx, size: usize, window: usize, flows: usize) -> Io<Metrics> {
     let size = size.max(16);
+    let mut opened = Vec::with_capacity(flows);
+    for _ in 0..flows {
+        let flow = Udp::open(ctx.entry, ctx.at(ctx.ports.udp))
+            .await
+            .map_err(io("udp associate"))?;
+        opened.push(flow);
+    }
+    let measure_from = Instant::now() + ctx.warmup;
+    let end = measure_from + ctx.duration;
+    let tasks: Vec<_> = opened
+        .into_iter()
+        .map(|flow| tokio::spawn(udp_flow(flow, size, window, measure_from, end)))
+        .collect();
+    tokio::time::sleep_until(measure_from.into()).await;
+    let windows = Windows::open(ctx.pids);
+    let started = Instant::now();
+    let mut tallies = Vec::with_capacity(flows);
+    for task in tasks {
+        tallies.push(task.await.map_err(|e| format!("udp flow: {e}"))??);
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    let closed = windows.close();
+    let received: u64 = tallies.iter().map(|t| t.received).sum();
+    if received == 0 {
+        return Err("no UDP packet came back".into());
+    }
+    let sent: u64 = tallies.iter().map(|t| t.sent).sum();
+    let lost: u64 = tallies.iter().map(|t| t.lost).sum();
+    let per_flow: Vec<f64> = tallies
+        .iter()
+        .map(|t| (t.received * size as u64) as f64 * 8.0 / 1e6 / elapsed)
+        .collect();
+    let mut rtts: Vec<u64> = tallies.into_iter().flat_map(|t| t.rtts).collect();
+    let mut m = Metrics::new();
+    let bytes = received * size as u64;
+    m.insert("mbps".into(), bytes as f64 * 8.0 / 1e6 / elapsed);
+    m.insert("pps".into(), received as f64 / elapsed);
+    m.insert("loss_pct".into(), lost as f64 * 100.0 / sent.max(1) as f64);
+    if flows > 1 {
+        m.insert("jain".into(), stats::jain(&per_flow));
+        m.insert(
+            "min_flow_mbps".into(),
+            per_flow.iter().copied().fold(f64::INFINITY, f64::min),
+        );
+    }
+    latency_metrics(&mut m, "rtt_", &mut rtts, 1e3, "us");
+    costs(&mut m, &closed, Some(bytes * 2), None);
+    Ok(m)
+}
+
+/// Counts only packets sent from `measure_from` on, and stops at `end`.
+async fn udp_flow(
+    flow: Udp,
+    size: usize,
+    window: usize,
+    measure_from: Instant,
+    end: Instant,
+) -> Io<UdpTally> {
+    let header = flow.header_len();
     let mut packet = vec![0u8; header + size];
     let mut buf = vec![0u8; 65_536];
     let mut inflight: HashMap<u64, Instant> = HashMap::with_capacity(window * 2);
     let mut seq = 0u64;
-    let begun = Instant::now();
-    let measure_from = begun + ctx.warmup;
-    let mut windows = None;
-    let mut window_start = None;
-    let (mut sent, mut received, mut lost) = (0u64, 0u64, 0u64);
-    let mut rtts = Vec::new();
+    let mut tally = UdpTally::default();
     loop {
         let now = Instant::now();
-        if windows.is_none() && now >= measure_from {
-            windows = Some(Windows::open(ctx.pids));
-            window_start = Some(now);
-        }
-        if let Some(start) = window_start
-            && now.duration_since(start) >= ctx.duration
-        {
+        if now >= end {
             break;
         }
-        if now.duration_since(begun) > ctx.warmup + ctx.duration + Duration::from_secs(5) {
-            break;
-        }
+        let measuring = now >= measure_from;
         while inflight.len() < window {
             seq += 1;
             packet[header..header + 8].copy_from_slice(&seq.to_le_bytes());
             flow.send(&mut packet).await.map_err(io("udp send"))?;
             inflight.insert(seq, Instant::now());
-            if window_start.is_some() {
-                sent += 1;
+            if measuring {
+                tally.sent += 1;
             }
         }
         match tokio::time::timeout(Duration::from_millis(20), flow.recv(&mut buf)).await {
             Ok(Ok(payload)) if payload.len() >= 8 => {
                 let id = u64::from_le_bytes(payload[..8].try_into().unwrap_or_default());
                 if let Some(at) = inflight.remove(&id)
-                    && window_start.is_some_and(|s| at >= s)
+                    && at >= measure_from
                 {
-                    received += 1;
-                    rtts.push(at.elapsed().as_nanos() as u64);
+                    tally.received += 1;
+                    tally.rtts.push(at.elapsed().as_nanos() as u64);
                 }
             }
             Ok(Ok(_)) => {}
@@ -874,25 +943,31 @@ async fn udp(ctx: &Ctx, size: usize, window: usize) -> Io<Metrics> {
         let now = Instant::now();
         inflight.retain(|_, at| {
             let keep = now.duration_since(*at) < LOSS_AFTER;
-            if !keep && window_start.is_some_and(|s| *at >= s) {
-                lost += 1;
+            if !keep && *at >= measure_from {
+                tally.lost += 1;
             }
             keep
         });
     }
-    let elapsed = window_start.map_or(0.0, |s| s.elapsed().as_secs_f64());
-    let closed = windows.ok_or("udp window never opened")?.close();
-    if received == 0 {
-        return Err("no UDP packet came back".into());
+    Ok(tally)
+}
+
+/// One short UDP session: a fresh socket, one 64-byte ping and its echo, then close.
+async fn udp_crr_once(entry: Entry, target: SocketAddr) -> Result<u64, String> {
+    let started = Instant::now();
+    let work = async {
+        let flow = Udp::open(entry, target).await?;
+        let mut packet = vec![0u8; flow.header_len() + 64];
+        flow.send(&mut packet).await?;
+        let mut buf = [0u8; 2048];
+        flow.recv(&mut buf).await?;
+        Ok::<_, std::io::Error>(())
+    };
+    match tokio::time::timeout(LOSS_AFTER, work).await {
+        Ok(Ok(())) => Ok(started.elapsed().as_nanos() as u64),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => Err("lost".into()),
     }
-    let mut m = Metrics::new();
-    let bytes = received * size as u64;
-    m.insert("mbps".into(), bytes as f64 * 8.0 / 1e6 / elapsed);
-    m.insert("pps".into(), received as f64 / elapsed);
-    m.insert("loss_pct".into(), lost as f64 * 100.0 / sent.max(1) as f64);
-    latency_metrics(&mut m, "rtt_", &mut rtts, 1e3, "us");
-    costs(&mut m, &closed, Some(bytes * 2), None);
-    Ok(m)
 }
 
 /// Holds `ctx.idle_conns` connections, each proven end to end, and reads the core

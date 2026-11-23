@@ -275,7 +275,9 @@ and a drift of at most 1.61%. The same case on the second machine is a separate 
 | `tcp-rr` | 64-byte transactions/s, p50/p90/p99/p99.9 latency, CPU-µs per transaction |
 | `tcp-crr` | connect, exchange one byte, close: connections/s, p50/p99 setup latency, errors, CPU-µs per connection |
 | `udp-stream` | windowed UDP echo through SOCKS5 UDP ASSOCIATE: Mbit/s, loss, RTT percentiles, CPU-s/GB |
+| `udp-multi` | `udp-stream` over the tier's parallel flows (as `tcp-multi`), each its own socket and so its own session: aggregate Mbit/s, loss, CPU-s/GB, Jain fairness, slowest flow |
 | `udp-rr` | one UDP ping in flight: RTT and loss |
+| `udp-crr` | a fresh UDP socket per session, one 64-byte echo, close, as a port scan opens sessions: sessions/s (`cps`), p50/p99 latency, lost sessions (`error_pct`, 250 ms), CPU-µs per session; `--crr-conns` beyond the core's UDP flow table (`MAX_FLOWS` in `crates/tunnel/src/udp/mod.rs`) runs its eviction |
 | `idle` | KiB per held connection, KiB still held after they close, fds per connection, time to open them all |
 | `startup` | spawn to first proxied byte, idle memory, threads, fds, CPU spent starting, time to exit after SIGTERM |
 | `large` | a generated profile (quick tier 5k proxies and 50k rules, full tier 20k and 200k): time to ready, peak and settled memory |

@@ -135,6 +135,7 @@ pub fn meta(key: &str) -> Meta {
         "cps" => ("connections/s", Higher),
         "jain" => ("fairness (Jain)", Higher),
         "min_flow_gbps" => ("slowest flow Gbit/s", Higher),
+        "min_flow_mbps" => ("slowest flow Mbit/s", Higher),
         "interval_p10_gbps" => ("p10 of 100 ms rates, Gbit/s", Higher),
         "ipc" => ("instructions/cycle", Higher),
         "cpu_s_per_gb" => ("core CPU-s/GB", Lower),
@@ -236,7 +237,9 @@ pub fn primary(workload: &str) -> &'static [&'static str] {
         "tcp-rr" | "mitm-rr" | "mitm-h2-rr" | "http-rr" => {
             &["tps", "p50_us", "p99_us", "cpu_us_per_tx"]
         }
-        "tcp-crr" | "mitm-crr" => &["cps", "p50_ms", "p99_ms", "cpu_us_per_conn", "error_pct"],
+        "tcp-crr" | "mitm-crr" | "udp-crr" => {
+            &["cps", "p50_ms", "p99_ms", "cpu_us_per_conn", "error_pct"]
+        }
         "page-load" => &[
             "page_p50_ms",
             "page_p95_ms",
@@ -246,6 +249,7 @@ pub fn primary(workload: &str) -> &'static [&'static str] {
             "error_pct",
         ],
         "udp-stream" => &["mbps", "loss_pct", "rtt_p99_us", "cpu_s_per_gb"],
+        "udp-multi" => &["mbps", "loss_pct", "cpu_s_per_gb", "jain", "min_flow_mbps"],
         "udp-rr" => &["rtt_p50_us", "rtt_p99_us", "loss_pct"],
         "idle" => &["kib_per_conn", "retained_kib_per_conn", "open_ms"],
         "startup" => &["ready_ms", "footprint_mib", "threads", "stop_ms"],
