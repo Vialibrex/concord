@@ -724,6 +724,10 @@ mod tests {
                 "not a file in the resources directory",
             ),
             (
+                "X = type=http-request,pattern=a,script-path=https://cdn.test/a.js",
+                r#"script-path "https://cdn.test/a.js" has not been downloaded"#,
+            ),
+            (
                 "X = type=http-request,pattern=a,script-path=broken.js",
                 "SyntaxError",
             ),

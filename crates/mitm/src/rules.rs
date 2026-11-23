@@ -321,6 +321,12 @@ pub(crate) fn read_resource(dir: &Path, param: &str, name: &str) -> Result<Vec<u
 
 /// The path and length of a regular file in the resources directory.
 fn resource_file(dir: &Path, param: &str, name: &str) -> Result<(PathBuf, u64), LineError> {
+    if name.contains("://") {
+        return Err(LineError::resource(format!(
+            "{param} {} has not been downloaded",
+            quote(name)
+        )));
+    }
     if !is_local(name) {
         return Err(LineError::resource(format!(
             "{param} {} is not a file in the resources directory",
