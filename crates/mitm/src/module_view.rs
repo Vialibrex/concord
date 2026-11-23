@@ -7,6 +7,7 @@ use concord_config::mitm::module::{
     ArgumentDef, IgnoreReason, ModuleFormat, ModuleInput, ModuleMeta, ModuleOff, ModuleRule,
     NetworkDef, ResourceDef, RuleSetDef, lines, read_module,
 };
+use concord_config::mitm::modules::name_stored_files;
 use serde::Serialize;
 
 use crate::config::{Issue, LineEntry, ParseEnv, check_def};
@@ -50,9 +51,16 @@ pub struct IgnoredView {
 
 const FORCE_HTTP: &str = "force-http-hostname";
 
-pub(crate) fn view_module(text: &str, input: &ModuleInput<'_>, env: &ParseEnv) -> ModuleView {
+pub(crate) fn view_module(
+    text: &str,
+    input: &ModuleInput<'_>,
+    env: &ParseEnv,
+    stored: &impl Fn(&str) -> Option<String>,
+) -> ModuleView {
     let def = read_module(text, input);
-    let mut validation = check_def(&def.section(text), env);
+    let mut section = def.section(text);
+    name_stored_files(&mut section, stored);
+    let mut validation = check_def(&section, env);
     let force_http = check_def(&def.force_http_section(text), env);
     if let Some(issues) = force_http.issues.into_values().next() {
         validation.issues.insert(FORCE_HTTP.to_string(), issues);

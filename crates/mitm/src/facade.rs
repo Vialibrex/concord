@@ -153,8 +153,13 @@ impl Mitm {
         check(raw, &self.parse_env())
     }
 
-    pub fn read_module(&self, text: &str, input: &ModuleInput<'_>) -> ModuleView {
-        view_module(text, input, &self.parse_env())
+    pub fn read_module(
+        &self,
+        text: &str,
+        input: &ModuleInput<'_>,
+        stored: impl Fn(&str) -> Option<String>,
+    ) -> ModuleView {
+        view_module(text, input, &self.parse_env(), &stored)
     }
 
     /// Replaces the section, keeping the engine, its schedule and the tasks

@@ -496,6 +496,7 @@ pub fn compose(
     let mut appended = Vec::new();
     for module in modules.iter().filter(|module| module.in_force()) {
         let mut lines = module.def.section(&module.text);
+        name_stored_files(&mut lines, &stored);
         lines.mark_origin(&module.origin());
         let inserts = module.def.lists.hostname.iter().map(|line| line.def.insert);
         for (line, insert) in lines.hostname.into_iter().zip(inserts) {
@@ -515,28 +516,27 @@ pub fn compose(
             .extend(lines.client_source_address);
         section.url_rewrite.extend(lines.url_rewrite);
         section.header_rewrite.extend(lines.header_rewrite);
-        section
-            .body_rewrite
-            .extend(stored_in(
-                lines.body_rewrite,
-                &stored,
-                |def| match &mut def.action {
-                    BodyActionDef::JqFile(path) => Some(path),
-                    _ => None,
-                },
-            ));
-        section
-            .map_local
-            .extend(stored_in(lines.map_local, &stored, local_file));
-        section
-            .request_body_mock
-            .extend(stored_in(lines.request_body_mock, &stored, local_file));
-        section
-            .script
-            .extend(stored_in(lines.script, &stored, |def| Some(&mut def.path)));
+        section.body_rewrite.extend(lines.body_rewrite);
+        section.map_local.extend(lines.map_local);
+        section.request_body_mock.extend(lines.request_body_mock);
+        section.script.extend(lines.script);
     }
     section.hostname.extend(appended);
     section
+}
+
+/// Names each remote file a module's `lines` read by the file `stored` keeps it in, leaving
+/// the URL of a file not stored.
+pub fn name_stored_files(lines: &mut MitmDef, stored: &impl Fn(&str) -> Option<String>) {
+    stored_in(&mut lines.body_rewrite, stored, |def| {
+        match &mut def.action {
+            BodyActionDef::JqFile(path) => Some(path),
+            _ => None,
+        }
+    });
+    stored_in(&mut lines.map_local, stored, local_file);
+    stored_in(&mut lines.request_body_mock, stored, local_file);
+    stored_in(&mut lines.script, stored, |def| Some(&mut def.path));
 }
 
 fn local_file(def: &mut super::MapLocalDef) -> Option<&mut String> {
@@ -544,11 +544,11 @@ fn local_file(def: &mut super::MapLocalDef) -> Option<&mut String> {
 }
 
 fn stored_in<T>(
-    mut lines: Vec<MitmLine<Read<T>>>,
+    lines: &mut [MitmLine<Read<T>>],
     stored: &impl Fn(&str) -> Option<String>,
     path: impl Fn(&mut T) -> Option<&mut String>,
-) -> Vec<MitmLine<Read<T>>> {
-    for line in &mut lines {
+) {
+    for line in lines {
         if let Ok(def) = &mut line.read
             && let Some(path) = path(def)
             && is_url(path)
@@ -557,7 +557,6 @@ fn stored_in<T>(
             *path = file;
         }
     }
-    lines
 }
 
 #[cfg(test)]

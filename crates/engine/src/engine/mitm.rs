@@ -227,7 +227,7 @@ impl MitmService {
     }
 
     /// How `text` reads as a module with these argument values and attachments, on this system
-    /// in the host's `language`.
+    /// in the host's `language`, each remote file it reads named by the file the core stored.
     pub fn read_module(
         &self,
         text: &str,
@@ -241,7 +241,10 @@ impl MitmService {
             attachments,
             environment: &environment,
         };
-        Ok(self.started()?.read_module(text, &input))
+        let store = self.modules.load_full();
+        Ok(self.started()?.read_module(text, &input, |url| {
+            store.as_ref().and_then(|store| store.resources.stored(url))
+        }))
     }
 
     pub async fn run_script(&self, name: &str) -> Result<ScriptOutput, Failure> {

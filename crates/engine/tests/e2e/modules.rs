@@ -6,7 +6,7 @@ use tokio::time::{Instant, sleep};
 use super::http_rules::{Io, ask, body_of, plain_echo_server, read_head};
 use super::*;
 
-/// Serves `/body.json` with the status the test sets, counting the requests.
+/// Serves `body` at every path with the status the test sets, counting the requests.
 struct Files {
     status: Arc<AtomicU16>,
     asked: Arc<AtomicUsize>,
@@ -14,6 +14,10 @@ struct Files {
 }
 
 async fn file_server(status: u16) -> Files {
+    file_server_of(status, "{\"local\":1}").await
+}
+
+async fn file_server_of(status: u16, body: &'static str) -> Files {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let files = Files {
@@ -31,7 +35,7 @@ async fn file_server(status: u16) -> Files {
                 }
                 asked.fetch_add(1, Ordering::SeqCst);
                 let status = answer.load(Ordering::SeqCst);
-                let body = if status == 200 { "{\"local\":1}" } else { "" };
+                let body = if status == 200 { body } else { "" };
                 let response = format!(
                     "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
@@ -324,4 +328,105 @@ async fn stash_and_surge_rule_sets_match_by_their_own_behavior_and_format() {
         "A saw {seen:?}"
     );
     rig.engine.shutdown().await;
+}
+
+const SCRIPTED: &str = "$done({response: {status: 200, body: 'scripted'}})";
+
+/// Quantumult X's script rewrites, each kind once, as `fmz200/wool_scripts`' rewrite snippet
+/// writes them, then a Surge script; every script is fetched from `files`.
+fn script_modules(origin: u16, files: u16) -> [String; 2] {
+    let qx = format!(
+        "# > 12306\n\
+         ^http://localhost:\\d+/echo url script-echo-response http://127.0.0.1:{files}/12306.js\n\
+         ^http://localhost:\\d+/analyze url script-analyze-echo-response http://127.0.0.1:{files}/a.js\n\
+         ^http://localhost:\\d+/qh url script-request-header http://127.0.0.1:{files}/qh.js\n\
+         ^http://localhost:\\d+/qb url script-request-body http://127.0.0.1:{files}/qb.js\n\
+         ^http://localhost:\\d+/sh url script-response-header http://127.0.0.1:{files}/sh.js\n\
+         ^http://localhost:\\d+/sb url script-response-body http://127.0.0.1:{files}/555Ad.js\n\
+         0 9 * * * http://127.0.0.1:{files}/task.js, tag=task\n\
+         hostname = localhost:{origin}\n"
+    );
+    let surge = format!(
+        "#!name=Surge\n\
+         [Script]\n\
+         surge = type=http-request,pattern=^http://localhost:\\d+/surge,script-path=http://127.0.0.1:{files}/surge.js\n\
+         [MITM]\n\
+         hostname = %APPEND% localhost:{origin}\n"
+    );
+    [qx, surge]
+}
+
+fn modules_config(texts: &[String], a_port: u16) -> String {
+    let mut modules = String::new();
+    for (index, text) in texts.iter().enumerate() {
+        modules.push_str(&format!("    - name: m{index}\n      text: |\n"));
+        for line in text.lines() {
+            modules.push_str(&format!("        {line}\n"));
+        }
+    }
+    format!(
+        "proxies:\n  - {{name: A, type: socks5, server: 127.0.0.1, port: {a_port}}}\n\
+         mitm:\n  enable: true\n  modules:\n{modules}\
+         rules:\n  - MATCH,A\n"
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fetched_script_of_any_format_reads_as_its_stored_file() {
+    let origin = plain_echo_server().await.port();
+    let files = file_server_of(200, SCRIPTED).await;
+    let (a_port, _) = upstream_socks().await;
+    let texts = script_modules(origin, files.port);
+    let rig = Rig::new();
+    let unfetched = rig
+        .engine
+        .mitm()
+        .read_module(&texts[0], &BTreeMap::new(), &BTreeMap::new(), String::new())
+        .unwrap();
+    let issues = &unfetched.issues["script"];
+    assert_eq!(issues.len(), 7, "{issues:?}");
+    assert!(
+        issues
+            .iter()
+            .all(|issue| issue.message.ends_with("has not been downloaded")),
+        "{issues:?}"
+    );
+
+    rig.apply(&modules_config(&texts, a_port)).await.unwrap();
+    rig.engine.start_listeners().await;
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let status = rig.engine.mitm().module_status().unwrap();
+        let fetched = status
+            .iter()
+            .flat_map(|module| &module.resources)
+            .all(|resource| resource.state == ResourceState::Ok);
+        if fetched {
+            assert_eq!(status[0].resources.len(), 7, "{status:?}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "never fetched: {status:?}");
+        sleep(Duration::from_millis(20)).await;
+    }
+    for (text, scripts) in texts.iter().zip([7, 1]) {
+        let view = rig
+            .engine
+            .mitm()
+            .read_module(text, &BTreeMap::new(), &BTreeMap::new(), String::new())
+            .unwrap();
+        assert!(view.issues.is_empty(), "{:?}", view.issues);
+        assert_eq!(view.views["script"].len(), scripts, "{text}");
+    }
+    for path in ["/echo", "/surge"] {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let mut stream = open(&rig, origin).await;
+            let answer = ask(&mut stream, origin, path, None).await;
+            if matches!(&answer, Some((200, _, body)) if body == "scripted") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{path}: {answer:?}");
+            sleep(Duration::from_millis(20)).await;
+        }
+    }
 }
