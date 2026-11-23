@@ -32,7 +32,6 @@ use tx::PoolEgress;
 
 const RX_BATCH: usize = 64;
 const RX_BATCH_START: usize = 8;
-const MAX_ROUNDS: usize = 8;
 /// Bytes a round reads before the stack answers them, as sing-tun ends a read burst: an
 /// upload's ACKs go out while the sender still has window, not after the device runs dry.
 const ROUND_READ_BYTES: usize = 1 << 20;
@@ -304,11 +303,12 @@ impl<D: Device> Driver<D> {
             queues.register(*index, cx.waker());
         }
         let mut busy = true;
-        let mut rounds = 0;
+        let mut first = true;
         let mut deadline = None;
         let mut replies_left = false;
-        while busy && rounds < MAX_ROUNDS {
-            rounds += 1;
+        // A pass ends when Tokio's cooperative budget does: every device read and write draws on
+        // it, as Tokio's own I/O does, and `drive` schedules the next pass while it is spent.
+        while busy && tokio::task::coop::has_budget_remaining() {
             self.udp.set_now(self.tcp.now());
             busy = false;
             let sink = Arc::clone(&self.sink);
@@ -322,7 +322,7 @@ impl<D: Device> Driver<D> {
             }
             // Once a poll, after the first TUN reads, as sing-tun dispatches socket events once a
             // run loop (`stack_go_engine.go:283-298`).
-            if rounds == 1 {
+            if std::mem::take(&mut first) {
                 replies_left = self.replies.drain();
             }
             deadline = self
@@ -550,7 +550,8 @@ mod owner_tests {
     async fn reading_without_transmit_room_is_bounded_and_returns() {
         struct Flood(std::sync::atomic::AtomicUsize);
         impl Device for Flood {
-            fn poll_recv(&self, _: &mut Context<'_>, _: &mut [u8]) -> Poll<io::Result<usize>> {
+            fn poll_recv(&self, cx: &mut Context<'_>, _: &mut [u8]) -> Poll<io::Result<usize>> {
+                std::task::ready!(tokio::task::coop::poll_proceed(cx)).made_progress();
                 self.0.fetch_add(1, Ordering::Relaxed);
                 Poll::Ready(Ok(1))
             }
@@ -569,11 +570,8 @@ mod owner_tests {
         driver.pool.take_up_to(&mut held, usize::MAX);
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(driver.poll_run(&mut cx).is_pending());
-        let reads = driver.dev.0.load(Ordering::Relaxed);
-        assert!(
-            (1..=RX_BATCH * MAX_ROUNDS).contains(&reads),
-            "{reads} reads in one pass"
-        );
+        assert!(driver.dev.0.load(Ordering::Relaxed) > 0);
+        assert!(!tokio::task::coop::has_budget_remaining());
         driver.pool.give_back(&mut held, 0);
     }
 

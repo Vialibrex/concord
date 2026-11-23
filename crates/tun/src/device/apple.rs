@@ -33,9 +33,13 @@ impl Device for TunDevice {
             count += 1;
         }
         let batch = slots.get_mut(..count).unwrap_or_default();
+        let budget = std::task::ready!(tokio::task::coop::poll_proceed(cx));
         match concord_platform::utun_recv_batch(self.inner.as_raw_fd(), batch, lens) {
             Ok(0) => {}
-            Ok(received) => return Poll::Ready(Ok(received)),
+            Ok(received) => {
+                budget.made_progress();
+                return Poll::Ready(Ok(received));
+            }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}
             Err(err) => return Poll::Ready(Err(err)),
         }

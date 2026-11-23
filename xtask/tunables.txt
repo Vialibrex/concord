@@ -69,7 +69,6 @@ proxy::shadowquic::BRUTAL_MTU 1200  # Datagram size handed to the Brutal/BBR con
 rpc::server::OUTBOX_DEPTH 16  # mihomo writes push frames inline with no queue (`hub/route/server.go:530-561`); depth one with backpressure changes how replies wait on each other. Needs a host-side measurement.
 rules::runs::KEYWORD_AUTOMATON_FROM 16  # Either drop is possible (always automaton, as aho-corasick advises, or always linear, as mihomo and sing-box do); needs a rule-matching measurement.
 tun::stack::driver::DNS_CONCURRENCY 256  # In-flight hijacked DNS queries. Concord's own value with no reference or measurement behind it; sing-tun has no DNS in-flight cap.
-tun::stack::driver::MAX_ROUNDS 8  # Driver rounds per wake. Concord's own value with no reference or measurement behind it; sing-tun bounds a burst by goEngineBurstBytes 1 MiB (`stack_go_engine.go:642`).
 tun::stack::driver::RX_BUFFER 65552  # sing-tun slot is virtioNetHdrLen(10) + gsoMaxSize + headroom (stack_go_io_linux.go:275); Concord 64 KiB + 16
 tun::stack::driver::SEGMENTED_SLOTS 64  # TX slots that grow to a GSO frame. Concord's own value with no reference or measurement behind it.
 tun::stack::driver::SWEEP_INTERVAL 15000000  # Driver sweep period, 15 s. Concord's own value with no reference or measurement behind it; sing-tun drives timers from a wheel.
