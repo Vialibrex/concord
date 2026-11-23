@@ -11,11 +11,8 @@ use concord_common::{Address, ReplySource, UdpReply};
 
 use super::pool::TxPool;
 use super::replies::ReplyQueue;
+use super::reply_packet::ReplyPacket;
 use super::stats::StackStats;
-use concord_netstack::wire::{
-    IPV4_HEADER, IPV6_HEADER, L4Checksum, UDP_HEADER, build_udp, fragment_count, ip_header_len,
-    write_fragment,
-};
 
 const TABLE_LIMIT: usize = 65_536;
 
@@ -77,19 +74,9 @@ impl UdpReply for UdpReplyHandle {
         payload: &[u8],
         from: &Address,
     ) -> Poll<io::Result<()>> {
-        let Address::Socket(from) = from else {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a reply needs an IP source address",
-            )));
-        };
-        let header = if self.local.is_ipv4() {
-            IPV4_HEADER
-        } else {
-            IPV6_HEADER
-        };
-        if payload.len() + header + UDP_HEADER > self.mtu {
-            return self.poll_write_fragments(cx, payload, *from);
+        let reply = ReplyPacket::new(payload, from, self.local)?;
+        if reply.len() > self.mtu {
+            return self.poll_write_fragments(cx, &reply);
         }
         let mut slot = match self.pool.poll_take_free(cx) {
             Poll::Pending => return Poll::Pending,
@@ -98,22 +85,15 @@ impl UdpReply for UdpReplyHandle {
             }
             Poll::Ready(Some(slot)) => slot,
         };
-        match build_udp(
-            &mut slot.buf,
-            *from,
-            self.local,
-            payload,
-            self.pool.checksum,
-        ) {
-            Ok(len) => {
-                slot.len = len;
+        match reply.write(&mut slot, self.pool.checksum) {
+            Ok(()) => {
                 self.pool.push_filled(slot);
                 self.stats.udp_replies.fetch_add(1, Ordering::Relaxed);
                 Poll::Ready(Ok(()))
             }
-            Err(_) => {
+            Err(error) => {
                 self.pool.release(slot);
-                Poll::Ready(Err(io::Error::from(io::ErrorKind::InvalidInput)))
+                Poll::Ready(Err(error))
             }
         }
     }
@@ -135,19 +115,13 @@ impl UdpReplyHandle {
     fn poll_write_fragments(
         &self,
         cx: &mut Context<'_>,
-        payload: &[u8],
-        from: SocketAddr,
+        reply: &ReplyPacket<'_>,
     ) -> Poll<io::Result<()>> {
-        let mut whole = vec![0u8; ip_header_len(self.local.ip()) + UDP_HEADER + payload.len()];
-        let Ok(len) = build_udp(&mut whole, from, self.local, payload, L4Checksum::Full) else {
-            return Poll::Ready(Err(io::Error::from(io::ErrorKind::InvalidInput)));
-        };
-        whole.truncate(len);
-        let Some(count) = fragment_count(&whole, self.mtu) else {
+        let Some(fragments) = reply.fragments(self.mtu)? else {
             self.stats.udp_oversize.fetch_add(1, Ordering::Relaxed);
             return Poll::Ready(Ok(()));
         };
-        let mut slots = match self.pool.poll_take_many(cx, count) {
+        let mut slots = match self.pool.poll_take_many(cx, fragments.count) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(None) => {
                 return Poll::Ready(Err(io::Error::from(io::ErrorKind::BrokenPipe)));
@@ -158,16 +132,11 @@ impl UdpReplyHandle {
             self.stats.udp_oversize.fetch_add(1, Ordering::Relaxed);
             return Poll::Ready(Ok(()));
         }
-        let ident = self.pool.next_ident();
-        let written = slots.iter_mut().enumerate().try_for_each(|(index, slot)| {
-            slot.len = write_fragment(&whole, self.mtu, ident, index, &mut slot.buf)?;
-            Some(())
-        });
-        if written.is_none() {
+        if let Err(error) = fragments.write(&mut slots, self.pool.next_ident()) {
             for slot in slots {
                 self.pool.release(slot);
             }
-            return Poll::Ready(Err(io::Error::from(io::ErrorKind::InvalidInput)));
+            return Poll::Ready(Err(error));
         }
         for slot in slots {
             self.pool.push_filled(slot);

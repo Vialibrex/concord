@@ -4,6 +4,7 @@ mod recv;
 mod send;
 mod timers;
 
+pub(crate) use send::Output;
 pub use send::PAYLOAD_SLICES;
 
 use std::collections::VecDeque;

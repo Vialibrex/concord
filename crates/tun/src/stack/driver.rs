@@ -1,20 +1,19 @@
+mod dispatch;
+mod rx;
+mod tx;
+
 use std::collections::VecDeque;
 use std::future::poll_fn;
-use std::io::{self, IoSlice};
-use std::net::SocketAddr;
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use concord_common::{Network, Tasks};
+use concord_common::Tasks;
 use concord_netstack::frag::Reassembler;
-use concord_netstack::wire::{
-    DropReason, IpView, L4Checksum, L4Kind, Parsed, UdpView, build_echo_reply, parse_packet,
-    parse_tcp, parse_udp, parse_udp_unverified,
-};
-use concord_netstack::{Admit, Egress, Gather, StackConfig, TcpConfig, TcpInput, TcpStack};
+use concord_netstack::wire::L4Checksum;
+use concord_netstack::{StackConfig, TcpConfig, TcpStack};
 use concord_platform::SparseBuf;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Semaphore;
@@ -27,9 +26,9 @@ use super::queues::Queues;
 use super::replies::ReplySources;
 use super::stats::{StackStats, report};
 use super::udp::UdpTable;
-use super::{DnsConfig, FlowSink, StackOptions, Verdict, flow_key};
+use super::{DnsConfig, FlowSink, StackOptions};
 use crate::device::{Device, MAX_BATCH};
-use crate::dns;
+use tx::PoolEgress;
 
 const RX_BATCH: usize = 64;
 const RX_BATCH_START: usize = 8;
@@ -44,13 +43,10 @@ const TX_POOL_BYTES: usize = 1 << 20;
 /// Slots start at the MTU and grow to a frame's size the first time they carry one.
 const SEGMENTED_SLOTS: usize = 64;
 const MAX_FRAME: usize = 65_535;
-const TAG_FLOW: u32 = 0;
-const TAG_DNS: u32 = 1;
 
-enum Route {
-    Local,
-    Reserved,
-    Forwarded,
+enum QueueRole {
+    Single,
+    Multi { index: usize, queues: Arc<Queues> },
 }
 
 pub(super) struct Prepared<D> {
@@ -96,7 +92,7 @@ pub(super) async fn run_prepared<D: Device>(
         let Some(dev) = devs.into_iter().next() else {
             return Ok(());
         };
-        return run_queue(options, dev, sink, stop, None).await;
+        return run_queue(options, dev, sink, stop, QueueRole::Single).await;
     }
     let queues = Arc::new(Queues::new(count));
     let stop = stop.child_token();
@@ -113,7 +109,10 @@ pub(super) async fn run_prepared<D: Device>(
             dev,
             Arc::clone(&sink),
             stop.clone(),
-            Some((index, Arc::clone(&queues))),
+            QueueRole::Multi {
+                index,
+                queues: Arc::clone(&queues),
+            },
         )));
     }
     let mut result = Ok(());
@@ -135,16 +134,13 @@ async fn run_queue<D: Device>(
     prepared: Prepared<D>,
     sink: Arc<dyn FlowSink>,
     stop: CancellationToken,
-    queue: Option<(usize, Arc<Queues>)>,
+    queue: QueueRole,
 ) -> io::Result<()> {
     let Prepared { dev, ready } = prepared;
     let stop = stop.child_token();
     let cancelled = stop.clone();
     let work = move || async move {
-        let mut driver = Driver::new(options, dev, sink);
-        if let Some((index, queues)) = queue {
-            driver = driver.with_queue(index, &queues);
-        }
+        let driver = Driver::new(options, dev, sink, queue);
         drive(driver, stop, ready).await
     };
     let _cancel = cancelled.drop_guard();
@@ -195,79 +191,6 @@ async fn drive<D: Device>(
     .await
 }
 
-/// Builds the stack's packets in place in the device's transmit pool, or hands a payload
-/// straight to the device while nothing waits ahead of it.
-struct PoolEgress<'a, D> {
-    pool: &'a TxPool,
-    dev: &'a D,
-    direct: bool,
-}
-
-impl<'a, D: Device> PoolEgress<'a, D> {
-    fn new(pool: &'a TxPool, dev: &'a D, inflight: &VecDeque<Slot>) -> Self {
-        let direct = inflight.is_empty() && !pool.has_filled();
-        PoolEgress { pool, dev, direct }
-    }
-}
-
-impl<D: Device> Egress for PoolEgress<'_, D> {
-    fn checksum(&self) -> L4Checksum {
-        self.pool.checksum
-    }
-
-    fn segment_limit(&self) -> usize {
-        self.pool.segment_limit.load(Ordering::Relaxed)
-    }
-
-    fn send(&mut self, build: &mut dyn FnMut(&mut [u8]) -> Option<usize>) -> bool {
-        self.send_segmented(0, build)
-    }
-
-    fn send_segmented(
-        &mut self,
-        segment: u16,
-        build: &mut dyn FnMut(&mut [u8]) -> Option<usize>,
-    ) -> bool {
-        let Some(mut slot) = self.pool.take_free() else {
-            return false;
-        };
-        if segment > 0 {
-            slot.grow(MAX_FRAME);
-        }
-        match build(&mut slot.buf) {
-            Some(len) => {
-                slot.len = len;
-                slot.segment = segment;
-                self.pool.push_filled(slot);
-                self.direct = false;
-            }
-            None => self.pool.release(slot),
-        }
-        true
-    }
-
-    fn send_in_place(&mut self, segment: u16, head: &[u8], payload: &[IoSlice<'_>]) -> bool {
-        if !self.direct {
-            return false;
-        }
-        let mut parts = [IoSlice::new(&[]); 1 + concord_netstack::PAYLOAD_SLICES];
-        let Some((first, rest)) = parts.split_first_mut() else {
-            return false;
-        };
-        let Some(tail) = rest.get_mut(..payload.len()) else {
-            return false;
-        };
-        *first = IoSlice::new(head);
-        tail.copy_from_slice(payload);
-        let count = payload.len() + 1;
-        self.direct = self
-            .dev
-            .try_send_parts(parts.get(..count).unwrap_or_default(), segment)
-            .is_ok();
-        self.direct
-    }
-}
-
 struct Driver<D: Device> {
     dev: D,
     tcp: TcpStack,
@@ -293,7 +216,7 @@ struct Driver<D: Device> {
     options: StackOptions,
     sleep: Pin<Box<Sleep>>,
     next_sweep: u64,
-    queue: Option<(usize, Arc<Queues>)>,
+    queue: QueueRole,
     tcp_reported: usize,
     udp_reported: usize,
     drained: bool,
@@ -305,22 +228,8 @@ impl<D: Device> Drop for Driver<D> {
     }
 }
 
-fn echo_reply(pool: &TxPool, stats: &StackStats, view: &IpView<'_>) {
-    let Some(mut slot) = pool.take_free() else {
-        return;
-    };
-    match build_echo_reply(&mut slot.buf, view) {
-        Some(len) => {
-            slot.len = len;
-            pool.push_filled(slot);
-            stats.icmp_echo.fetch_add(1, Ordering::Relaxed);
-        }
-        None => pool.release(slot),
-    }
-}
-
 impl<D: Device> Driver<D> {
-    fn new(options: StackOptions, dev: D, sink: Arc<dyn FlowSink>) -> Self {
+    fn new(options: StackOptions, dev: D, sink: Arc<dyn FlowSink>, queue: QueueRole) -> Self {
         let mtu = options.mtu.clamp(576, 65_535);
         let device_batch = D::BATCH.clamp(1, MAX_BATCH);
         let rx_stride = if device_batch == 1 { RX_BUFFER } else { mtu };
@@ -338,7 +247,7 @@ impl<D: Device> Driver<D> {
         let pool = Arc::new(pool.with_offload(checksum, segment_limit));
         let stats = Arc::clone(&options.stats);
         let udp_timeout = i64::try_from(options.udp_timeout.as_micros()).unwrap_or(i64::MAX);
-        let tcp = TcpStack::new(StackConfig {
+        let mut tcp = TcpStack::new(StackConfig {
             tcp: TcpConfig {
                 mtu,
                 congestion: options.congestion,
@@ -348,6 +257,9 @@ impl<D: Device> Driver<D> {
             max_half_open: options.max_half_open_tcp,
         })
         .with_socket_owner(dev.socket_owner());
+        if let QueueRole::Multi { index, queues } = &queue {
+            tcp.set_flow_owner(queues.flow_owner(*index));
+        }
         let mut replies = ReplySources::new(Arc::clone(&pool), mtu, Arc::clone(&stats));
         replies.watch_with(dev.socket_watcher());
         Driver {
@@ -378,23 +290,17 @@ impl<D: Device> Driver<D> {
             options: StackOptions { mtu, ..options },
             sleep: Box::pin(tokio::time::sleep(Duration::from_secs(3600))),
             next_sweep: SWEEP_INTERVAL,
-            queue: None,
+            queue,
             tcp_reported: 0,
             udp_reported: 0,
             drained: true,
         }
     }
 
-    fn with_queue(mut self, index: usize, queues: &Arc<Queues>) -> Self {
-        self.tcp.set_flow_owner(queues.flow_owner(index));
-        self.queue = Some((index, Arc::clone(queues)));
-        self
-    }
-
     fn poll_run(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.pool.register_driver(cx.waker());
         self.tcp.register_waker(cx.waker());
-        if let Some((index, queues)) = &self.queue {
+        if let QueueRole::Multi { index, queues } = &self.queue {
             queues.register(*index, cx.waker());
         }
         let mut busy = true;
@@ -435,7 +341,7 @@ impl<D: Device> Driver<D> {
                 &mut self.udp_reported,
                 self.udp.len(),
             );
-            if let Some((index, queues)) = &self.queue {
+            if let QueueRole::Multi { index, queues } = &self.queue {
                 queues.retain(*index, |(local, remote)| self.tcp.owns(*local, *remote));
             }
             self.next_sweep = now + SWEEP_INTERVAL;
@@ -454,369 +360,6 @@ impl<D: Device> Driver<D> {
             self.arm_timer(cx, deadline);
         }
         Poll::Pending
-    }
-
-    fn retire_rx(&mut self) {
-        let epoch = self.tcp.receive_epoch();
-        if epoch != self.rx_receive_epoch {
-            self.rx_receive_epoch = epoch;
-            if self.rx_extended {
-                // Every gather has been flushed; closed receive owners no longer need this
-                // working set. Keep single-frame traffic from rebuilding it on each close.
-                self.rx_buf = SparseBuf::zeroed(self.rx_stride * RX_BATCH);
-                self.rx_extended = false;
-            }
-        }
-    }
-
-    fn flush(&mut self, cx: &mut Context<'_>) -> bool {
-        let batch = self.dev.send_batch().clamp(1, MAX_BATCH);
-        let mut released = false;
-        loop {
-            while self.inflight.len() < batch
-                && let Some(slot) = self.pool.pop_filled()
-            {
-                self.inflight.push_back(slot);
-            }
-            if self.inflight.is_empty() {
-                return released;
-            }
-            if let Some(front) = self.inflight.front()
-                && front.segment > 0
-            {
-                let Poll::Ready(result) =
-                    self.dev
-                        .poll_send_segmented(cx, front.packet(), front.segment)
-                else {
-                    return released;
-                };
-                if let Err(err) = result {
-                    self.stats.tx_errors.fetch_add(1, Ordering::Relaxed);
-                    if err.kind() == io::ErrorKind::InvalidInput {
-                        tracing::warn!("tun refused a segmented frame, sending segments: {err}");
-                        self.pool.segment_limit.store(0, Ordering::Relaxed);
-                    }
-                }
-                if let Some(slot) = self.inflight.pop_front() {
-                    self.pool.release(slot);
-                }
-                released = true;
-                continue;
-            }
-            let plain = self
-                .inflight
-                .iter()
-                .take_while(|slot| slot.segment == 0)
-                .count();
-            let mut packets: [&[u8]; MAX_BATCH] = [&[]; MAX_BATCH];
-            for (packet, slot) in packets.iter_mut().zip(&self.inflight) {
-                *packet = slot.packet();
-            }
-            let mut failed = 0;
-            let ready = packets.get(..plain).unwrap_or_default();
-            let Poll::Ready(sent) = self.dev.poll_send_batch(cx, ready, &mut failed) else {
-                return released;
-            };
-            if sent == 0 {
-                return released;
-            }
-            self.stats
-                .tx_errors
-                .fetch_add(failed as u64, Ordering::Relaxed);
-            for slot in self.inflight.drain(..sent.min(self.inflight.len())) {
-                self.pool.release(slot);
-            }
-            released = true;
-        }
-    }
-
-    fn drain_rx(&mut self, cx: &mut Context<'_>) -> io::Result<bool> {
-        let mut buf = std::mem::take(&mut self.rx_buf);
-        let mut read = 0;
-        let mut bytes = 0;
-        let mut outcome = Ok(());
-        loop {
-            let mut gather = Gather::default();
-            let again = self.read_into(
-                cx,
-                &mut buf,
-                (&mut read, &mut bytes),
-                &mut outcome,
-                &mut gather,
-            );
-            self.tcp.flush(&mut gather);
-            if !again {
-                break;
-            }
-        }
-        self.rx_buf = buf;
-        outcome.map(|()| read > 0)
-    }
-
-    /// Reads packets into `buf`, each right after the last; true when `gather` holds none of
-    /// them and the batch goes on, so the next read can start over at the front.
-    fn read_into<'a>(
-        &mut self,
-        cx: &mut Context<'_>,
-        buf: &'a mut [u8],
-        (read, bytes): (&mut usize, &mut usize),
-        outcome: &mut io::Result<()>,
-        gather: &mut Gather<'a>,
-    ) -> bool {
-        let device_batch = D::BATCH.clamp(1, MAX_BATCH);
-        let stride = self.rx_stride;
-        let offset = self.dev.rx_offset();
-        let lens = [0usize; MAX_BATCH];
-        let capacity = buf.len();
-        let mut free: &'a mut [u8] = buf;
-        while *read < RX_BATCH && *bytes < ROUND_READ_BYTES {
-            let want = self.rx_batch.min(RX_BATCH - *read).min(free.len() / stride);
-            if want == 0 {
-                return false;
-            }
-            let mut lens = lens;
-            let wanted = lens.get_mut(..want).unwrap_or_default();
-            let received = match self.dev.poll_recv_batch(cx, free, stride, wanted) {
-                Poll::Pending => return false,
-                Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::Interrupted => continue,
-                Poll::Ready(Err(err)) => {
-                    tracing::error!("tun device read failed, the stack stops: {err}");
-                    *outcome = Err(err);
-                    return false;
-                }
-                Poll::Ready(Ok(received)) => received.min(want),
-            };
-            if device_batch > 1 {
-                if received == want {
-                    self.rx_batch = (want * 2).min(device_batch);
-                } else if received * 2 < want {
-                    self.rx_batch = (want / 2).max(1);
-                }
-            }
-            *read += received.max(1);
-            *bytes += lens.iter().take(received).sum::<usize>();
-            self.stats
-                .rx_packets
-                .fetch_add(received as u64, Ordering::Relaxed);
-            let used = match received.checked_sub(1) {
-                Some(last) => last * stride + offset + lens.get(last).copied().unwrap_or(0),
-                None => 0,
-            };
-            let rest = std::mem::take(&mut free);
-            let (filled, rest) = rest.split_at_mut(used.min(rest.len()));
-            free = rest;
-            self.rx_extended |= capacity - free.len() > stride;
-            let filled: &'a [u8] = filled;
-            for (index, len) in lens.iter().take(received).enumerate() {
-                let start = index * stride + offset;
-                match filled
-                    .get(start..start + len)
-                    .filter(|packet| !packet.is_empty())
-                {
-                    Some(packet) => self.handle_packet(packet, gather),
-                    None => self.stats.count_drop(DropReason::Malformed),
-                }
-            }
-            if gather.is_empty() && *read < RX_BATCH && *bytes < ROUND_READ_BYTES {
-                return true;
-            }
-        }
-        false
-    }
-
-    fn handle_packet<'a>(&mut self, packet: &'a [u8], gather: &mut Gather<'a>) {
-        match parse_packet(packet) {
-            Ok(Parsed::Packet(view)) => self.dispatch(&view, gather),
-            Ok(Parsed::Fragment(frag)) => {
-                self.tcp.flush(gather);
-                let mut whole = std::mem::take(&mut self.reassembled);
-                if self.fragments.push(&frag, self.tcp.now(), &mut whole) {
-                    match parse_packet(&whole) {
-                        Ok(Parsed::Packet(view)) => {
-                            let mut own = Gather::default();
-                            self.dispatch(&view, &mut own);
-                            self.tcp.flush(&mut own);
-                        }
-                        Ok(Parsed::Fragment(_)) => self.stats.count_drop(DropReason::Fragment),
-                        Err(reason) => self.stats.count_drop(reason),
-                    }
-                }
-                self.reassembled = whole;
-            }
-            Err(reason) => self.stats.count_drop(reason),
-        }
-    }
-
-    fn parse_udp<'a>(&self, view: &IpView<'a>) -> Result<UdpView<'a>, DropReason> {
-        match self.pool.checksum {
-            L4Checksum::Full => parse_udp(view),
-            L4Checksum::Pseudo => parse_udp_unverified(view),
-        }
-    }
-
-    fn dispatch<'a>(&mut self, view: &IpView<'a>, gather: &mut Gather<'a>) {
-        if self.options.broadcast == Some(view.dst) {
-            return self.stats.count_drop(DropReason::Martian);
-        }
-        match view.kind {
-            L4Kind::Icmp => self.on_icmp(view),
-            L4Kind::Udp => match self.parse_udp(view) {
-                Ok(udp) => self.on_udp(view, udp.src_port, udp.dst_port, udp.payload),
-                Err(reason) => self.stats.count_drop(reason),
-            },
-            L4Kind::Tcp => self.on_tcp(view, gather),
-        }
-    }
-
-    fn on_icmp(&mut self, view: &IpView<'_>) {
-        if !self.options.disable_icmp_forwarding {
-            let request = view.packet.to_vec();
-            let pool = Arc::clone(&self.pool);
-            let stats = Arc::clone(&self.stats);
-            let answer = Box::new(move || {
-                if let Ok(Parsed::Packet(view)) = parse_packet(&request) {
-                    echo_reply(&pool, &stats, &view);
-                }
-            });
-            if self.sink.icmp(view.dst, view.l4, answer) {
-                return;
-            }
-        }
-        echo_reply(&self.pool, &self.stats, view);
-    }
-
-    fn hijacks(dns: Option<&DnsConfig>, dst: SocketAddr) -> bool {
-        dns.is_some_and(|dns| dns.matcher.matches(dst))
-    }
-
-    fn on_udp(&mut self, view: &IpView<'_>, src_port: u16, dst_port: u16, payload: &[u8]) {
-        let src = SocketAddr::new(view.src, src_port);
-        let dst = SocketAddr::new(view.dst, dst_port);
-        self.stats.udp_packets.fetch_add(1, Ordering::Relaxed);
-        let reply = self.udp.reply_for(src);
-        if Self::hijacks(self.dns.as_deref(), dst) {
-            self.stats.dns_hijacked.fetch_add(1, Ordering::Relaxed);
-            if let (Some(dns), Ok(permit)) = (
-                self.dns.as_ref(),
-                Arc::clone(&self.dns_slots).try_acquire_owned(),
-            ) {
-                let handler = Arc::clone(&dns.handler);
-                let query = payload.to_vec();
-                let reply = reply.into_owned();
-                self.handlers.spawn(async move {
-                    let _permit = permit;
-                    dns::answer_udp(handler, reply, dst, query).await;
-                });
-            }
-            return;
-        }
-        self.sink
-            .udp(flow_key(Network::Udp, src, dst), payload, &reply);
-    }
-
-    fn drain_handoffs(&mut self) -> bool {
-        let Some((index, queues)) = &self.queue else {
-            return false;
-        };
-        let packets = queues.take(*index);
-        let any = !packets.is_empty();
-        for packet in packets {
-            let mut own = Gather::default();
-            self.handle_packet(&packet, &mut own);
-            self.tcp.flush(&mut own);
-        }
-        any
-    }
-
-    /// Hands a segment to its owner, or records a new local reservation for admission.
-    fn hand_off(&self, view: &IpView<'_>) -> Route {
-        let (Some((index, queues)), Ok(seg)) = (&self.queue, parse_tcp(view.l4)) else {
-            return Route::Local;
-        };
-        let local = SocketAddr::new(view.dst, seg.dst_port);
-        let remote = SocketAddr::new(view.src, seg.src_port);
-        if self.tcp.owns(local, remote) {
-            return Route::Local;
-        }
-        let owner = if seg.is_syn() {
-            queues.claim((local, remote), *index)
-        } else {
-            queues.owner(&(local, remote)).unwrap_or(*index)
-        };
-        if owner == *index {
-            return if seg.is_syn() {
-                Route::Reserved
-            } else {
-                Route::Local
-            };
-        }
-        if !queues.forward(owner, view.packet) {
-            self.stats.rx_handoff.fetch_add(1, Ordering::Relaxed);
-        }
-        Route::Forwarded
-    }
-
-    fn on_tcp<'a>(&mut self, view: &IpView<'a>, gather: &mut Gather<'a>) {
-        let reserved = match self.hand_off(view) {
-            Route::Forwarded => return,
-            Route::Local => false,
-            Route::Reserved => true,
-        };
-        let dns = self.dns.as_deref();
-        let sink = &self.sink;
-        let packet = view.packet;
-        let result = self.tcp.input_gathered(
-            view.src,
-            view.dst,
-            view.l4,
-            &mut PoolEgress::new(&self.pool, &self.dev, &self.inflight),
-            |remote, local| {
-                if Self::hijacks(dns, local) {
-                    return Admit::Accept(TAG_DNS);
-                }
-                match sink.judge(&flow_key(Network::Tcp, remote, local), packet) {
-                    Verdict::Accept => Admit::Accept(TAG_FLOW),
-                    Verdict::Reject => Admit::Reject,
-                    Verdict::Drop => Admit::Drop,
-                }
-            },
-            gather,
-        );
-        if reserved
-            && let Some((index, queues)) = &self.queue
-            && let Ok(seg) = parse_tcp(view.l4)
-        {
-            let local = SocketAddr::new(view.dst, seg.dst_port);
-            let remote = SocketAddr::new(view.src, seg.src_port);
-            if !self.tcp.owns(local, remote) {
-                queues.release_unopened(&(local, remote), *index);
-            }
-        }
-        match result {
-            TcpInput::Refused => {
-                self.stats.tcp_refused.fetch_add(1, Ordering::Relaxed);
-            }
-            TcpInput::Dropped(reason) => self.stats.count_drop(reason),
-            TcpInput::Handled | TcpInput::Opened | TcpInput::Reset => {}
-        }
-    }
-
-    fn announce(&mut self) {
-        while let Some(accepted) = self.tcp.take_accepted() {
-            self.stats.tcp_accepted.fetch_add(1, Ordering::Relaxed);
-            if accepted.tag == TAG_DNS {
-                self.stats.dns_hijacked.fetch_add(1, Ordering::Relaxed);
-                if let Some(dns) = &self.dns {
-                    self.handlers
-                        .spawn(dns::serve_tcp(accepted.stream, Arc::clone(&dns.handler)));
-                }
-                continue;
-            }
-            self.sink.tcp(
-                flow_key(Network::Tcp, accepted.remote, accepted.local),
-                Box::new(accepted.stream),
-            );
-        }
     }
 
     fn arm_timer(&mut self, cx: &mut Context<'_>, deadline: Option<u64>) {
@@ -859,7 +402,12 @@ mod owner_tests {
 
     #[tokio::test]
     async fn unused_receive_lifetimes_release_extended_rx_but_keep_single_frame_storage() {
-        let mut driver = Driver::new(StackOptions::default(), Silent, Arc::new(Idle));
+        let mut driver = Driver::new(
+            StackOptions::default(),
+            Silent,
+            Arc::new(Idle),
+            QueueRole::Single,
+        );
         let mut previous = driver.rx_buf.as_ptr();
         for extended in [false, true, false, true] {
             let stream = driver
@@ -940,7 +488,12 @@ mod owner_tests {
                 observed: Arc::clone(&observed),
             };
             let task = tokio::spawn(async move {
-                let driver = Driver::new(StackOptions::default(), device, Arc::new(Idle));
+                let driver = Driver::new(
+                    StackOptions::default(),
+                    device,
+                    Arc::new(Idle),
+                    QueueRole::Single,
+                );
                 drive(driver, stop, None).await
             });
             tokio::time::timeout(Duration::from_secs(2), task)
@@ -974,7 +527,12 @@ mod owner_tests {
             }
         }
         let device = Queued(std::sync::atomic::AtomicUsize::new(5));
-        let mut driver = Driver::new(StackOptions::default(), device, Arc::new(Idle));
+        let mut driver = Driver::new(
+            StackOptions::default(),
+            device,
+            Arc::new(Idle),
+            QueueRole::Single,
+        );
         let mut held = Vec::new();
         driver.pool.take_up_to(&mut held, usize::MAX);
         assert_eq!(driver.pool.free_count(), 0);
@@ -1001,7 +559,12 @@ mod owner_tests {
             }
         }
         let device = Flood(std::sync::atomic::AtomicUsize::new(0));
-        let mut driver = Driver::new(StackOptions::default(), device, Arc::new(Idle));
+        let mut driver = Driver::new(
+            StackOptions::default(),
+            device,
+            Arc::new(Idle),
+            QueueRole::Single,
+        );
         let mut held = Vec::new();
         driver.pool.take_up_to(&mut held, usize::MAX);
         let mut cx = Context::from_waker(std::task::Waker::noop());
@@ -1035,7 +598,12 @@ mod owner_tests {
                 Poll::Ready(Ok(packet.len()))
             }
         }
-        let mut driver = Driver::new(StackOptions::default(), Busy::default(), Arc::new(Idle));
+        let mut driver = Driver::new(
+            StackOptions::default(),
+            Busy::default(),
+            Arc::new(Idle),
+            QueueRole::Single,
+        );
         let mut queued = Vec::new();
         driver.pool.take_up_to(&mut queued, usize::MAX);
         for mut slot in queued {
@@ -1068,7 +636,12 @@ mod owner_tests {
             }
         }
         let device = Upload(std::sync::atomic::AtomicUsize::new(0));
-        let mut driver = Driver::new(StackOptions::default(), device, Arc::new(Idle));
+        let mut driver = Driver::new(
+            StackOptions::default(),
+            device,
+            Arc::new(Idle),
+            QueueRole::Single,
+        );
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(driver.drain_rx(&mut cx).unwrap());
         let reads = driver.dev.0.load(Ordering::Relaxed);
@@ -1081,7 +654,12 @@ mod owner_tests {
 
     #[tokio::test]
     async fn dropping_the_driver_closes_outstanding_connections() {
-        let mut driver = Driver::new(StackOptions::default(), Silent, Arc::new(Idle));
+        let mut driver = Driver::new(
+            StackOptions::default(),
+            Silent,
+            Arc::new(Idle),
+            QueueRole::Single,
+        );
         let mut stream = driver
             .tcp
             .connect(

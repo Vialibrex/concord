@@ -14,6 +14,13 @@ pub const PAYLOAD_SLICES: usize = 8;
 const MAX_HEAD: usize = IPV6_HEADER + TCP_HEADER + 40;
 const MIN_SEND_BUFFER: usize = 64 * 1024;
 
+/// Whether a turn ran out of egress room, and whether it used any before then.
+pub(crate) enum Output {
+    Done,
+    Blocked,
+    Spent,
+}
+
 impl Tcb {
     pub(super) fn update_send_cap(&mut self, state: &mut SharedState) {
         let want = (self.cc.cwnd as usize)
@@ -194,11 +201,12 @@ impl Tcb {
     }
 
     /// Sends what the windows allow: SYN or SYN-ACK, lost segments, new data, FIN, and an ACK
-    /// if one is owed. Returns false when the egress ran out of room.
-    pub fn output(&mut self, now: u64, state: &mut SharedState, egress: &mut dyn Egress) -> bool {
-        let done = self.output_inner(now, state, egress);
+    /// if one is owed. A turn that used the last slot goes behind other blocked connections.
+    pub fn output(&mut self, now: u64, state: &mut SharedState, egress: &mut dyn Egress) -> Output {
+        let mut on_full = Output::Blocked;
+        let done = self.output_inner(now, state, egress, &mut on_full);
         self.sync_sent(state);
-        done
+        if done { Output::Done } else { on_full }
     }
 
     pub(super) fn sync_sent(&self, state: &mut SharedState) {
@@ -209,7 +217,13 @@ impl Tcb {
         };
     }
 
-    fn output_inner(&mut self, now: u64, state: &mut SharedState, egress: &mut dyn Egress) -> bool {
+    fn output_inner(
+        &mut self,
+        now: u64,
+        state: &mut SharedState,
+        egress: &mut dyn Egress,
+        on_full: &mut Output,
+    ) -> bool {
         match self.state {
             State::Closed => return true,
             State::SynSent | State::SynReceived => {
@@ -236,10 +250,10 @@ impl Tcb {
             0
         };
         let room = self.payload_room(sack_room);
-        if !self.retransmit_lost(now, state, egress) {
+        if !self.retransmit_lost(now, state, egress, on_full) {
             return false;
         }
-        if !self.send_new(now, state, egress, room) {
+        if !self.send_new(now, state, egress, room, on_full) {
             return false;
         }
         // A closed peer window accepts only SND.UNA; SND.NXT may still include in-flight data.
@@ -251,7 +265,13 @@ impl Tcb {
         !self.ack_now || self.emit(egress, state, ack_seq, 0, FLAG_ACK, now)
     }
 
-    fn retransmit_lost(&mut self, now: u64, state: &SharedState, egress: &mut dyn Egress) -> bool {
+    fn retransmit_lost(
+        &mut self,
+        now: u64,
+        state: &SharedState,
+        egress: &mut dyn Egress,
+        on_full: &mut Output,
+    ) -> bool {
         if self.lost_bytes == 0 {
             return true;
         }
@@ -276,6 +296,7 @@ impl Tcb {
             if !self.emit(egress, state, seg.start, seg.payload(), flags, now) {
                 return false;
             }
+            *on_full = Output::Spent;
             self.advance_pacing(now, len, 1);
             let stamp = self.stamp(now);
             if let Some(stored) = self.sent.get_mut(index - 1) {
@@ -298,6 +319,7 @@ impl Tcb {
         state: &mut SharedState,
         egress: &mut dyn Egress,
         room: u32,
+        on_full: &mut Output,
     ) -> bool {
         let frame = (egress.segment_limit() as u32 / room).max(1) * room;
         let frame = self.frame_cap(frame, room);
@@ -349,6 +371,7 @@ impl Tcb {
             if !self.emit_frame(egress, state, self.snd_nxt, len as usize, flags, now, room) {
                 return false;
             }
+            *on_full = Output::Spent;
             self.advance_pacing(now, len, u64::from(len.div_ceil(room).max(1)));
             let stamp = self.stamp(now);
             let start = self.snd_nxt;

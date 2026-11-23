@@ -12,11 +12,9 @@ use std::task::{Context, Poll, Wake, Waker};
 use concord_common::packet::RECV_MAX;
 use concord_common::sync::lock;
 use concord_common::{Address, Replies, ReplyOut, ReplySource, SocketWatcher};
-use concord_netstack::wire::{
-    L4Checksum, UDP_HEADER, build_udp, fragment_count, ip_header_len, write_fragment,
-};
 
 use super::pool::{Slot, TxPool};
+use super::reply_packet::ReplyPacket;
 use super::stats::StackStats;
 
 /// What other threads hand the driver: newly adopted sources and the ones that became ready.
@@ -140,7 +138,6 @@ impl ReplySources {
                 used: 0,
                 local: entry.local,
                 mtu: self.mtu,
-                checksum: pool.checksum,
                 pool: &pool,
                 stats: &self.stats,
             };
@@ -228,7 +225,6 @@ struct SlotOut<'a> {
     used: usize,
     local: SocketAddr,
     mtu: usize,
-    checksum: L4Checksum,
     pool: &'a TxPool,
     stats: &'a StackStats,
 }
@@ -239,21 +235,15 @@ impl ReplyOut for SlotOut<'_> {
     }
 
     fn put(&mut self, payload: &[u8], from: &Address) -> io::Result<()> {
-        let Address::Socket(from) = *from else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "a reply needs an IP source address",
-            ));
-        };
-        if payload.len() + ip_header_len(self.local.ip()) + UDP_HEADER > self.mtu {
-            return self.put_fragments(payload, from);
+        let reply = ReplyPacket::new(payload, from, self.local)?;
+        if reply.len() > self.mtu {
+            return self.put_fragments(&reply);
         }
-        let Some(slot) = self.slots.get_mut(self.used) else {
-            return Err(io::Error::from(io::ErrorKind::WouldBlock));
-        };
-        let len = build_udp(&mut slot.buf, from, self.local, payload, self.checksum)
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-        slot.len = len;
+        let slot = self
+            .slots
+            .get_mut(self.used)
+            .ok_or(io::ErrorKind::WouldBlock)?;
+        reply.write(slot, self.pool.checksum)?;
         self.used += 1;
         self.stats.udp_replies.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -263,25 +253,19 @@ impl ReplyOut for SlotOut<'_> {
 impl SlotOut<'_> {
     /// A reply past the MTU needs several slots; without them here it is dropped, as one the
     /// pool could never hold is.
-    fn put_fragments(&mut self, payload: &[u8], from: SocketAddr) -> io::Result<()> {
-        let mut whole = vec![0u8; ip_header_len(self.local.ip()) + UDP_HEADER + payload.len()];
-        let len = build_udp(&mut whole, from, self.local, payload, L4Checksum::Full)
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-        whole.truncate(len);
-        let count = fragment_count(&whole, self.mtu).unwrap_or(usize::MAX);
-        let Some(slots) = self
-            .slots
-            .get_mut(self.used..self.used.saturating_add(count))
-        else {
+    fn put_fragments(&mut self, reply: &ReplyPacket<'_>) -> io::Result<()> {
+        let fragments = reply.fragments(self.mtu)?;
+        let Some((fragments, slots)) = fragments.and_then(|fragments| {
+            let slots = self
+                .slots
+                .get_mut(self.used..self.used.saturating_add(fragments.count))?;
+            Some((fragments, slots))
+        }) else {
             self.stats.udp_oversize.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         };
-        let ident = self.pool.next_ident();
-        for (index, slot) in slots.iter_mut().enumerate() {
-            slot.len = write_fragment(&whole, self.mtu, ident, index, &mut slot.buf)
-                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
-        }
-        self.used += count;
+        fragments.write(slots, self.pool.next_ident())?;
+        self.used += slots.len();
         self.stats.udp_replies.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
