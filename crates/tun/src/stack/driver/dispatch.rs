@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use concord_common::Network;
 use concord_netstack::wire::{
     DropReason, IpView, L4Checksum, L4Kind, Parsed, UdpView, build_echo_reply, parse_packet,
-    parse_tcp, parse_udp, parse_udp_unverified,
+    parse_udp, parse_udp_unverified,
 };
 use concord_netstack::{Admit, Gather, TcpInput};
 
@@ -23,6 +23,34 @@ enum Route {
     Local,
     Reserved,
     Forwarded,
+}
+
+impl QueueRole {
+    /// Hands a segment to its owner, or records a new local reservation for admission.
+    fn route_unbound(
+        &self,
+        local: SocketAddr,
+        remote: SocketAddr,
+        syn: bool,
+        packet: &[u8],
+        stats: &StackStats,
+    ) -> Route {
+        let QueueRole::Multi { index, queues } = self else {
+            return Route::Local;
+        };
+        let owner = if syn {
+            queues.claim((local, remote), *index)
+        } else {
+            queues.owner(&(local, remote)).unwrap_or(*index)
+        };
+        if owner == *index {
+            return if syn { Route::Reserved } else { Route::Local };
+        }
+        if !queues.forward(owner, packet) {
+            stats.rx_handoff.fetch_add(1, Ordering::Relaxed);
+        }
+        Route::Forwarded
+    }
 }
 
 fn echo_reply(pool: &TxPool, stats: &StackStats, view: &IpView<'_>) {
@@ -144,48 +172,27 @@ impl<D: Device> Driver<D> {
         any
     }
 
-    /// Hands a segment to its owner, or records a new local reservation for admission.
-    fn hand_off(&self, view: &IpView<'_>) -> Route {
-        let (QueueRole::Multi { index, queues }, Ok(seg)) = (&self.queue, parse_tcp(view.l4))
-        else {
-            return Route::Local;
-        };
-        let local = SocketAddr::new(view.dst, seg.dst_port);
-        let remote = SocketAddr::new(view.src, seg.src_port);
-        if self.tcp.owns(local, remote) {
-            return Route::Local;
-        }
-        let owner = if seg.is_syn() {
-            queues.claim((local, remote), *index)
-        } else {
-            queues.owner(&(local, remote)).unwrap_or(*index)
-        };
-        if owner == *index {
-            return if seg.is_syn() {
-                Route::Reserved
-            } else {
-                Route::Local
-            };
-        }
-        if !queues.forward(owner, view.packet) {
-            self.stats.rx_handoff.fetch_add(1, Ordering::Relaxed);
-        }
-        Route::Forwarded
-    }
-
     fn on_tcp<'a>(&mut self, view: &IpView<'a>, gather: &mut Gather<'a>) {
-        let reserved = match self.hand_off(view) {
-            Route::Forwarded => return,
-            Route::Local => false,
-            Route::Reserved => true,
+        let arrival = match self.tcp.arrival(view.src, view.dst, view.l4) {
+            Ok(arrival) => arrival,
+            Err(reason) => return self.stats.count_drop(reason),
+        };
+        let reserved = if let Some((local, remote, syn)) = arrival.unbound() {
+            match self
+                .queue
+                .route_unbound(local, remote, syn, view.packet, &self.stats)
+            {
+                Route::Forwarded => return,
+                Route::Reserved => Some((local, remote)),
+                Route::Local => None,
+            }
+        } else {
+            None
         };
         let dns = self.dns.as_deref();
         let sink = &self.sink;
         let packet = view.packet;
-        let result = self.tcp.input_gathered(
-            view.src,
-            view.dst,
-            view.l4,
+        let result = arrival.deliver(
             &mut PoolEgress::new(&self.pool, &self.dev, &self.inflight),
             |remote, local| {
                 if Self::hijacks(dns, local) {
@@ -199,15 +206,11 @@ impl<D: Device> Driver<D> {
             },
             gather,
         );
-        if reserved
+        if let Some(key) = reserved
             && let QueueRole::Multi { index, queues } = &self.queue
-            && let Ok(seg) = parse_tcp(view.l4)
+            && !self.tcp.owns(key.0, key.1)
         {
-            let local = SocketAddr::new(view.dst, seg.dst_port);
-            let remote = SocketAddr::new(view.src, seg.src_port);
-            if !self.tcp.owns(local, remote) {
-                queues.release_unopened(&(local, remote), *index);
-            }
+            queues.release_unopened(&key, *index);
         }
         match result {
             TcpInput::Refused => {

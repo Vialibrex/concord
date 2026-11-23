@@ -21,6 +21,87 @@ use crate::wire::{
     DropReason, FLAG_ACK, FLAG_RST, TcpHeader, TcpOptions, TcpSegment, emit_tcp, parse_tcp,
 };
 
+/// A parsed segment and its local connection lookup. The stack borrow prevents slot reuse
+/// before the caller delivers the segment or hands it to another queue.
+pub struct TcpArrival<'s, 'a> {
+    stack: &'s mut TcpStack,
+    seg: TcpSegment<'a>,
+    local: SocketAddr,
+    remote: SocketAddr,
+    index: Option<u32>,
+}
+
+impl<'a> TcpArrival<'_, 'a> {
+    /// A host routes only local table misses. This keeps a replacement SYN for a local
+    /// TIME_WAIT connection on the stack that owns it.
+    pub fn unbound(&self) -> Option<(SocketAddr, SocketAddr, bool)> {
+        self.index
+            .is_none()
+            .then_some((self.local, self.remote, self.seg.is_syn()))
+    }
+
+    pub fn deliver(
+        self,
+        egress: &mut dyn Egress,
+        admit: impl FnOnce(SocketAddr, SocketAddr) -> Admit,
+        gather: &mut Gather<'a>,
+    ) -> TcpInput {
+        let Self {
+            stack,
+            seg,
+            local,
+            remote,
+            index,
+        } = self;
+        let now = stack.now();
+        if let Some(index) = index {
+            let id = stack.id_of(index);
+            let Some(mut conn) = stack.take(id) else {
+                return TcpInput::Handled;
+            };
+            if !gather.owned_by(&conn.shared) {
+                stack.flush(gather);
+                gather.bind(&conn.shared);
+            }
+            if !(seg.is_syn() && conn.tcb.accepts_new_syn(&seg)) {
+                stack.segment(&mut conn, &seg, now, gather);
+                stack.settle(id, conn, egress);
+                return TcpInput::Handled;
+            }
+            stack.flush(gather);
+            stack.remove(id, conn);
+        }
+        if seg.has(FLAG_RST) {
+            return TcpInput::Handled;
+        }
+        if !seg.is_syn() {
+            send_reset(egress, local, remote, &seg);
+            return TcpInput::Reset;
+        }
+        if stack.live >= stack.config.max_connections
+            || stack.half_open >= stack.config.max_half_open
+        {
+            return TcpInput::Refused;
+        }
+        match admit(remote, local) {
+            Admit::Accept(tag) => {
+                let iss = stack.iss(local, remote, now);
+                let tcb = Tcb::passive(local, remote, &seg, stack.config.tcp, iss, now);
+                if stack.insert(tcb, tag, true).is_some() {
+                    TcpInput::Opened
+                } else {
+                    TcpInput::Refused
+                }
+            }
+            Admit::Reject => {
+                send_reset(egress, local, remote, &seg);
+                TcpInput::Reset
+            }
+            Admit::Drop => TcpInput::Handled,
+        }
+    }
+}
+
 /// What the host decides for a new connection's SYN.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Admit {
@@ -354,56 +435,31 @@ impl TcpStack {
         admit: impl FnOnce(SocketAddr, SocketAddr) -> Admit,
         gather: &mut Gather<'a>,
     ) -> TcpInput {
-        let seg = match parse_tcp(l4) {
-            Ok(seg) => seg,
-            Err(reason) => return TcpInput::Dropped(reason),
-        };
+        match self.arrival(src, dst, l4) {
+            Ok(arrival) => arrival.deliver(egress, admit, gather),
+            Err(reason) => TcpInput::Dropped(reason),
+        }
+    }
+
+    /// Parses an arriving segment and looks up its local connection. The caller can route
+    /// an unbound segment before it obtains any transmit resources for this stack.
+    pub fn arrival<'s, 'a>(
+        &'s mut self,
+        src: IpAddr,
+        dst: IpAddr,
+        l4: &'a [u8],
+    ) -> Result<TcpArrival<'s, 'a>, DropReason> {
+        let seg = parse_tcp(l4)?;
         let remote = SocketAddr::new(src, seg.src_port);
         let local = SocketAddr::new(dst, seg.dst_port);
-        let now = self.now();
-        if let Some(&index) = self.by_addr.get(&(local, remote)) {
-            let id = self.id_of(index);
-            let Some(mut conn) = self.take(id) else {
-                return TcpInput::Handled;
-            };
-            if !gather.owned_by(&conn.shared) {
-                self.flush(gather);
-                gather.bind(&conn.shared);
-            }
-            if !(seg.is_syn() && conn.tcb.accepts_new_syn(&seg)) {
-                self.segment(&mut conn, &seg, now, gather);
-                self.settle(id, conn, egress);
-                return TcpInput::Handled;
-            }
-            self.flush(gather);
-            self.remove(id, conn);
-        }
-        if seg.has(FLAG_RST) {
-            return TcpInput::Handled;
-        }
-        if !seg.is_syn() {
-            send_reset(egress, local, remote, &seg);
-            return TcpInput::Reset;
-        }
-        if self.live >= self.config.max_connections || self.half_open >= self.config.max_half_open {
-            return TcpInput::Refused;
-        }
-        match admit(remote, local) {
-            Admit::Accept(tag) => {
-                let iss = self.iss(local, remote, now);
-                let tcb = Tcb::passive(local, remote, &seg, self.config.tcp, iss, now);
-                if self.insert(tcb, tag, true).is_some() {
-                    TcpInput::Opened
-                } else {
-                    TcpInput::Refused
-                }
-            }
-            Admit::Reject => {
-                send_reset(egress, local, remote, &seg);
-                TcpInput::Reset
-            }
-            Admit::Drop => TcpInput::Handled,
-        }
+        let index = self.by_addr.get(&(local, remote)).copied();
+        Ok(TcpArrival {
+            stack: self,
+            seg,
+            local,
+            remote,
+            index,
+        })
     }
 
     fn segment<'a>(

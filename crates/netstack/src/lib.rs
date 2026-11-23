@@ -14,7 +14,7 @@ pub mod wire;
 
 pub use attach::Gather;
 pub use cc::Congestion;
-pub use engine::{Accepted, Admit, FlowOwner, StackConfig, TcpInput, TcpStack};
+pub use engine::{Accepted, Admit, FlowOwner, StackConfig, TcpArrival, TcpInput, TcpStack};
 pub use readiness::{SocketOwner, SocketReady};
 pub use stream::{NetReadHalf, NetStream, NetWriteHalf};
 pub use tcp::{Egress, PAYLOAD_SLICES, TcpConfig};

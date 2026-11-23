@@ -926,6 +926,46 @@ async fn small_buffer_pair(size: usize) -> (tokio::net::TcpStream, tokio::net::T
     (near, far)
 }
 
+#[tokio::test]
+async fn only_an_unbound_segment_needs_routing_before_delivery() {
+    let mut link = Link::new(0, 0);
+    let (client, server) = addrs();
+    let _stream = link
+        .client
+        .connect(client, server, Congestion::Cubic)
+        .unwrap();
+    link.client.poll(&mut link.to_server);
+    let syn = link.to_server.packets.pop().unwrap();
+    let Parsed::Packet(view) = parse_packet(&syn).unwrap() else {
+        panic!("expected a SYN");
+    };
+
+    // Receiving another queue's SYN must leave no half-open connection in this stack.
+    {
+        let arrival = link.server.arrival(view.src, view.dst, view.l4).unwrap();
+        assert_eq!(arrival.unbound(), Some((server, client, true)));
+    }
+    assert!(link.server.is_empty());
+    let mut gather = crate::Gather::default();
+    let arrival = link.server.arrival(view.src, view.dst, view.l4).unwrap();
+    assert_eq!(
+        arrival.deliver(&mut link.to_client, |_, _| Admit::Accept(7), &mut gather),
+        TcpInput::Opened
+    );
+
+    let duplicate = link.server.arrival(view.src, view.dst, view.l4).unwrap();
+    assert_eq!(duplicate.unbound(), None);
+    assert_eq!(
+        duplicate.deliver(
+            &mut link.to_client,
+            |_, _| panic!("admitted a duplicate SYN"),
+            &mut gather
+        ),
+        TcpInput::Handled
+    );
+    link.server.flush(&mut gather);
+}
+
 struct AttachmentTicket(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
 struct ConnectionOwner(std::sync::Arc<std::sync::atomic::AtomicUsize>);
