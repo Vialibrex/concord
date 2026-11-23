@@ -234,6 +234,16 @@ Concord already takes these from the references; keep them unless the reference 
   unpadded writer with their slot reserved. The task takes any unwritten tail or pending flush in that slot and
   resumes sole ownership for individual requests, copied frames and control frames.
 
+- [runtime-bound] **AnyTLS reads** happen in the session's receive loop in both references, which hand each data
+  frame to its stream: mihomo `3f27ef39` through a synchronous pipe
+  (`transport/anytls/session/session.go:190-200`, `transport/anytls/pipe/io_pipe.go:209-210`), sing-anytls
+  `580984e4` through a one-buffer read signal (`session.go:276-296`, `stream.go:59-84`). A goroutine handoff per frame
+  is cheap; a Tokio task handoff per frame costs a wake, often a reactor wake on another worker. Concord's session
+  task lends its resumable read half, with the next frame, to a stream that is the session's only stream and takes
+  data frames without writing in between; the stream then reads its own frames in its task. Any other stream's frame
+  or a control frame, a write followed by a read, the stream's end and the session's close return it to the session
+  task. The frames on the wire and their order are unchanged.
+
 - [language-neutral] **Shadowsocks** AEAD chunk 0x3FFF (`sing-shadowsocks2/shadowaead/protocol.go`); request header
   leaves with the first payload. **ShadowsocksR** auth_aes128 frame threshold `32 KiB − overhead` and random pad below
   1024 (`transport/ssr/protocol/auth_aes128_sha1.go`). **Snell** chunk 0x3FFF (`transport/snell/snell.go:26`).

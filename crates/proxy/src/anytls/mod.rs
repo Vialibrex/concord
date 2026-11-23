@@ -1,6 +1,7 @@
 mod frame;
 mod padding;
 mod pool;
+mod reader;
 mod session;
 mod stream;
 #[cfg(test)]

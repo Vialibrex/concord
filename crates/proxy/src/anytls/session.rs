@@ -9,17 +9,18 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use concord_common::stream_buffer::{ReadBufferOptions, StreamBuffer};
 use concord_common::{BoxRead, BoxStream, Tasks};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::frame::{
-    CMD_ALERT, CMD_FIN, CMD_HEART_REQUEST, CMD_HEART_RESPONSE, CMD_PSH, CMD_SERVER_SETTINGS,
-    CMD_SETTINGS, CMD_SYN, CMD_SYNACK, CMD_UPDATE_PADDING, CMD_WASTE, Framer, HEADER, frame,
+    CMD_ALERT, CMD_FIN, CMD_HEART_REQUEST, CMD_HEART_RESPONSE, CMD_SERVER_SETTINGS, CMD_SETTINGS,
+    CMD_SYN, CMD_SYNACK, CMD_UPDATE_PADDING, Framer, frame,
 };
 use super::padding::{Padding, parse_map};
 use super::pool::Pool;
+use super::reader::{Frame, FrameReader};
 use super::writer::FrameWriter;
 use crate::util::lock;
 
@@ -41,20 +42,54 @@ pub(super) enum Out {
 
 pub(super) enum Chunk {
     Data(StreamBuffer),
+    /// The session's reader is lent to the stream, holding the stream's next frame.
+    Lent,
     Fin,
     Error(String),
 }
 
+#[derive(Default)]
+pub(super) struct Flow {
+    pub(super) done: AtomicBool,
+    pub(super) reads: OnceLock<ReadBufferOptions>,
+    wrote: AtomicBool,
+    draining: AtomicBool,
+}
+
+impl Flow {
+    pub(super) fn wrote(&self) {
+        if !self.wrote.load(Ordering::Relaxed) {
+            self.wrote.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Records a data frame the stream took; true when it has not written since the one before.
+    pub(super) fn took(&self) -> bool {
+        let draining = !self.wrote.swap(false, Ordering::Relaxed);
+        self.draining.store(draining, Ordering::Relaxed);
+        draining
+    }
+}
+
 struct Entry {
     tx: mpsc::Sender<Chunk>,
-    done: Arc<AtomicBool>,
-    reads: Arc<OnceLock<ReadBufferOptions>>,
+    flow: Arc<Flow>,
+}
+
+#[derive(Default)]
+enum Reader {
+    #[default]
+    Home,
+    Lent(FrameReader),
+    Returned(FrameReader),
 }
 
 pub(super) struct Session {
     pub(super) seq: u64,
     out: mpsc::Sender<Out>,
     writer: Mutex<Option<FrameWriter>>,
+    reader: Mutex<Reader>,
+    returned: Notify,
     streams: Mutex<HashMap<u32, Entry>>,
     next_sid: AtomicU32,
     die: CancellationToken,
@@ -87,6 +122,8 @@ impl Session {
             seq,
             out,
             writer: Mutex::new(None),
+            reader: Mutex::default(),
+            returned: Notify::new(),
             streams: Mutex::new(HashMap::new()),
             next_sid: AtomicU32::new(0),
             die: pool.tasks.child_token(),
@@ -123,6 +160,7 @@ impl Session {
         if let Some(watch) = lock(&self.synack_watch).take() {
             watch.abort();
         }
+        drop(std::mem::take(&mut *lock(&self.reader)));
         lock(&self.streams).clear();
         if let Some(pool) = self.pool.upgrade() {
             pool.gone(self.seq);
@@ -157,6 +195,69 @@ impl Session {
         }
     }
 
+    /// Reads the stream's next frame with the reader the session lent it. Ready(None) when the
+    /// reader is not lent, or this read gave it back because the frame is not the stream's or the
+    /// stream wrote since its last frame.
+    pub(super) fn poll_lent(
+        self: &Arc<Self>,
+        cx: &mut Context<'_>,
+        sid: u32,
+        flow: &Flow,
+    ) -> Poll<Option<StreamBuffer>> {
+        let mut slot = lock(&self.reader);
+        let Reader::Lent(reader) = &mut *slot else {
+            return Poll::Ready(None);
+        };
+        if flow.done.load(Ordering::Acquire) {
+            return Poll::Ready(None);
+        }
+        let read = ready!(reader.poll_frame(cx, |id| if id == sid {
+            flow.reads.get().copied()
+        } else {
+            self.read_options(id)
+        }));
+        let frame = match read {
+            Ok(frame) => frame,
+            Err(_) => {
+                drop(slot);
+                self.close();
+                return Poll::Ready(None);
+            }
+        };
+        let (payload, give_back) = match frame {
+            Frame::Data { sid: id, payload } if id == sid => (Some(payload), !flow.took()),
+            frame => {
+                reader.hold(frame);
+                (None, true)
+            }
+        };
+        if give_back {
+            Self::give_back_locked(&mut slot);
+            self.returned.notify_one();
+        }
+        Poll::Ready(payload)
+    }
+
+    /// Returns a lent reader to the session task.
+    pub(super) fn give_back(&self) {
+        if Self::give_back_locked(&mut lock(&self.reader)) {
+            self.returned.notify_one();
+        }
+    }
+
+    fn give_back_locked(slot: &mut Reader) -> bool {
+        match std::mem::take(slot) {
+            Reader::Lent(reader) => {
+                *slot = Reader::Returned(reader);
+                true
+            }
+            other => {
+                *slot = other;
+                false
+            }
+        }
+    }
+
     pub(super) fn sender(&self) -> mpsc::Sender<Out> {
         self.out.clone()
     }
@@ -167,8 +268,7 @@ impl Session {
         }
         let sid = self.next_sid.fetch_add(1, Ordering::AcqRel) + 1;
         let (tx, rx) = mpsc::channel(CHUNK_QUEUE);
-        let done = Arc::new(AtomicBool::new(false));
-        let reads = Arc::new(OnceLock::new());
+        let flow = Arc::new(Flow::default());
         if sid >= 2 && self.peer_version.load(Ordering::Acquire) >= 2 {
             let session = self.clone();
             let watch = self.tasks.spawn(async move {
@@ -183,8 +283,7 @@ impl Session {
             sid,
             Entry {
                 tx,
-                done: done.clone(),
-                reads: reads.clone(),
+                flow: flow.clone(),
             },
         );
         let sent = async {
@@ -208,16 +307,16 @@ impl Session {
             sid,
             self.clone(),
             rx,
-            done,
-            reads,
+            flow,
         ))
     }
 
     /// Ends the local side of a stream: tells the server and returns the session to the pool.
-    pub(super) fn finish_local(self: &Arc<Self>, sid: u32, done: &AtomicBool) {
-        if done.swap(true, Ordering::AcqRel) {
+    pub(super) fn finish_local(self: &Arc<Self>, sid: u32, flow: &Flow) {
+        if flow.done.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.give_back();
         lock(&self.streams).remove(&sid);
         self.queue(Out::Data(frame(CMD_FIN, sid, &[])));
         self.release();
@@ -232,109 +331,136 @@ impl Session {
     async fn finish_remote(self: &Arc<Self>, sid: u32, last: Chunk) {
         let entry = lock(&self.streams).remove(&sid);
         if let Some(entry) = entry {
-            if !entry.done.swap(true, Ordering::AcqRel) {
+            if !entry.flow.done.swap(true, Ordering::AcqRel) {
                 self.release();
             }
             let _ = entry.tx.send(last).await;
         }
     }
 
-    /// Reads a data frame into a buffer with the room its stream's writer asked for, so the
-    /// stream can hand the frame on whole.
-    async fn push(&self, source: &mut BoxRead, sid: u32, len: usize) -> io::Result<()> {
-        if len == 0 {
-            return Ok(());
-        }
-        let target = lock(&self.streams)
+    fn read_options(&self, sid: u32) -> Option<ReadBufferOptions> {
+        lock(&self.streams)
             .get(&sid)
-            .map(|entry| (entry.tx.clone(), entry.reads.get().copied()));
-        let options = match target.as_ref().and_then(|(_, options)| *options) {
-            Some(options) => options,
-            None => ReadBufferOptions::for_copy(Default::default(), Default::default())?,
-        };
-        let mut buffer = options.take_for_read(len, 0)?;
-        let payload = buffer
-            .spare_mut()
-            .get_mut(..len)
-            .ok_or(io::ErrorKind::InvalidInput)?;
-        source.read_exact(payload).await?;
-        buffer.advance(len)?;
-        if let Some((tx, _)) = target {
-            let _ = tx.send(Chunk::Data(buffer)).await;
+            .and_then(|entry| entry.flow.reads.get().copied())
+    }
+
+    /// Lends the reader, holding the stream's next frame, to the session's only stream.
+    fn lend(
+        &self,
+        mut reader: FrameReader,
+        sid: u32,
+        payload: StreamBuffer,
+        flow: &Flow,
+    ) -> Result<(), (FrameReader, StreamBuffer)> {
+        let mut slot = lock(&self.reader);
+        let alone = lock(&self.streams).len() == 1;
+        if !alone || flow.done.load(Ordering::Acquire) || self.is_closed() {
+            return Err((reader, payload));
         }
+        reader.hold(Frame::Data { sid, payload });
+        *slot = Reader::Lent(reader);
         Ok(())
     }
 
-    async fn dispatch(self: &Arc<Self>, source: &mut BoxRead) -> io::Result<()> {
+    async fn reclaim(&self) -> FrameReader {
         loop {
-            let mut header = [0u8; HEADER];
-            source.read_exact(&mut header).await?;
-            let [cmd, a, b, c, d, hi, lo] = header;
-            let sid = u32::from_be_bytes([a, b, c, d]);
-            let len = usize::from(u16::from_be_bytes([hi, lo]));
-            if cmd == CMD_PSH {
-                self.push(source, sid, len).await?;
-                continue;
+            {
+                let mut slot = lock(&self.reader);
+                match std::mem::take(&mut *slot) {
+                    Reader::Returned(reader) => return reader,
+                    other => *slot = other,
+                }
             }
-            let mut payload = vec![0u8; len];
-            let has_payload = matches!(
-                cmd,
-                CMD_SYNACK
-                    | CMD_WASTE
-                    | CMD_SETTINGS
-                    | CMD_ALERT
-                    | CMD_UPDATE_PADDING
-                    | CMD_SERVER_SETTINGS
-            );
-            if has_payload && len > 0 {
-                source.read_exact(&mut payload).await?;
-            } else {
-                payload.clear();
-            }
-            match cmd {
-                CMD_SYNACK => {
-                    if let Some(watch) = lock(&self.synack_watch).take() {
-                        watch.abort();
-                    }
-                    if !payload.is_empty() {
-                        let message = String::from_utf8_lossy(&payload).into_owned();
-                        self.finish_remote(sid, Chunk::Error(format!("remote: {message}")))
-                            .await;
-                        self.queue(Out::Data(frame(CMD_FIN, sid, &[])));
-                    }
+            self.returned.notified().await;
+        }
+    }
+
+    async fn receive(self: &Arc<Self>, mut reader: FrameReader) -> io::Result<()> {
+        loop {
+            let frame = poll_fn(|cx| reader.poll_frame(cx, |sid| self.read_options(sid))).await?;
+            let (cmd, sid, payload) = match frame {
+                Frame::Data { sid, payload } => {
+                    let target = lock(&self.streams)
+                        .get(&sid)
+                        .map(|entry| (entry.tx.clone(), entry.flow.clone()));
+                    let Some((tx, flow)) = target else {
+                        continue;
+                    };
+                    let payload = if flow.draining.load(Ordering::Relaxed) {
+                        match self.lend(reader, sid, payload, &flow) {
+                            Ok(()) => {
+                                if tx.send(Chunk::Lent).await.is_err() {
+                                    self.give_back();
+                                }
+                                drop(tx);
+                                reader = self.reclaim().await;
+                                continue;
+                            }
+                            Err((back, payload)) => {
+                                reader = back;
+                                payload
+                            }
+                        }
+                    } else {
+                        payload
+                    };
+                    let _ = tx.send(Chunk::Data(payload)).await;
+                    continue;
                 }
-                CMD_FIN => self.finish_remote(sid, Chunk::Fin).await,
-                CMD_ALERT => {
-                    if !payload.is_empty() {
-                        tracing::debug!(
-                            alert = %String::from_utf8_lossy(&payload),
-                            "anytls: alert from server"
-                        );
-                        return Ok(());
-                    }
-                }
-                CMD_UPDATE_PADDING if !payload.is_empty() => {
-                    if let Some(scheme) = Padding::parse(&payload) {
-                        self.padding.store(Arc::new(scheme));
-                    }
-                }
-                CMD_HEART_REQUEST => self.queue(Out::Data(frame(CMD_HEART_RESPONSE, sid, &[]))),
-                CMD_SERVER_SETTINGS if !payload.is_empty() => {
-                    let settings = parse_map(&String::from_utf8_lossy(&payload));
-                    if let Some(version) = settings.get("v").and_then(|v| v.parse::<u8>().ok()) {
-                        self.peer_version.store(version, Ordering::Release);
-                    }
-                }
-                _ => {}
+                Frame::Control { cmd, sid, payload } => (cmd, sid, payload),
+            };
+            if !self.control(cmd, sid, payload).await {
+                return Ok(());
             }
         }
     }
+
+    /// Handles a control frame; false when the server ends the session.
+    async fn control(self: &Arc<Self>, cmd: u8, sid: u32, payload: Vec<u8>) -> bool {
+        match cmd {
+            CMD_SYNACK => {
+                if let Some(watch) = lock(&self.synack_watch).take() {
+                    watch.abort();
+                }
+                if !payload.is_empty() {
+                    let message = String::from_utf8_lossy(&payload).into_owned();
+                    self.finish_remote(sid, Chunk::Error(format!("remote: {message}")))
+                        .await;
+                    self.queue(Out::Data(frame(CMD_FIN, sid, &[])));
+                }
+            }
+            CMD_FIN => self.finish_remote(sid, Chunk::Fin).await,
+            CMD_ALERT => {
+                if !payload.is_empty() {
+                    tracing::debug!(
+                        alert = %String::from_utf8_lossy(&payload),
+                        "anytls: alert from server"
+                    );
+                    return false;
+                }
+            }
+            CMD_UPDATE_PADDING if !payload.is_empty() => {
+                if let Some(scheme) = Padding::parse(&payload) {
+                    self.padding.store(Arc::new(scheme));
+                }
+            }
+            CMD_HEART_REQUEST => self.queue(Out::Data(frame(CMD_HEART_RESPONSE, sid, &[]))),
+            CMD_SERVER_SETTINGS if !payload.is_empty() => {
+                let settings = parse_map(&String::from_utf8_lossy(&payload));
+                if let Some(version) = settings.get("v").and_then(|v| v.parse::<u8>().ok()) {
+                    self.peer_version.store(version, Ordering::Release);
+                }
+            }
+            _ => {}
+        }
+        true
+    }
 }
 
-async fn read_loop(session: Arc<Session>, mut source: BoxRead) {
+async fn read_loop(session: Arc<Session>, source: BoxRead) {
     tokio::select! {
         _ = session.die.cancelled() => {}
-        _ = session.dispatch(&mut source) => {}
+        _ = session.receive(FrameReader::new(source)) => {}
     }
     session.close();
 }
@@ -392,7 +518,8 @@ async fn write_loop(session: Arc<Session>, mut queue: mpsc::Receiver<Out>, write
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anytls::frame::{MAX_FRAME, data_frames};
+    use crate::anytls::frame::{CMD_PSH, HEADER, MAX_FRAME, data_frames};
+    use tokio::io::AsyncReadExt;
 
     fn queued_stream() -> (
         super::super::stream::AnyTlsStream,
@@ -415,6 +542,8 @@ mod tests {
             seq: 1,
             out,
             writer: Mutex::new(None),
+            reader: Mutex::default(),
+            returned: Notify::new(),
             streams: Mutex::new(HashMap::new()),
             next_sid: AtomicU32::new(1),
             die: CancellationToken::new(),
@@ -426,9 +555,8 @@ mod tests {
             tasks: Tasks::default(),
         });
         let (_, chunks) = mpsc::channel(1);
-        let done = Arc::new(AtomicBool::new(false));
         (
-            super::super::stream::AnyTlsStream::new(1, session, chunks, done, Default::default()),
+            super::super::stream::AnyTlsStream::new(1, session, chunks, Default::default()),
             queue,
             sender,
         )
@@ -848,6 +976,115 @@ mod tests {
         assert_eq!(handed.as_slice(), late);
         assert_eq!((handed.headroom(), handed.tailroom()), (16, 4));
         session.close();
+    }
+
+    async fn lent_stream() -> (
+        Arc<Pool>,
+        Arc<Session>,
+        super::super::stream::AnyTlsStream,
+        tokio::io::DuplexStream,
+    ) {
+        let (near, mut far) = tokio::io::duplex(1 << 17);
+        let pool = Pool::new(false, 0, Tasks::default());
+        let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
+        let session = Session::start(Box::new(near), 1, &pool, padding, "");
+        assert!(pool.register(session.clone(), pool.ticket()));
+        let mut stream = session.open_stream().await.unwrap();
+        for byte in *b"ab" {
+            far.write_all(&frame(CMD_PSH, 1, &[byte])).await.unwrap();
+            let mut got = [0];
+            stream.read_exact(&mut got).await.unwrap();
+            assert_eq!(got, [byte]);
+        }
+        assert!(matches!(*lock(&session.reader), Reader::Lent(_)));
+        (pool, session, stream, far)
+    }
+
+    #[tokio::test]
+    async fn a_draining_stream_reads_with_the_lent_reader_until_it_writes() {
+        let (_pool, session, mut stream, mut far) = lent_stream().await;
+        let mut got = [0];
+        far.write_all(&frame(CMD_HEART_REQUEST, 0, &[]))
+            .await
+            .unwrap();
+        far.write_all(&frame(CMD_PSH, 1, b"c")).await.unwrap();
+        stream.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, *b"c");
+        assert!(matches!(*lock(&session.reader), Reader::Lent(_)));
+        for expected in [CMD_SETTINGS, CMD_SYN, CMD_HEART_RESPONSE] {
+            assert_eq!(read_frame(&mut far).await.0, expected);
+        }
+
+        stream.write_all(b"w").await.unwrap();
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 1, b"w".to_vec()));
+        for byte in *b"de" {
+            far.write_all(&frame(CMD_PSH, 1, &[byte])).await.unwrap();
+            stream.read_exact(&mut got).await.unwrap();
+            assert_eq!(got, [byte]);
+            assert!(!matches!(*lock(&session.reader), Reader::Lent(_)));
+        }
+        far.write_all(&frame(CMD_FIN, 1, &[])).await.unwrap();
+        assert_eq!(stream.read(&mut got).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_session_with_two_streams_keeps_its_reader() {
+        let (near, mut far) = tokio::io::duplex(1 << 17);
+        let pool = Pool::new(false, 0, Tasks::default());
+        let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
+        let session = Session::start(Box::new(near), 1, &pool, padding, "");
+        let mut first = session.open_stream().await.unwrap();
+        let mut second = session.open_stream().await.unwrap();
+        let mut got = [0];
+        for byte in *b"abc" {
+            far.write_all(&frame(CMD_PSH, 1, &[byte])).await.unwrap();
+            first.read_exact(&mut got).await.unwrap();
+            assert_eq!(got, [byte]);
+            assert!(!matches!(*lock(&session.reader), Reader::Lent(_)));
+        }
+        far.write_all(&frame(CMD_PSH, 2, b"d")).await.unwrap();
+        second.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, *b"d");
+        session.close();
+    }
+
+    #[tokio::test]
+    async fn a_frame_read_partly_by_a_dropped_stream_is_finished_by_the_session() {
+        use std::pin::Pin;
+        use std::task::Waker;
+        use tokio::io::AsyncRead;
+
+        let (pool, session, mut stream, mut far) = lent_stream().await;
+        let late = frame(CMD_PSH, 1, &[0x5a; 100]);
+        far.write_all(&late[..50]).await.unwrap();
+        let mut input = [0; 1];
+        let mut read = tokio::io::ReadBuf::new(&mut input);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(
+            Pin::new(&mut stream)
+                .poll_read(&mut cx, &mut read)
+                .is_pending()
+        );
+        drop(stream);
+        far.write_all(&late[50..]).await.unwrap();
+        let next = pool.take_idle().unwrap();
+        assert_eq!(next.seq, session.seq);
+        let mut stream = next.open_stream().await.unwrap();
+        far.write_all(&frame(CMD_PSH, 2, b"next")).await.unwrap();
+        let mut got = [0; 4];
+        stream.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"next");
+    }
+
+    #[tokio::test]
+    async fn a_lost_connection_ends_a_stream_reading_with_the_lent_reader() {
+        let (_pool, session, mut stream, far) = lent_stream().await;
+        let reading = tokio::spawn(async move { stream.read(&mut [0; 4]).await });
+        tokio::task::yield_now().await;
+        drop(far);
+        let err = reading.await.unwrap().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+        assert!(session.is_closed());
     }
 
     #[tokio::test]

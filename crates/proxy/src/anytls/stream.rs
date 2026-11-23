@@ -1,7 +1,7 @@
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::task::{Context, Poll, ready};
 
 use concord_common::stream_buffer::{self, BufferRequirements, ReadBufferOptions, StreamBuffer};
@@ -11,17 +11,17 @@ use tokio::sync::mpsc;
 use tokio_util::sync::PollSender;
 
 use super::frame::{CMD_PSH, HEADER, MAX_FRAME, data_frames, frame, header};
-use super::session::{Chunk, Out, Session};
+use super::session::{Chunk, Flow, Out, Session};
 
 struct Closer {
     sid: u32,
     session: Arc<Session>,
-    done: Arc<AtomicBool>,
+    flow: Arc<Flow>,
 }
 
 impl Closer {
     fn close(&self) {
-        self.session.finish_local(self.sid, &self.done);
+        self.session.finish_local(self.sid, &self.flow);
     }
 }
 
@@ -35,17 +35,16 @@ struct Inbox {
     chunks: mpsc::Receiver<Chunk>,
     pending: StreamBuffer,
     ended: bool,
-    reads: Arc<OnceLock<ReadBufferOptions>>,
 }
 
 impl Inbox {
     fn poll_read(
         &mut self,
         cx: &mut Context<'_>,
-        done: &AtomicBool,
+        closer: &Closer,
         out: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if ready!(self.poll_pending(cx, done))? {
+        if ready!(self.poll_pending(cx, closer))? {
             let take = self.pending.len().min(out.remaining());
             out.put_slice(self.pending.as_slice().get(..take).unwrap_or_default());
             self.pending.consume(take)?;
@@ -57,13 +56,13 @@ impl Inbox {
     fn poll_read_buffer(
         &mut self,
         cx: &mut Context<'_>,
-        done: &AtomicBool,
+        closer: &Closer,
         options: ReadBufferOptions,
     ) -> Poll<io::Result<StreamBuffer>> {
-        if self.reads.get().is_none() {
-            let _ = self.reads.set(options);
+        if closer.flow.reads.get().is_none() {
+            let _ = closer.flow.reads.set(options);
         }
-        if !ready!(self.poll_pending(cx, done))? {
+        if !ready!(self.poll_pending(cx, closer))? {
             return Poll::Ready(Ok(StreamBuffer::default()));
         }
         if options.fits(&self.pending) {
@@ -72,7 +71,7 @@ impl Inbox {
         let mut buffer = options.take();
         let filled = {
             let mut read = ReadBuf::new(buffer.spare_mut());
-            ready!(self.poll_read(cx, done, &mut read))?;
+            ready!(self.poll_read(cx, closer, &mut read))?;
             read.filled().len()
         };
         buffer.advance(filled)?;
@@ -80,7 +79,7 @@ impl Inbox {
     }
 
     /// Ready(true) when bytes are pending, Ready(false) at the end of the stream.
-    fn poll_pending(&mut self, cx: &mut Context<'_>, done: &AtomicBool) -> Poll<io::Result<bool>> {
+    fn poll_pending(&mut self, cx: &mut Context<'_>, closer: &Closer) -> Poll<io::Result<bool>> {
         loop {
             if !self.pending.is_empty() {
                 return Poll::Ready(Ok(true));
@@ -88,14 +87,26 @@ impl Inbox {
             if self.ended {
                 return Poll::Ready(Ok(false));
             }
-            match ready!(self.chunks.poll_recv(cx)) {
-                Some(Chunk::Data(buffer)) => self.pending = buffer,
+            let Poll::Ready(chunk) = self.chunks.poll_recv(cx) else {
+                let lent = closer.session.poll_lent(cx, closer.sid, &closer.flow);
+                match ready!(lent) {
+                    Some(buffer) => self.pending = buffer,
+                    None => return Poll::Pending,
+                }
+                continue;
+            };
+            match chunk {
+                Some(Chunk::Data(buffer)) => {
+                    closer.flow.took();
+                    self.pending = buffer;
+                }
+                Some(Chunk::Lent) => {}
                 Some(Chunk::Fin) => self.ended = true,
                 Some(Chunk::Error(message)) => {
                     self.ended = true;
                     return Poll::Ready(Err(CoreError::TargetRefused(message).into()));
                 }
-                None if done.load(Ordering::Acquire) => self.ended = true,
+                None if closer.flow.done.load(Ordering::Acquire) => self.ended = true,
                 None => {
                     self.ended = true;
                     return Poll::Ready(Err(io::Error::new(
@@ -120,7 +131,7 @@ impl Outbox {
         closer: &Closer,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if closer.done.load(Ordering::Acquire) {
+        if closer.flow.done.load(Ordering::Acquire) {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
         if data.is_empty() {
@@ -128,6 +139,7 @@ impl Outbox {
         }
         ready!(self.sink.poll_reserve(cx))
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        closer.flow.wrote();
         self.wrote_since_read = false;
         if data.len() <= MAX_FRAME {
             self.sink
@@ -158,11 +170,12 @@ impl Outbox {
         closer: &Closer,
         buffer: &mut StreamBuffer,
     ) -> Poll<io::Result<usize>> {
-        if closer.done.load(Ordering::Acquire) {
+        if closer.flow.done.load(Ordering::Acquire) {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
         ready!(self.sink.poll_reserve(cx))
             .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
+        closer.flow.wrote();
         let length = buffer.len();
         buffer
             .prepend(HEADER)?
@@ -204,8 +217,7 @@ impl AnyTlsStream {
         sid: u32,
         session: Arc<Session>,
         chunks: mpsc::Receiver<Chunk>,
-        done: Arc<AtomicBool>,
-        reads: Arc<OnceLock<ReadBufferOptions>>,
+        flow: Arc<Flow>,
     ) -> Self {
         let sink = PollSender::new(session.sender());
         AnyTlsStream {
@@ -213,13 +225,12 @@ impl AnyTlsStream {
                 chunks,
                 pending: StreamBuffer::default(),
                 ended: false,
-                reads,
             },
             outbox: Outbox {
                 sink,
                 wrote_since_read: false,
             },
-            closer: Arc::new(Closer { sid, session, done }),
+            closer: Arc::new(Closer { sid, session, flow }),
         }
     }
 }
@@ -232,7 +243,7 @@ impl AsyncRead for AnyTlsStream {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let before = out.filled().len();
-        let result = this.inbox.poll_read(cx, &this.closer.done, out);
+        let result = this.inbox.poll_read(cx, &this.closer, out);
         if out.filled().len() != before {
             this.outbox.wrote_since_read = false;
         }
@@ -272,7 +283,13 @@ impl AsyncRead for ReadHalf {
         out: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        this.inbox.poll_read(cx, &this.closer.done, out)
+        this.inbox.poll_read(cx, &this.closer, out)
+    }
+}
+
+impl Drop for ReadHalf {
+    fn drop(&mut self) {
+        self.closer.session.give_back();
     }
 }
 
@@ -310,7 +327,7 @@ impl Stream for AnyTlsStream {
         cx: &mut Context<'_>,
         options: ReadBufferOptions,
     ) -> Poll<io::Result<StreamBuffer>> {
-        let buffer = ready!(self.inbox.poll_read_buffer(cx, &self.closer.done, options))?;
+        let buffer = ready!(self.inbox.poll_read_buffer(cx, &self.closer, options))?;
         if !buffer.is_empty() {
             self.outbox.wrote_since_read = false;
         }
