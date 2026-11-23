@@ -80,8 +80,8 @@ struct Entry {
 enum Reader {
     #[default]
     Home,
-    Lent(FrameReader),
-    Returned(FrameReader),
+    Lent(Box<FrameReader>),
+    Returned(Box<FrameReader>),
 }
 
 pub(super) struct Session {
@@ -347,11 +347,11 @@ impl Session {
     /// Lends the reader, holding the stream's next frame, to the session's only stream.
     fn lend(
         &self,
-        mut reader: FrameReader,
+        mut reader: Box<FrameReader>,
         sid: u32,
         payload: StreamBuffer,
         flow: &Flow,
-    ) -> Result<(), (FrameReader, StreamBuffer)> {
+    ) -> Result<(), (Box<FrameReader>, StreamBuffer)> {
         let mut slot = lock(&self.reader);
         let alone = lock(&self.streams).len() == 1;
         if !alone || flow.done.load(Ordering::Acquire) || self.is_closed() {
@@ -362,7 +362,7 @@ impl Session {
         Ok(())
     }
 
-    async fn reclaim(&self) -> FrameReader {
+    async fn reclaim(&self) -> Box<FrameReader> {
         loop {
             {
                 let mut slot = lock(&self.reader);
@@ -375,7 +375,7 @@ impl Session {
         }
     }
 
-    async fn receive(self: &Arc<Self>, mut reader: FrameReader) -> io::Result<()> {
+    async fn receive(self: &Arc<Self>, mut reader: Box<FrameReader>) -> io::Result<()> {
         loop {
             let frame = poll_fn(|cx| reader.poll_frame(cx, |sid| self.read_options(sid))).await?;
             let (cmd, sid, payload) = match frame {
@@ -460,7 +460,7 @@ impl Session {
 async fn read_loop(session: Arc<Session>, source: BoxRead) {
     tokio::select! {
         _ = session.die.cancelled() => {}
-        _ = session.receive(FrameReader::new(source)) => {}
+        _ = session.receive(Box::new(FrameReader::new(source))) => {}
     }
     session.close();
 }
