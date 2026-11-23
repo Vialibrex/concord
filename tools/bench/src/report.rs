@@ -189,6 +189,8 @@ pub fn meta(key: &str) -> Meta {
         "cpu_us_per_tx" => ("core CPU-µs/transaction", Lower),
         "kcycles_per_tx" => ("core kcycles/transaction", Lower),
         "cpu_us_per_conn" => ("core CPU-µs/connection", Lower),
+        "cpu_us_per_page" => ("core CPU-µs/page", Lower),
+        k if k.starts_with("bare_") => ("without the core", Neither),
         "kcycles_per_conn" => ("core kcycles/connection", Lower),
         "cores" => ("core CPUs busy", Neither),
         "server_cores" => ("server CPUs busy", Neither),
@@ -234,6 +236,14 @@ pub fn primary(workload: &str) -> &'static [&'static str] {
             &["tps", "p50_us", "p99_us", "cpu_us_per_tx"]
         }
         "tcp-crr" | "mitm-crr" => &["cps", "p50_ms", "p99_ms", "cpu_us_per_conn", "error_pct"],
+        "page-load" => &[
+            "page_p50_ms",
+            "page_p95_ms",
+            "ttfb_p50_ms",
+            "ttfb_p95_ms",
+            "bare_page_p50_ms",
+            "error_pct",
+        ],
         "udp-stream" => &["mbps", "loss_pct", "rtt_p99_us", "cpu_s_per_gb"],
         "udp-rr" => &["rtt_p50_us", "rtt_p99_us", "loss_pct"],
         "idle" => &["kib_per_conn", "retained_kib_per_conn", "open_ms"],

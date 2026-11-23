@@ -33,13 +33,14 @@ pub enum Workload {
     MitmH2Rr,
     MitmCrr,
     HttpRr,
+    PageLoad,
     Idle,
     Startup,
     Large,
 }
 
 impl Workload {
-    pub const ALL: [Workload; 14] = [
+    pub const ALL: [Workload; 15] = [
         Workload::TcpDown,
         Workload::TcpUp,
         Workload::TcpMulti,
@@ -51,6 +52,7 @@ impl Workload {
         Workload::MitmH2Rr,
         Workload::MitmCrr,
         Workload::HttpRr,
+        Workload::PageLoad,
         Workload::Idle,
         Workload::Startup,
         Workload::Large,
@@ -69,6 +71,7 @@ impl Workload {
             Workload::MitmH2Rr => "mitm-h2-rr",
             Workload::MitmCrr => "mitm-crr",
             Workload::HttpRr => "http-rr",
+            Workload::PageLoad => "page-load",
             Workload::Idle => "idle",
             Workload::Startup => "startup",
             Workload::Large => "large",
@@ -93,6 +96,9 @@ impl Workload {
             Workload::MitmCrr => "mitm cases: TLS connect, one HTTP/1.1 exchange, close",
             Workload::HttpRr => {
                 "mitm cases: 64-byte plain HTTP/1.1 POST and answer over one connection"
+            }
+            Workload::PageLoad => {
+                "pages of --page-conns HTTPS connections opened at once, 10 to 200 KiB each: time to the last byte and to each response head"
             }
             Workload::Idle => {
                 "memory per held connection, and what stays after they close; on mitm cases each holds a TLS session after one exchange"
@@ -148,6 +154,7 @@ pub struct Ctx {
     pub flows: usize,
     pub crr_conns: usize,
     pub crr_concurrency: usize,
+    pub page_conns: usize,
     pub udp_size: usize,
     pub udp_window: usize,
     pub idle_conns: usize,
@@ -155,6 +162,8 @@ pub struct Ctx {
     pub far_netns: Option<String>,
     /// Set on the mitm cases, whose origin gave the CA.
     pub tls: Option<crate::mitm::Clients>,
+    /// Trusting the origin's CA on every case, for `page-load`.
+    pub origin_tls: Option<crate::mitm::Clients>,
 }
 
 impl Ctx {
@@ -369,6 +378,7 @@ pub async fn run(workload: Workload, ctx: &Ctx) -> Io<Metrics> {
             crr_with(ctx, "mitm-crr", move || mitm::crr_once(ctx_.clone())).await
         }
         Workload::HttpRr => mitm::rr(ctx, Wire::Plain).await,
+        Workload::PageLoad => page_load(ctx).await,
         Workload::Idle | Workload::Startup | Workload::Large => {
             Err(format!("{} runs on a fresh core", workload.name()))
         }
@@ -676,6 +686,91 @@ where
     Ok(m)
 }
 
+/// Between pages, so each one starts on a core gone idle, as a reader's next click does.
+const PAGE_GAP: Duration = Duration::from_millis(250);
+/// Pages fetched straight from the origin before each trial: the machine's pace without the core.
+const BARE_PAGES: usize = 8;
+
+/// `n` sizes from 10 to 200 KiB, evenly spaced on a log scale.
+fn page_sizes(n: usize) -> Vec<usize> {
+    (0..n)
+        .map(|i| {
+            let t = if n > 1 {
+                i as f64 / (n - 1) as f64
+            } else {
+                0.0
+            };
+            (10_240.0 * 20f64.powf(t)).round() as usize
+        })
+        .collect()
+}
+
+async fn page_load(ctx: &Ctx) -> Io<Metrics> {
+    let clients = ctx.origin_tls.as_ref().ok_or("the origin gave no CA")?;
+    let target = ctx.at(ctx.ports.https);
+    let sizes = page_sizes(ctx.page_conns);
+    let mut bare = Vec::with_capacity(BARE_PAGES);
+    for _ in 0..BARE_PAGES {
+        let (done, _) = mitm::page(Entry::Tun, target, clients, &sizes)
+            .await
+            .map_err(|e| format!("bare page: {e}"))?;
+        bare.push(done);
+        tokio::time::sleep(PAGE_GAP).await;
+    }
+    let warm_until = Instant::now() + ctx.warmup;
+    while Instant::now() < warm_until {
+        mitm::page(ctx.entry, target, clients, &sizes)
+            .await
+            .map_err(|e| format!("warmup page: {e}"))?;
+        tokio::time::sleep(PAGE_GAP).await;
+    }
+    let windows = Windows::open(ctx.pids);
+    let started = Instant::now();
+    let (mut pages, mut heads, mut errors) = (Vec::new(), Vec::new(), Vec::new());
+    while started.elapsed() < ctx.duration {
+        match mitm::page(ctx.entry, target, clients, &sizes).await {
+            Ok((done, page_heads)) => {
+                pages.push(done);
+                heads.extend(page_heads);
+            }
+            Err(e) => errors.push(e),
+        }
+        tokio::time::sleep(PAGE_GAP).await;
+    }
+    let closed = windows.close();
+    if pages.is_empty() {
+        return Err(format!("every page failed: {}", error_kinds(&errors)));
+    }
+    if !errors.is_empty() {
+        eprintln!(
+            "  page-load: {} of {} pages failed: {}",
+            errors.len(),
+            pages.len() + errors.len(),
+            error_kinds(&errors)
+        );
+    }
+    let mut m = Metrics::new();
+    let count = pages.len() as f64;
+    m.insert("pages".into(), count);
+    m.insert(
+        "error_pct".into(),
+        errors.len() as f64 * 100.0 / (count + errors.len() as f64),
+    );
+    for (name, samples) in [
+        ("page", &mut pages),
+        ("ttfb", &mut heads),
+        ("bare_page", &mut bare),
+    ] {
+        samples.sort_unstable();
+        let ms: Vec<f64> = samples.iter().map(|&ns| ns as f64 / 1e6).collect();
+        for (label, q) in [("p50", 0.5), ("p95", 0.95)] {
+            m.insert(format!("{name}_{label}_ms"), stats::quantile(&ms, q));
+        }
+    }
+    costs(&mut m, &closed, None, Some(("cpu_us_per_page", count, 1e3)));
+    Ok(m)
+}
+
 /// The three most common failures with their counts, so an exhausted resource (an OS error code) shows apart
 /// from a refused or timed-out connection.
 fn error_kinds(errors: &[String]) -> String {
@@ -926,7 +1021,34 @@ pub async fn settled(pid: u32, ready: Duration, settle: Duration) -> Metrics {
 
 #[cfg(test)]
 mod tests {
-    use super::error_kinds;
+    use super::{Entry, error_kinds, mitm, page_sizes};
+
+    #[test]
+    fn page_sizes_span_ten_to_two_hundred_kib() {
+        let sizes = page_sizes(16);
+        assert_eq!((sizes[0], sizes[15]), (10_240, 204_800));
+        assert!(sizes.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[tokio::test]
+    async fn a_page_reads_every_resource_whole() {
+        let (authority, tls) = mitm::authority().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(mitm::serve_https(stream, tls.clone()));
+            }
+        });
+        let clients = mitm::Clients::new(&authority).unwrap();
+        let (done, heads) = mitm::page(Entry::Tun, target, &clients, &page_sizes(6))
+            .await
+            .unwrap();
+        assert_eq!(heads.len(), 6);
+        assert!(heads.iter().all(|&head| head <= done));
+        let oversized = mitm::page(Entry::Tun, target, &clients, &[300 * 1024]).await;
+        assert!(oversized.unwrap_err().contains("64 of 307200 bytes"));
+    }
 
     #[test]
     fn error_kinds_lists_the_commonest_failures_first() {

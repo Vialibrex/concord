@@ -484,6 +484,7 @@ impl Rig {
         };
         let mut ctx = self.load_ctx(entry, far.ip, far.ports, pids);
         ctx.tls = far.clients.clone().filter(|_| cases::is_mitm(case.spec));
+        ctx.origin_tls = far.clients.clone();
         ctx
     }
 
@@ -498,12 +499,14 @@ impl Rig {
             flows: self.plan.flows,
             crr_conns: self.plan.crr_conns,
             crr_concurrency: self.plan.crr_concurrency,
+            page_conns: self.plan.page_conns,
             udp_size: self.plan.udp_size,
             udp_window: self.plan.udp_window,
             idle_conns: self.plan.idle_conns,
             net_counters: self.plan.net_counters,
             far_netns: self.netns.as_ref().map(|n| n.far.clone()),
             tls: None,
+            origin_tls: None,
         }
     }
 

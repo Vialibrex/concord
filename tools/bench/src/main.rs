@@ -135,6 +135,9 @@ struct RunArgs {
     #[arg(help = "Connections each tcp-crr window opens, in place of the tier's count.")]
     #[arg(long)]
     crr_conns: Option<usize>,
+    #[arg(help = "Connections each page-load page opens at once. Default 16.")]
+    #[arg(long)]
+    page_conns: Option<usize>,
     #[arg(help = "Non-matching rules in the mitm-route and mitm-rewrite cases.")]
     #[arg(long)]
     mitm_rules: Option<usize>,
@@ -459,6 +462,12 @@ fn run(args: RunArgs) -> Result<bool, String> {
             return Err("--crr-conns must be positive".into());
         }
         plan.crr_conns = count;
+    }
+    if let Some(count) = args.page_conns {
+        if count == 0 {
+            return Err("--page-conns must be positive".into());
+        }
+        plan.page_conns = count;
     }
     if let Some(count) = args.mitm_rules {
         plan.mitm_rules = count;

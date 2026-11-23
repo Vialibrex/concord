@@ -282,6 +282,7 @@ and a drift of at most 1.61%. The same case on the second machine is a separate 
 | `mitm-rr`, `mitm-h2-rr` | `mitm` cases: a 64-byte POST and its answer over one HTTPS connection, HTTP/1.1 or HTTP/2, with `tcp-rr`'s metrics and `decrypted` (1 when the core answered the handshake with its own certificate) |
 | `mitm-crr` | `mitm` cases: TLS connect, one HTTP/1.1 exchange, close, with `tcp-crr`'s metrics |
 | `http-rr` | `mitm` cases: `mitm-rr` over plain HTTP/1.1 |
+| `page-load` | pages of `--page-conns` (default 16) HTTPS connections opened at once, one GET of 10 to 200 KiB each, 250 ms apart: page p50/p95 to the last byte, response-head p50/p95, the same pages fetched without the core before each trial (`bare_page_*`), CPU-µs per page; on every case, in no tier |
 
 Upload rates come from the origin's receive counter, which it reports every 100 ms, not from the client's send
 calls, so socket buffers cannot inflate them. `interval_cv` and `interval_p10_gbps` show how steady the 100 ms rates

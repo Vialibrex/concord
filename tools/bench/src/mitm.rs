@@ -27,6 +27,10 @@ use crate::socks;
 
 pub const HOST: &str = "origin.bench";
 static BODY: [u8; 64] = [0x42; 64];
+const PAGE_MAX: usize = 256 * 1024;
+static PAGE: std::sync::LazyLock<Bytes> =
+    std::sync::LazyLock::new(|| Bytes::from(vec![0x5a; PAGE_MAX]));
+const PAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The CA as the core reads it from `<home>/mitm`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -228,9 +232,18 @@ where
 async fn answer(
     request: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
-    let body = resource(request.uri().path()).map_or(Bytes::from_static(&BODY), Bytes::from);
+    let path = request.uri().path();
+    let body = page_body(path)
+        .or_else(|| resource(path).map(Bytes::from))
+        .unwrap_or(Bytes::from_static(&BODY));
     request.into_body().collect().await?;
     Ok(Response::new(Full::new(body)))
+}
+
+/// `/page/<bytes>`: one resource of a `page-load` page.
+fn page_body(path: &str) -> Option<Bytes> {
+    let bytes = path.strip_prefix("/page/")?.parse::<usize>().ok()?;
+    (bytes <= PAGE_MAX).then(|| PAGE.slice(..bytes))
 }
 
 /// `text` with each remote file it reads served by the origin as `/res/<kind>/<bytes>/<id>`,
@@ -399,6 +412,72 @@ impl Session {
         }
         Ok(())
     }
+}
+
+/// A page: one HTTPS connection per size, all opened at once, each a GET of its size read to the end, then closed.
+/// The time to the page's last byte, and each connection's time to its response head.
+pub async fn page(
+    entry: socks::Entry,
+    target: SocketAddr,
+    clients: &Clients,
+    sizes: &[usize],
+) -> Result<(u64, Vec<u64>), String> {
+    let start = Instant::now();
+    let mut fetches = tokio::task::JoinSet::new();
+    for &bytes in sizes {
+        fetches.spawn(fetch(entry, target, clients.h1.clone(), bytes, start));
+    }
+    let all = async {
+        let mut heads = Vec::with_capacity(sizes.len());
+        while let Some(joined) = fetches.join_next().await {
+            heads.push(
+                joined
+                    .map_err(|e| e.to_string())?
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+        Ok::<_, String>(heads)
+    };
+    let heads = tokio::time::timeout(PAGE_TIMEOUT, all)
+        .await
+        .map_err(|_| "timed out".to_string())??;
+    Ok((start.elapsed().as_nanos() as u64, heads))
+}
+
+async fn fetch(
+    entry: socks::Entry,
+    target: SocketAddr,
+    config: Arc<rustls::ClientConfig>,
+    bytes: usize,
+    start: Instant,
+) -> io::Result<u64> {
+    let stream = tls(&config, socks::connect(entry, target).await?).await?;
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(io::Error::other)?;
+    tokio::spawn(conn);
+    let request = Request::get(format!("/page/{bytes}"))
+        .header(hyper::header::HOST, format!("{HOST}:{}", target.port()))
+        .body(Full::new(Bytes::new()))
+        .map_err(io::Error::other)?;
+    let response = sender
+        .send_request(request)
+        .await
+        .map_err(io::Error::other)?;
+    let head = start.elapsed().as_nanos() as u64;
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(io::Error::other)?;
+    let size = body.to_bytes().len();
+    if status != StatusCode::OK || size != bytes {
+        return Err(io::Error::other(format!(
+            "{status} with {size} of {bytes} bytes"
+        )));
+    }
+    Ok(head)
 }
 
 /// One connection held after one exchange, for `idle`.

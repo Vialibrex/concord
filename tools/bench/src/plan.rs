@@ -31,6 +31,7 @@ pub struct Plan {
     pub flows: usize,
     pub crr_conns: usize,
     pub crr_concurrency: usize,
+    pub page_conns: usize,
     pub udp_size: usize,
     pub udp_window: usize,
     pub idle_conns: usize,
@@ -74,6 +75,7 @@ impl Plan {
                 flows: 4,
                 crr_conns: 1500,
                 crr_concurrency: 16,
+                page_conns: 16,
                 udp_size: 1200,
                 udp_window: 64,
                 idle_conns: 500,
@@ -102,7 +104,7 @@ impl Plan {
                     .collect(),
                 workloads: Workload::ALL
                     .into_iter()
-                    .filter(|w| !w.needs_mitm())
+                    .filter(|w| !w.needs_mitm() && *w != Workload::PageLoad)
                     .collect(),
                 rounds: 5,
                 warmup: Duration::from_secs(1),
@@ -111,6 +113,7 @@ impl Plan {
                 flows: 8,
                 crr_conns: 3000,
                 crr_concurrency: 32,
+                page_conns: 16,
                 udp_size: 1200,
                 udp_window: 64,
                 idle_conns: 2000,
@@ -141,6 +144,7 @@ impl Plan {
                 Workload::Idle => Duration::from_secs(8),
                 Workload::Large => Duration::from_secs(15),
                 Workload::TcpCrr | Workload::MitmCrr => Duration::from_secs(3),
+                Workload::PageLoad => stream + Duration::from_secs(3),
                 _ => stream,
             };
             let warmups = match (w.fresh_core(), self.fresh_cores) {
