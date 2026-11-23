@@ -221,6 +221,10 @@ before it starts, not more rounds on the same run.
   0.035 Gbit/s and the server's CPU per GB to about 45, in all eleven such rounds over three runs on the Linux VM;
   run first, Go held 0.285 Gbit/s in six of seven. Cause not examined.
   Read this cell on the rounds where Go runs first, and add rounds when they are too few.
+- `hysteria2` `tcp-crr`: the arm run second in a round costs 7.6% to 8.9% more CPU per connection, whichever arm it
+  is (two runs of 12 and 20 fresh 10 s rounds on the Linux VM). A per-round ratio carries that on top of the arm
+  effect: twenty rounds read +2.2% [-3.8%, +9.9%]. Alternate the order and take the mean log ratio of each pair of
+  opposite-order rounds; six pairs read +1.7% [-2.8%, +4.9%]. Cause not examined.
 - A netem rate cap needs a 30 s window before CPU per GB settles; 10 s windows range over tens of percent between
   rounds with nothing wrong in either arm (`benchmarking.md`, The 1 Gbit/s group).
 - Multi-flow cases over loopback, and a single `trojan-tls`, `vless-tls` or `vmess-ws-tls` download, can lock each
