@@ -1,8 +1,13 @@
+use std::sync::Weak;
+
 use super::*;
 
 #[derive(Default)]
 pub(crate) struct UdpNat {
     pub(super) flows: DashMap<FlowId, Arc<Flow>>,
+    /// The flows in the order the sweep clock last saw them active, oldest first. An entry
+    /// whose flow has left `flows` is dropped when it reaches the front or at the next tick.
+    recency: Mutex<VecDeque<Recent>>,
     pub(super) slots: DashMap<SessionKey, Arc<OnceCell<Arc<Session>>>>,
     /// Counts the idle sweep's ticks.
     pub(super) clock: AtomicU32,
@@ -27,29 +32,60 @@ impl UdpNat {
         session.reply.load().session_ended();
     }
 
-    /// Scanning a full table on each new flow would let a port scan burn the CPU,
-    /// so a full table gives back a sixteenth of itself at once.
+    pub(super) fn insert(&self, id: FlowId, flow: Arc<Flow>) {
+        lock(&self.recency).push_back(Recent {
+            id: id.clone(),
+            flow: Arc::downgrade(&flow),
+            seen: flow.last_active.load(Ordering::Relaxed),
+        });
+        self.flows.insert(id, flow);
+    }
+
+    /// Evicts one flow, the one the sweep clock saw active least recently, as sing-tun's NAT
+    /// (`udp_nat.go:122`) evicts its LRU's oldest entry for each insert into a full table
+    /// (sing `contrab/freelru/lru.go:556-561`). Where freelru moves a flow to the front on every
+    /// packet (`lru.go:686-687`), a packet here only stores the clock in its flow, and a flow
+    /// seen active since it was queued goes to the back when it reaches the front: each flow
+    /// moves at most once a tick, no more work than the sweep's own pass.
     pub(super) fn evict_oldest(&self) {
-        let mut ages: Vec<(u32, FlowId)> = self
-            .flows
-            .iter()
-            .map(|entry| {
-                (
-                    entry.value().last_active.load(Ordering::Relaxed),
-                    entry.key().clone(),
-                )
-            })
-            .collect();
-        let count = (ages.len() / 16).max(1);
-        if count < ages.len() {
-            ages.select_nth_unstable_by_key(count, |(age, _)| *age);
-        }
-        for (_, id) in ages.into_iter().take(count) {
-            if let Some((id, flow)) = self.flows.remove(&id) {
+        let mut recency = lock(&self.recency);
+        while let Some(mut recent) = recency.pop_front() {
+            let Some(flow) = recent.flow.upgrade() else {
+                continue;
+            };
+            if !self
+                .flows
+                .get(&recent.id)
+                .is_some_and(|current| Arc::ptr_eq(&current, &flow))
+            {
+                continue;
+            }
+            let active = flow.last_active.load(Ordering::Relaxed);
+            if active != recent.seen {
+                recent.seen = active;
+                recency.push_back(recent);
+                continue;
+            }
+            drop(recency);
+            if let Some((id, flow)) = self
+                .flows
+                .remove_if(&recent.id, |_, current| Arc::ptr_eq(current, &flow))
+            {
                 flow.detach(&id);
             }
+            return;
         }
     }
+
+    pub(super) fn forget_departed(&self) {
+        lock(&self.recency).retain(|recent| recent.flow.strong_count() > 0);
+    }
+}
+
+struct Recent {
+    id: FlowId,
+    flow: Weak<Flow>,
+    seen: u32,
 }
 
 pub(crate) fn handle(
@@ -165,7 +201,7 @@ pub(super) fn start_flow(
         sniffed: Notify::new(),
         last_active: AtomicU32::new(inner.nat.now()),
     });
-    inner.nat.flows.insert(id.clone(), flow.clone());
+    inner.nat.insert(id.clone(), flow.clone());
     start_scanner(inner);
 
     let task = establish(inner.clone(), runtime, flow, id, state, reply);

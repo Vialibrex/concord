@@ -486,19 +486,43 @@ mod tests {
             dst: target(),
         };
         lock(&session.flows).insert(id.clone());
-        inner.nat.flows.insert(
-            id,
-            Arc::new(Flow {
-                ready: OnceLock::new(),
-                pending: Mutex::new(Pending {
-                    queue: VecDeque::new(),
-                    sniffer: None,
-                }),
-                sniffed: Notify::new(),
-                last_active: AtomicU32::new(0),
-            }),
-        );
+        inner.nat.flows.insert(id, pending_flow());
         session
+    }
+
+    fn pending_flow() -> Arc<Flow> {
+        Arc::new(Flow {
+            ready: OnceLock::new(),
+            pending: Mutex::new(Pending {
+                queue: VecDeque::new(),
+                sniffer: None,
+            }),
+            sniffed: Notify::new(),
+            last_active: AtomicU32::new(0),
+        })
+    }
+
+    #[test]
+    fn a_full_table_evicts_the_flow_seen_active_least_recently() {
+        let nat = UdpNat::default();
+        let flows: Vec<_> = (1..=3)
+            .map(|port| {
+                let id = FlowId {
+                    src: SocketAddr::from(([10, 0, 0, 2], port)),
+                    dst: target(),
+                };
+                let flow = pending_flow();
+                nat.insert(id.clone(), flow.clone());
+                (id, flow)
+            })
+            .collect();
+        flows[0].1.last_active.store(1, Ordering::Relaxed);
+        nat.evict_oldest();
+        let held = |at: usize| nat.flows.contains_key(&flows[at].0);
+        assert!(held(0) && !held(1) && held(2));
+        nat.flows.remove(&flows[2].0);
+        nat.evict_oldest();
+        assert!(nat.flows.is_empty());
     }
 
     fn ready_flow(session: &Arc<Session>) -> Arc<Flow> {

@@ -27,6 +27,7 @@ pub(super) async fn scan(inner: Arc<Inner>) {
             }
             keep
         });
+        nat.forget_departed();
         for slot in nat.slots.iter() {
             if let Some(session) = slot.value().get()
                 && idle(session.last_active.load(Ordering::Relaxed))
