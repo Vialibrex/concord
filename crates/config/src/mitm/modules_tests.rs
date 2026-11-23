@@ -154,8 +154,8 @@ fn a_module_that_cannot_be_read_or_is_named_twice_takes_no_effect() {
     assert!(!profile.rules.iter().any(|rule| rule.contains("twice.test")));
 }
 
-/// Lines of a Surge `Block_HTTPDNS.sgmodule` whose request rules the host once showed as an
-/// unsupported rule type.
+/// Lines of a Surge module that blocks HTTP DNS services, whose request rules the host once
+/// showed as an unsupported rule type.
 #[test]
 fn a_modules_user_agent_and_url_regex_rules_are_kept() {
     let lines = [

@@ -332,17 +332,17 @@ async fn stash_and_surge_rule_sets_match_by_their_own_behavior_and_format() {
 
 const SCRIPTED: &str = "$done({response: {status: 200, body: 'scripted'}})";
 
-/// Quantumult X's script rewrites, each kind once, as `fmz200/wool_scripts`' rewrite snippet
-/// writes them, then a Surge script; every script is fetched from `files`.
+/// Quantumult X's script rewrites, each kind once, as a rewrite snippet writes them, then a
+/// Surge script; every script is fetched from `files`.
 fn script_modules(origin: u16, files: u16) -> [String; 2] {
     let qx = format!(
-        "# > 12306\n\
-         ^http://localhost:\\d+/echo url script-echo-response http://127.0.0.1:{files}/12306.js\n\
+        "# > sample\n\
+         ^http://localhost:\\d+/echo url script-echo-response http://127.0.0.1:{files}/echo.js\n\
          ^http://localhost:\\d+/analyze url script-analyze-echo-response http://127.0.0.1:{files}/a.js\n\
          ^http://localhost:\\d+/qh url script-request-header http://127.0.0.1:{files}/qh.js\n\
          ^http://localhost:\\d+/qb url script-request-body http://127.0.0.1:{files}/qb.js\n\
          ^http://localhost:\\d+/sh url script-response-header http://127.0.0.1:{files}/sh.js\n\
-         ^http://localhost:\\d+/sb url script-response-body http://127.0.0.1:{files}/555Ad.js\n\
+         ^http://localhost:\\d+/sb url script-response-body http://127.0.0.1:{files}/sb.js\n\
          0 9 * * * http://127.0.0.1:{files}/task.js, tag=task\n\
          hostname = localhost:{origin}\n"
     );
