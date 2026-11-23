@@ -135,6 +135,11 @@ struct RunArgs {
     #[arg(help = "Connections each tcp-crr window opens, in place of the tier's count.")]
     #[arg(long)]
     crr_conns: Option<usize>,
+    #[arg(
+        help = "tcp-rr also reports slow_pct, the percentage of transactions slower than this many milliseconds."
+    )]
+    #[arg(long)]
+    rr_slow_ms: Option<f64>,
     #[arg(help = "Connections each page-load page opens at once. Default 16.")]
     #[arg(long)]
     page_conns: Option<usize>,
@@ -462,6 +467,9 @@ fn run(args: RunArgs) -> Result<bool, String> {
             return Err("--crr-conns must be positive".into());
         }
         plan.crr_conns = count;
+    }
+    if let Some(ms) = args.rr_slow_ms {
+        plan.rr_slow = Some(seconds(ms / 1e3));
     }
     if let Some(count) = args.page_conns {
         if count == 0 {

@@ -203,6 +203,7 @@ pub fn meta(key: &str) -> Meta {
         "footprint_mib" => ("MiB", Lower),
         "rss_mib" => ("RSS MiB", Lower),
         "loss_pct" => ("loss %", Lower),
+        "slow_pct" => ("transactions above --rr-slow-ms %", Lower),
         "error_pct" => ("errors %", Lower),
         "kib_per_conn" => ("KiB/held connection", Lower),
         "retained_kib_per_conn" => ("KiB/connection left after close", Lower),

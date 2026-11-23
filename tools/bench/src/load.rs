@@ -153,6 +153,7 @@ pub struct Ctx {
     pub pids: Pids,
     pub flows: usize,
     pub crr_conns: usize,
+    pub rr_slow: Option<Duration>,
     pub crr_concurrency: usize,
     pub page_conns: usize,
     pub udp_size: usize,
@@ -596,7 +597,15 @@ async fn rr(ctx: &Ctx) -> Io<Metrics> {
         stream.read_exact(&mut reply).await.map_err(io("rr"))?;
         samples.push(sent.elapsed().as_nanos() as u64);
     }
-    let metrics = rr_metrics(started, windows.close(), &mut samples);
+    let mut metrics = rr_metrics(started, windows.close(), &mut samples);
+    if let Some(slow) = ctx.rr_slow.filter(|_| !samples.is_empty()) {
+        let slow = slow.as_nanos() as u64;
+        let over = samples.iter().filter(|&&ns| ns > slow).count();
+        metrics.insert(
+            "slow_pct".into(),
+            over as f64 * 100.0 / samples.len() as f64,
+        );
+    }
     socks::abort(stream);
     Ok(metrics)
 }

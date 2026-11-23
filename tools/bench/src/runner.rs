@@ -498,6 +498,7 @@ impl Rig {
             pids,
             flows: self.plan.flows,
             crr_conns: self.plan.crr_conns,
+            rr_slow: self.plan.rr_slow,
             crr_concurrency: self.plan.crr_concurrency,
             page_conns: self.plan.page_conns,
             udp_size: self.plan.udp_size,
