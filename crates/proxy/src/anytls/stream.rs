@@ -1,11 +1,10 @@
 use std::io;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, ready};
 
-use bytes::Bytes;
-use concord_common::stream_buffer::{self, BufferRequirements, StreamBuffer};
+use concord_common::stream_buffer::{self, BufferRequirements, ReadBufferOptions, StreamBuffer};
 use concord_common::{BoxRead, BoxWrite, CoreError, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
@@ -34,8 +33,9 @@ impl Drop for Closer {
 
 struct Inbox {
     chunks: mpsc::Receiver<Chunk>,
-    pending: Bytes,
+    pending: StreamBuffer,
     ended: bool,
+    reads: Arc<OnceLock<ReadBufferOptions>>,
 }
 
 impl Inbox {
@@ -45,17 +45,51 @@ impl Inbox {
         done: &AtomicBool,
         out: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if ready!(self.poll_pending(cx, done))? {
+            let take = self.pending.len().min(out.remaining());
+            out.put_slice(self.pending.as_slice().get(..take).unwrap_or_default());
+            self.pending.consume(take)?;
+        }
+        Poll::Ready(Ok(()))
+    }
+
+    /// Hands over the received frame itself when it has the writer's room.
+    fn poll_read_buffer(
+        &mut self,
+        cx: &mut Context<'_>,
+        done: &AtomicBool,
+        options: ReadBufferOptions,
+    ) -> Poll<io::Result<StreamBuffer>> {
+        if self.reads.get().is_none() {
+            let _ = self.reads.set(options);
+        }
+        if !ready!(self.poll_pending(cx, done))? {
+            return Poll::Ready(Ok(StreamBuffer::default()));
+        }
+        if options.fits(&self.pending) {
+            return Poll::Ready(Ok(self.pending.take_owned()));
+        }
+        let mut buffer = options.take();
+        let filled = {
+            let mut read = ReadBuf::new(buffer.spare_mut());
+            ready!(self.poll_read(cx, done, &mut read))?;
+            read.filled().len()
+        };
+        buffer.advance(filled)?;
+        Poll::Ready(Ok(buffer))
+    }
+
+    /// Ready(true) when bytes are pending, Ready(false) at the end of the stream.
+    fn poll_pending(&mut self, cx: &mut Context<'_>, done: &AtomicBool) -> Poll<io::Result<bool>> {
         loop {
             if !self.pending.is_empty() {
-                let take = self.pending.len().min(out.remaining());
-                out.put_slice(&self.pending.split_to(take));
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(Ok(true));
             }
             if self.ended {
-                return Poll::Ready(Ok(()));
+                return Poll::Ready(Ok(false));
             }
             match ready!(self.chunks.poll_recv(cx)) {
-                Some(Chunk::Data(bytes)) => self.pending = bytes,
+                Some(Chunk::Data(buffer)) => self.pending = buffer,
                 Some(Chunk::Fin) => self.ended = true,
                 Some(Chunk::Error(message)) => {
                     self.ended = true;
@@ -171,13 +205,15 @@ impl AnyTlsStream {
         session: Arc<Session>,
         chunks: mpsc::Receiver<Chunk>,
         done: Arc<AtomicBool>,
+        reads: Arc<OnceLock<ReadBufferOptions>>,
     ) -> Self {
         let sink = PollSender::new(session.sender());
         AnyTlsStream {
             inbox: Inbox {
                 chunks,
-                pending: Bytes::new(),
+                pending: StreamBuffer::default(),
                 ended: false,
+                reads,
             },
             outbox: Outbox {
                 sink,
@@ -266,8 +302,20 @@ impl AsyncWrite for WriteHalf {
 }
 
 impl Stream for AnyTlsStream {
-    concord_common::stream_policy!(own: into_split, write_requirements, poll_write_buffer;
-        default: read_requirements, poll_read_buffer, raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp);
+    concord_common::stream_policy!(own: into_split, poll_read_buffer, write_requirements, poll_write_buffer;
+        default: read_requirements, raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp);
+
+    fn poll_read_buffer(
+        &mut self,
+        cx: &mut Context<'_>,
+        options: ReadBufferOptions,
+    ) -> Poll<io::Result<StreamBuffer>> {
+        let buffer = ready!(self.inbox.poll_read_buffer(cx, &self.closer.done, options))?;
+        if !buffer.is_empty() {
+            self.outbox.wrote_since_read = false;
+        }
+        Poll::Ready(Ok(buffer))
+    }
 
     fn write_requirements(&self) -> BufferRequirements {
         BufferRequirements {

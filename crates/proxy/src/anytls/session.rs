@@ -2,13 +2,12 @@ use std::collections::HashMap;
 use std::future::poll_fn;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use bytes::Bytes;
-use concord_common::stream_buffer::StreamBuffer;
+use concord_common::stream_buffer::{ReadBufferOptions, StreamBuffer};
 use concord_common::{BoxRead, BoxStream, Tasks};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -41,7 +40,7 @@ pub(super) enum Out {
 }
 
 pub(super) enum Chunk {
-    Data(Bytes),
+    Data(StreamBuffer),
     Fin,
     Error(String),
 }
@@ -49,6 +48,7 @@ pub(super) enum Chunk {
 struct Entry {
     tx: mpsc::Sender<Chunk>,
     done: Arc<AtomicBool>,
+    reads: Arc<OnceLock<ReadBufferOptions>>,
 }
 
 pub(super) struct Session {
@@ -168,6 +168,7 @@ impl Session {
         let sid = self.next_sid.fetch_add(1, Ordering::AcqRel) + 1;
         let (tx, rx) = mpsc::channel(CHUNK_QUEUE);
         let done = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(OnceLock::new());
         if sid >= 2 && self.peer_version.load(Ordering::Acquire) >= 2 {
             let session = self.clone();
             let watch = self.tasks.spawn(async move {
@@ -183,6 +184,7 @@ impl Session {
             Entry {
                 tx,
                 done: done.clone(),
+                reads: reads.clone(),
             },
         );
         let sent = async {
@@ -207,6 +209,7 @@ impl Session {
             self.clone(),
             rx,
             done,
+            reads,
         ))
     }
 
@@ -236,6 +239,32 @@ impl Session {
         }
     }
 
+    /// Reads a data frame into a buffer with the room its stream's writer asked for, so the
+    /// stream can hand the frame on whole.
+    async fn push(&self, source: &mut BoxRead, sid: u32, len: usize) -> io::Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let target = lock(&self.streams)
+            .get(&sid)
+            .map(|entry| (entry.tx.clone(), entry.reads.get().copied()));
+        let options = match target.as_ref().and_then(|(_, options)| *options) {
+            Some(options) => options,
+            None => ReadBufferOptions::for_copy(Default::default(), Default::default())?,
+        };
+        let mut buffer = options.take_for_read(len, 0)?;
+        let payload = buffer
+            .spare_mut()
+            .get_mut(..len)
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        source.read_exact(payload).await?;
+        buffer.advance(len)?;
+        if let Some((tx, _)) = target {
+            let _ = tx.send(Chunk::Data(buffer)).await;
+        }
+        Ok(())
+    }
+
     async fn dispatch(self: &Arc<Self>, source: &mut BoxRead) -> io::Result<()> {
         loop {
             let mut header = [0u8; HEADER];
@@ -243,11 +272,14 @@ impl Session {
             let [cmd, a, b, c, d, hi, lo] = header;
             let sid = u32::from_be_bytes([a, b, c, d]);
             let len = usize::from(u16::from_be_bytes([hi, lo]));
+            if cmd == CMD_PSH {
+                self.push(source, sid, len).await?;
+                continue;
+            }
             let mut payload = vec![0u8; len];
             let has_payload = matches!(
                 cmd,
-                CMD_PSH
-                    | CMD_SYNACK
+                CMD_SYNACK
                     | CMD_WASTE
                     | CMD_SETTINGS
                     | CMD_ALERT
@@ -260,12 +292,6 @@ impl Session {
                 payload.clear();
             }
             match cmd {
-                CMD_PSH if !payload.is_empty() => {
-                    let tx = lock(&self.streams).get(&sid).map(|entry| entry.tx.clone());
-                    if let Some(tx) = tx {
-                        let _ = tx.send(Chunk::Data(Bytes::from(payload))).await;
-                    }
-                }
                 CMD_SYNACK => {
                     if let Some(watch) = lock(&self.synack_watch).take() {
                         watch.abort();
@@ -402,7 +428,7 @@ mod tests {
         let (_, chunks) = mpsc::channel(1);
         let done = Arc::new(AtomicBool::new(false));
         (
-            super::super::stream::AnyTlsStream::new(1, session, chunks, done),
+            super::super::stream::AnyTlsStream::new(1, session, chunks, done, Default::default()),
             queue,
             sender,
         )
@@ -771,6 +797,57 @@ mod tests {
         assert_eq!(stream.read(&mut got).await.unwrap(), 0);
         drop(stream);
         assert_eq!(pool.take_idle().map(|idle| idle.seq), Some(1));
+    }
+
+    async fn read_buffer(
+        stream: &mut super::super::stream::AnyTlsStream,
+        options: ReadBufferOptions,
+    ) -> StreamBuffer {
+        use concord_common::Stream;
+
+        poll_fn(|cx| stream.poll_read_buffer(cx, options))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_data_frame_reaches_the_relay_in_the_buffer_it_was_read_into() {
+        use concord_common::Stream;
+        use concord_common::stream_buffer::BufferRequirements;
+        use std::task::Waker;
+
+        let (near, mut far) = tokio::io::duplex(1 << 17);
+        let pool = Pool::new(false, 0, Tasks::default());
+        let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
+        let session = Session::start(Box::new(near), 1, &pool, padding, "");
+        let mut stream = session.open_stream().await.unwrap();
+        let early: Vec<u8> = (0..MAX_FRAME).map(|i| i.to_le_bytes()[1]).collect();
+        far.write_all(&frame(CMD_PSH, 1, &early)).await.unwrap();
+        let writer = BufferRequirements {
+            front: 16,
+            rear: 4,
+            ..Default::default()
+        };
+        let options = ReadBufferOptions::for_copy(stream.read_requirements(), writer).unwrap();
+
+        let mut copied = vec![0];
+        stream.read_exact(&mut copied).await.unwrap();
+        while copied.len() < early.len() {
+            let buffer = read_buffer(&mut stream, options).await;
+            assert!(buffer.len() < MAX_FRAME);
+            assert!(options.fits(&buffer));
+            copied.extend_from_slice(buffer.as_slice());
+        }
+        assert_eq!(copied, early);
+
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(stream.poll_read_buffer(&mut cx, options).is_pending());
+        let late: Vec<u8> = early.iter().rev().copied().collect();
+        far.write_all(&frame(CMD_PSH, 1, &late)).await.unwrap();
+        let handed = read_buffer(&mut stream, options).await;
+        assert_eq!(handed.as_slice(), late);
+        assert_eq!((handed.headroom(), handed.tailroom()), (16, 4));
+        session.close();
     }
 
     #[tokio::test]

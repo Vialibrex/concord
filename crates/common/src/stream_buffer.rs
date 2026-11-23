@@ -209,6 +209,11 @@ impl ReadBufferOptions {
         Ok(Self { capacity, ..self }.take())
     }
 
+    /// Whether a buffer read before these options were known leaves the writer its room.
+    pub fn fits(&self, buffer: &StreamBuffer) -> bool {
+        buffer.headroom() >= self.front && buffer.tailroom() >= self.rear
+    }
+
     pub fn take(self) -> StreamBuffer {
         let rounded = self
             .capacity
