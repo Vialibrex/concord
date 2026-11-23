@@ -154,6 +154,30 @@ fn a_module_that_cannot_be_read_or_is_named_twice_takes_no_effect() {
     assert!(!profile.rules.iter().any(|rule| rule.contains("twice.test")));
 }
 
+/// Lines of a Surge `Block_HTTPDNS.sgmodule` whose request rules the host once showed as an
+/// unsupported rule type.
+#[test]
+fn a_modules_user_agent_and_url_regex_rules_are_kept() {
+    let lines = [
+        "DOMAIN-KEYWORD,httpdns,REJECT",
+        "USER-AGENT,httpdns*,REJECT",
+        "USER-AGENT,Httpsdns*,REJECT",
+        r"URL-REGEX,^http:\/\/((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(?:\/v?[0-9]+)?\/(?:sign_)?(?:(?:d|ss)[46]?|resolve)\?,REJECT",
+        r"URL-REGEX,^http:\/\/\[[0-9a-fA-F:]+\](?:\/v?[0-9]+)?\/(?:sign_)?(?:(?:d|ss)[46]?|resolve)\?,REJECT",
+    ];
+    let text = format!("#!name=HTTPDNS\n[Rule]\n{}\n", lines.join("\n"));
+    let profile = profile(&inline("httpdns", &text), BTreeMap::new());
+    let module = &profile.modules[0];
+    assert!(module.def.ignored.is_empty(), "{:?}", module.def.ignored);
+    assert!(
+        module.refused_rules.is_empty(),
+        "{:?}",
+        module.refused_rules
+    );
+    let rules: Vec<&str> = profile.rules.iter().take(lines.len()).collect();
+    assert_eq!(rules, lines);
+}
+
 #[test]
 fn a_module_its_requirement_turns_off_is_not_merged() {
     let text = "#!requirement=CORE_VERSION < 1\n[Rule]\nDOMAIN,off.test,REJECT\n";
