@@ -255,7 +255,7 @@ mod tests {
         assert!(list.matches("good.test", 443));
         assert_eq!(
             errors.first().map(String::as_str),
-            Some("hostname \"bad host.test\": unsupported character ' '")
+            Some("hostname \"bad host.test\": unsupported character U+0020")
         );
     }
 

@@ -461,7 +461,7 @@ mitm:
                 (
                     "mitm_line".into(),
                     "mitm.hostname[0]".into(),
-                    "line 4: \"a.test, bad host\": \"bad host\": unsupported character ' '".into(),
+                    "line 4: \"a.test, bad host\": \"bad host\": unsupported character U+0020".into(),
                 ),
                 (
                     "mitm_line".into(),

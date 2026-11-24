@@ -116,8 +116,8 @@ fn a_line_whose_items_partly_apply_has_a_view_of_those_and_an_issue() {
         issues,
         json!({
             "hostname": [
-                {"index": 0, "kind": "invalid", "message": "\"bad host\": unsupported character ' '"},
-                {"index": 1, "kind": "invalid", "message": "\"bad host\": unsupported character ' '"},
+                {"index": 0, "kind": "invalid", "message": "\"bad host\": unsupported character U+0020"},
+                {"index": 1, "kind": "invalid", "message": "\"bad host\": unsupported character U+0020"},
             ],
             "client-source-address": [
                 {"index": 0, "kind": "invalid", "message": "invalid address or CIDR \"lan\""},

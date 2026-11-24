@@ -22,12 +22,14 @@ pub fn quote(text: &str) -> String {
     out
 }
 
-/// Go's `%q` for a rune.
+/// Go's `%q` for a rune, except that whitespace, which shows as nothing between quotes, is
+/// named by its code point.
 pub fn quote_char(c: char) -> String {
     match c {
         '\'' => "'\\''".to_string(),
         '\\' => "'\\\\'".to_string(),
         c if c.is_control() => format!("'\\x{:02x}'", c as u32),
+        c if c.is_whitespace() => format!("U+{:04X}", c as u32),
         c => format!("'{c}'"),
     }
 }
@@ -167,6 +169,16 @@ mod tests {
     fn regex_backslashes_survive_quotes() {
         let fields = split_fields(r#"a "b\d+" c"#).unwrap();
         assert_eq!(fields[1].text, r"b\d+");
+    }
+
+    #[test]
+    fn a_quoted_character_shows_whitespace_by_its_code_point() {
+        assert_eq!(quote_char('a'), "'a'");
+        assert_eq!(quote_char('\''), r"'\''");
+        assert_eq!(quote_char('\u{7}'), r"'\x07'");
+        assert_eq!(quote_char(' '), "U+0020");
+        assert_eq!(quote_char('\u{a0}'), "U+00A0");
+        assert_eq!(quote_char('\u{3000}'), "U+3000");
     }
 
     #[test]

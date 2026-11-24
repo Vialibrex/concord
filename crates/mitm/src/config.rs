@@ -360,7 +360,7 @@ mod tests {
         let want = vec![Issue {
             index: 1,
             kind: IssueKind::Invalid,
-            message: "\"bad host\": unsupported character ' '".to_string(),
+            message: "\"bad host\": unsupported character U+0020".to_string(),
         }];
         assert_eq!(issues, BTreeMap::from([("hostname".to_string(), want)]));
     }
