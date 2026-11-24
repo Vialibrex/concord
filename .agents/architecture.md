@@ -124,9 +124,9 @@ like any inbound. Receive rings are owned mmaps that opt out of transparent huge
 
 The driver is one Tokio task per queue (`tun/src/stack/driver.rs`). Each poll runs rounds of device reads, stack
 input, timers and transmit until nothing is left or Tokio's cooperative budget, which every device read and write
-draws on, is spent, and a poll that still has work wakes itself, which puts it behind the worker's other tasks. A round reads at most `RX_BATCH` packets; on macOS, the one
-device that returns more than one packet per read, a read asks for `RX_BATCH_START` at first, twice as many after a
-full read and half as many after one under half full. Before each pass it drains its own poller under `OwnWake`
+draws on, is spent, and a poll that still has work wakes itself, which puts it behind the worker's other tasks. A
+round reads at most `RX_BATCH` packets; on macOS, the one device that returns more than one packet per read, a read
+asks for `RX_BATCH_START` at first, twice as many after a full read and half as many after one under half full. Before each pass it drains its own poller under `OwnWake`
 (`stack/own_wake.rs`), so the wakes that drain raises for the driver itself do not send it back through the
 scheduler. On Linux and Android the device and the sockets of adopted sessions sit on a queue poller
 (`tun/src/reactor.rs`): while the driver is busy they stay there, and when it goes idle `Reactor::set_busy` parks on
