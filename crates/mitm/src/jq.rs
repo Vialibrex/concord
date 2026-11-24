@@ -1,8 +1,9 @@
-use std::sync::OnceLock;
+use std::sync::{LazyLock, OnceLock};
 
 use concord_config::mitm::text::quote;
 use concord_config::mitm::{IssueKind, LineError};
 use jaq_core::compile;
+use jaq_core::load::parse::Def;
 use jaq_core::load::{Arena, File, Loader, lex, parse};
 use jaq_core::{Compiler, Ctx, Vars, data, unwrap_valr};
 use jaq_json::{Val, read};
@@ -78,15 +79,11 @@ impl Jq {
 }
 
 fn build(code: &str) -> Result<Filter, JqError> {
-    let defs = jaq_core::defs()
-        .chain(jaq_std::defs())
-        .chain(jaq_json::defs())
-        .chain(jq_defs());
     let funs = jaq_core::funs()
         .chain(jaq_std::funs())
         .chain(jaq_json::funs());
     let arena = Arena::default();
-    let modules = Loader::new(defs)
+    let modules = Loader::new(prelude().iter().cloned())
         .load(&arena, File { code, path: () })
         .map_err(|errors| load_error(code, errors))?;
     Compiler::default()
@@ -95,9 +92,22 @@ fn build(code: &str) -> Result<Filter, JqError> {
         .map_err(compile_error)
 }
 
+/// The definitions every filter is loaded with, parsed once rather than for each of the
+/// filters a module lists.
+fn prelude() -> &'static [Def<&'static str>] {
+    static PRELUDE: LazyLock<Vec<Def<&'static str>>> = LazyLock::new(|| {
+        jaq_core::defs()
+            .chain(jaq_std::defs())
+            .chain(jaq_json::defs())
+            .chain(jq_defs())
+            .collect()
+    });
+    &PRELUDE
+}
+
 /// jq 1.7 builtins that jaq leaves out: the SQL-style operators, the stream conversions and
 /// the CSV and TSV formats.
-fn jq_defs() -> impl Iterator<Item = jaq_core::load::parse::Def<&'static str>> {
+fn jq_defs() -> impl Iterator<Item = Def<&'static str>> {
     jaq_core::load::parse(include_str!("jq.jq"), |p| p.defs())
         .unwrap_or_default()
         .into_iter()
