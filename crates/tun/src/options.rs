@@ -2,8 +2,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::route::Os;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Prefix {
     addr: IpAddr,
@@ -198,12 +196,13 @@ impl TunOptions {
 
     /// A macOS utun is named by its kernel unit, so any other name is left for the kernel to pick,
     /// as mihomo picks one itself.
-    pub(crate) fn device_name(&self, os: Os) -> Option<&str> {
+    #[cfg(not(target_os = "android"))]
+    pub(crate) fn device_name(&self, os: crate::route::Os) -> Option<&str> {
         let name = self.device.as_deref().filter(|name| !name.is_empty())?;
         let named_by_unit = name
             .strip_prefix("utun")
             .is_some_and(|unit| !unit.is_empty() && unit.bytes().all(|byte| byte.is_ascii_digit()));
-        (os != Os::MacOs || named_by_unit).then_some(name)
+        (os != crate::route::Os::MacOs || named_by_unit).then_some(name)
     }
 
     pub(crate) fn inet4_broadcast(&self) -> Option<IpAddr> {
@@ -233,7 +232,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "android"))]
     fn macos_leaves_a_name_that_is_not_a_utun_unit_to_the_kernel() {
+        use crate::route::Os;
+
         let named = |device: &str| TunOptions {
             device: Some(device.to_owned()),
             ..TunOptions::default()
