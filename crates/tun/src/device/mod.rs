@@ -253,7 +253,9 @@ impl TunDevice {
             Some(name) => builder = builder.name(name),
             None => {
                 if let Some(name) = options.device.as_deref().filter(|name| !name.is_empty()) {
-                    tracing::warn!("tun device name {name} is not a utun unit; the system names it");
+                    tracing::warn!(
+                        "tun device name {name} is not a utun unit; the system names it"
+                    );
                 }
             }
         }

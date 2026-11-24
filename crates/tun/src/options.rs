@@ -200,9 +200,9 @@ impl TunOptions {
     /// as mihomo picks one itself.
     pub(crate) fn device_name(&self, os: Os) -> Option<&str> {
         let name = self.device.as_deref().filter(|name| !name.is_empty())?;
-        let named_by_unit = name.strip_prefix("utun").is_some_and(|unit| {
-            !unit.is_empty() && unit.bytes().all(|byte| byte.is_ascii_digit())
-        });
+        let named_by_unit = name
+            .strip_prefix("utun")
+            .is_some_and(|unit| !unit.is_empty() && unit.bytes().all(|byte| byte.is_ascii_digit()));
         (os != Os::MacOs || named_by_unit).then_some(name)
     }
 
