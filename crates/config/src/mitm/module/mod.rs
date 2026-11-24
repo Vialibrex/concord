@@ -263,6 +263,7 @@ impl ModuleDef {
                 read: Items {
                     items: line.def.clone(),
                     error: None,
+                    rejected: Vec::new(),
                 },
                 origin: None,
             }

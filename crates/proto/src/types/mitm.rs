@@ -105,18 +105,23 @@ dto! {
         pub timeout_ms: u64,
     }
 
-    /// The entries of a line in force, without those that could not be read.
+    /// Each item of a line in the order written; one that could not be read has a `reason` and
+    /// is not in force.
     pub struct MitmHosts {
         pub entries: Vec<MitmHostEntry>,
     }
 
     pub struct MitmHostEntry {
-        /// Lower case, without a trailing dot or IPv6 brackets; may hold `*` and `?`.
+        /// Lower case, without a trailing dot or IPv6 brackets; may hold `*` and `?`. An item
+        /// that could not be read is as written, without its leading `-`.
         pub host: String,
         /// Absent when the entry names none, which covers 443 and 80.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub port: Option<u16>,
         pub exclude: bool,
+        /// Why the item could not be read, without the item itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub reason: Option<String>,
     }
 
     /// The entries of a line in force: those before the first that could not be read.

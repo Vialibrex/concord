@@ -1,7 +1,8 @@
 use std::net::IpAddr;
 
 use concord_config::mitm::{
-    HostEntryDef, IP_ADDRESS, IPV4_ADDRESS, IPV6_ADDRESS, LineError, SIMPLE_HOSTNAME,
+    HostEntryDef, IP_ADDRESS, IPV4_ADDRESS, IPV6_ADDRESS, Items, RejectedItem, SIMPLE_HOSTNAME,
+    parse_host_line,
 };
 
 use crate::view::{HostEntryView, HostsView, LineView};
@@ -19,9 +20,13 @@ impl HostList {
         let mut list = HostList::default();
         let mut errors = Vec::new();
         for line in lines {
-            let (entries, line_errors) = parse_host_line(line);
-            list.0.extend(entries.0);
-            errors.extend(line_errors.into_iter().map(|err| format!("hostname {err}")));
+            let (entries, rejected) = parse_host_line(line);
+            list.0.extend(entries);
+            errors.extend(
+                rejected
+                    .iter()
+                    .map(|item| format!("hostname {}", item.error())),
+            );
         }
         (list, errors)
     }
@@ -62,23 +67,6 @@ impl HostList {
             .find(|entry| covers(entry, port, sniffed) && names(&entry.pattern, &host))
     }
 
-    /// `None` while the list has no entry, as a line none of whose items could be read.
-    pub(crate) fn view(&self) -> Option<LineView> {
-        (!self.0.is_empty()).then(|| {
-            LineView::Hosts(HostsView {
-                entries: self
-                    .0
-                    .iter()
-                    .map(|entry| HostEntryView {
-                        host: entry.pattern.clone(),
-                        port: (!entry.bare).then_some(entry.port),
-                        exclude: entry.exclude,
-                    })
-                    .collect(),
-            })
-        })
-    }
-
     pub(crate) fn extend(&mut self, other: HostList) {
         self.0.extend(other.0);
     }
@@ -96,10 +84,38 @@ fn covers(entry: &HostEntryDef, port: u16, sniffed: bool) -> bool {
     entry.port == 0 || entry.port == port
 }
 
-/// One error per bad item, naming it; the entries of the good items apply all the same.
-pub(crate) fn parse_host_line(line: &str) -> (HostList, Vec<LineError>) {
-    let (entries, errors) = concord_config::mitm::parse_host_line(line);
-    (HostList(entries), errors)
+/// Each item of a hostname line in the order written, a bad one with why; `None` for a line
+/// without items.
+pub(crate) fn hosts_view(read: &Items<HostEntryDef>) -> Option<LineView> {
+    let mut good = read.items.iter().map(|entry| HostEntryView {
+        host: entry.pattern.clone(),
+        port: (!entry.bare).then_some(entry.port),
+        exclude: entry.exclude,
+        reason: None,
+    });
+    let mut bad = read.rejected.iter().peekable();
+    let mut entries = Vec::with_capacity(read.items.len() + read.rejected.len());
+    for at in 0..read.items.len() + read.rejected.len() {
+        let entry = match bad.next_if(|item| item.at == at) {
+            Some(item) => rejected_view(item),
+            None => match good.next() {
+                Some(entry) => entry,
+                None => break,
+            },
+        };
+        entries.push(entry);
+    }
+    (!entries.is_empty()).then_some(LineView::Hosts(HostsView { entries }))
+}
+
+fn rejected_view(item: &RejectedItem) -> HostEntryView {
+    let host = item.item.strip_prefix('-');
+    HostEntryView {
+        host: host.unwrap_or(&item.item).to_string(),
+        port: None,
+        exclude: host.is_some(),
+        reason: Some(item.reason.message.clone()),
+    }
 }
 
 impl From<Vec<HostEntryDef>> for HostList {

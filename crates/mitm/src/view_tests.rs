@@ -98,12 +98,12 @@ fn each_list_reads_as_its_view() {
 }
 
 #[test]
-fn a_line_whose_items_partly_apply_has_a_view_of_those_and_an_issue() {
+fn a_line_whose_items_partly_apply_has_a_view_and_an_issue() {
     let (_home, env) = env();
     let raw = RawConfig {
         hostname: lines(&[
             "a.test, bad host, -[::1]:8443",
-            "bad host",
+            "bad host, -c.test:99999",
             "# note",
             "*.b.test:443",
         ]),
@@ -117,7 +117,7 @@ fn a_line_whose_items_partly_apply_has_a_view_of_those_and_an_issue() {
         json!({
             "hostname": [
                 {"index": 0, "kind": "invalid", "message": "\"bad host\": unsupported character U+0020"},
-                {"index": 1, "kind": "invalid", "message": "\"bad host\": unsupported character U+0020"},
+                {"index": 1, "kind": "invalid", "message": "\"bad host\": unsupported character U+0020\n\"-c.test:99999\": invalid port \"99999\""},
             ],
             "client-source-address": [
                 {"index": 0, "kind": "invalid", "message": "invalid address or CIDR \"lan\""},
@@ -131,7 +131,11 @@ fn a_line_whose_items_partly_apply_has_a_view_of_those_and_an_issue() {
             "hostname": [
                 {"index": 0, "view": {"type": "hosts", "entries": [
                     {"host": "a.test", "exclude": false},
+                    {"host": "bad host", "exclude": false, "reason": "unsupported character U+0020"},
                     {"host": "::1", "port": 8443, "exclude": true}]}},
+                {"index": 1, "view": {"type": "hosts", "entries": [
+                    {"host": "bad host", "exclude": false, "reason": "unsupported character U+0020"},
+                    {"host": "c.test:99999", "exclude": true, "reason": "invalid port \"99999\""}]}},
                 {"index": 3, "view": {"type": "hosts", "entries": [
                     {"host": "*.b.test", "port": 443, "exclude": false}]}},
             ],

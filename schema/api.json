@@ -5419,7 +5419,7 @@
       "properties": {
         "host": {
           "type": "string",
-          "description": "Lower case, without a trailing dot or IPv6 brackets; may hold `*` and `?`."
+          "description": "Lower case, without a trailing dot or IPv6 brackets; may hold `*` and `?`. An item\nthat could not be read is as written, without its leading `-`."
         },
         "port": {
           "type": [
@@ -5433,6 +5433,13 @@
         },
         "exclude": {
           "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Why the item could not be read, without the item itself."
         }
       },
       "required": [
@@ -5453,7 +5460,7 @@
       "required": [
         "entries"
       ],
-      "description": "The entries of a line in force, without those that could not be read."
+      "description": "Each item of a line in the order written; one that could not be read has a `reason` and\nis not in force."
     },
     "MitmSourceEntry": {
       "type": "object",

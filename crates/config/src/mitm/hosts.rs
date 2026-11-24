@@ -20,21 +20,41 @@ pub const IPV6_ADDRESS: &str = "<ipv6-address>";
 pub const SIMPLE_HOSTNAME: &str = "<simple-hostname>";
 const HOST_TOKENS: [&str; 4] = [IP_ADDRESS, IPV4_ADDRESS, IPV6_ADDRESS, SIMPLE_HOSTNAME];
 
-/// One error per bad item, naming it; the good items apply all the same.
-pub fn parse_host_line(line: &str) -> (Vec<HostEntryDef>, Vec<LineError>) {
+/// An item of a line that could not be read: the item as written, at its place among the
+/// line's items, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RejectedItem {
+    pub at: usize,
+    pub item: String,
+    pub reason: LineError,
+}
+
+impl RejectedItem {
+    /// The reason, naming the item.
+    pub fn error(&self) -> LineError {
+        self.reason.clone().within(&quote(&self.item))
+    }
+}
+
+/// The good items, which apply all the same, and the bad ones.
+pub fn parse_host_line(line: &str) -> (Vec<HostEntryDef>, Vec<RejectedItem>) {
     let mut entries = Vec::new();
-    let mut errors = Vec::new();
-    for item in line.split(',') {
-        let item = item.trim();
-        if item.is_empty() {
-            continue;
-        }
+    let mut rejected = Vec::new();
+    let items = line
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty());
+    for (at, item) in items.enumerate() {
         match parse_host_entry(item) {
             Ok(entry) => entries.push(entry),
-            Err(err) => errors.push(err.within(&quote(item))),
+            Err(reason) => rejected.push(RejectedItem {
+                at,
+                item: item.to_string(),
+                reason,
+            }),
         }
     }
-    (entries, errors)
+    (entries, rejected)
 }
 
 fn parse_host_entry(item: &str) -> Result<HostEntryDef, LineError> {

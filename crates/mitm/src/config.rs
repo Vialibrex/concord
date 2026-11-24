@@ -7,7 +7,7 @@ use concord_config::mitm::text::quote;
 use concord_config::mitm::{HostEntryDef, IssueKind, Items, LineError, MitmDef, MitmLine, Read};
 use serde::Serialize;
 
-use crate::hostlist::HostList;
+use crate::hostlist::{HostList, hosts_view};
 use crate::limits::{Limits, Resolve};
 use crate::rules::{
     Rules, compile_body_rewrite, compile_header_rewrite, compile_map_local, compile_url_rewrite,
@@ -101,10 +101,8 @@ fn each<T>(
 }
 
 fn read_hosts(list: &mut HostList, read: &Items<HostEntryDef>) -> LineRead {
-    let hosts = HostList::from(read.items.clone());
-    let view = hosts.view();
-    list.extend(hosts);
-    items(read, view)
+    list.extend(HostList::from(read.items.clone()));
+    items(read, hosts_view(read))
 }
 
 impl Config {
@@ -136,10 +134,8 @@ impl Config {
             &def.hostname_disabled,
             visit,
             |read, _| {
-                let disabled = HostList::from(read.items.clone());
-                let view = disabled.view();
-                self.hosts.remove(&disabled);
-                items(read, view)
+                self.hosts.remove(&HostList::from(read.items.clone()));
+                items(read, hosts_view(read))
             },
         );
         each(

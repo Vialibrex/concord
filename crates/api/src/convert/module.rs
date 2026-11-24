@@ -272,11 +272,13 @@ fn hosts(view: HostsView) -> MitmHosts {
                     host,
                     port,
                     exclude,
+                    reason,
                 } = entry;
                 MitmHostEntry {
                     host,
                     port,
                     exclude,
+                    reason,
                 }
             })
             .collect(),
@@ -737,11 +739,20 @@ mod tests {
                 timeout_ms: 5000,
             }),
             LineView::Hosts(HostsView {
-                entries: vec![HostEntryView {
-                    host: "*.a.test".into(),
-                    port: Some(443),
-                    exclude: true,
-                }],
+                entries: vec![
+                    HostEntryView {
+                        host: "*.a.test".into(),
+                        port: Some(443),
+                        exclude: true,
+                        reason: None,
+                    },
+                    HostEntryView {
+                        host: "a .test".into(),
+                        port: None,
+                        exclude: false,
+                        reason: some("unsupported character U+0020"),
+                    },
+                ],
             }),
             LineView::Sources(SourcesView {
                 entries: vec![SourceEntryView {

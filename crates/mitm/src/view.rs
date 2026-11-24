@@ -190,6 +190,9 @@ pub struct HostEntryView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     pub exclude: bool,
+    /// Why the item could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

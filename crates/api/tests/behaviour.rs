@@ -2272,11 +2272,20 @@ async fn mitm_validate_answers_each_line_with_its_view_or_its_issue() {
     assert_eq!(
         view("hostname", 0),
         Some(MitmLineView::Hosts(MitmHosts {
-            entries: vec![MitmHostEntry {
-                host: "a.test".into(),
-                port: None,
-                exclude: false,
-            }],
+            entries: vec![
+                MitmHostEntry {
+                    host: "a.test".into(),
+                    port: None,
+                    exclude: false,
+                    reason: None,
+                },
+                MitmHostEntry {
+                    host: "bad host".into(),
+                    port: None,
+                    exclude: false,
+                    reason: Some("unsupported character U+0020".into()),
+                },
+            ],
         }))
     );
     assert!(matches!(

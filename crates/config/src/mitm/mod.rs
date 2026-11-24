@@ -19,8 +19,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub use heads::{HeadConditionsDef, REQUEST_HEAD, RESPONSE_HEAD};
 pub use hosts::{
-    HostEntryDef, IP_ADDRESS, IPV4_ADDRESS, IPV6_ADDRESS, SIMPLE_HOSTNAME, SourceEntryDef,
-    parse_host_line, parse_source_line,
+    HostEntryDef, IP_ADDRESS, IPV4_ADDRESS, IPV6_ADDRESS, RejectedItem, SIMPLE_HOSTNAME,
+    SourceEntryDef, parse_host_line, parse_source_line,
 };
 pub use issue::{IssueKind, LineError};
 pub use pattern::{MULTILINE, check_multiline, check_pattern, multiline, parses, regex_source};
@@ -158,6 +158,8 @@ pub struct MitmLine<T> {
 pub struct Items<T> {
     pub items: Vec<T>,
     pub error: Option<LineError>,
+    /// A hostname line's bad items, each on its own; a source line names its first in `error`.
+    pub rejected: Vec<RejectedItem>,
 }
 
 pub type Read<T> = Result<T, LineError>;
@@ -233,21 +235,29 @@ fn each_line<T>(lines: &[String], read: impl Fn(&str) -> T) -> Vec<MitmLine<T>> 
 
 /// A line's bad items as one error, of the first item's kind.
 pub(crate) fn host_items(line: &str) -> Items<HostEntryDef> {
-    let (items, errors) = parse_host_line(line);
-    let error = errors.first().map(|first| {
-        let message = errors
+    let (items, rejected) = parse_host_line(line);
+    let error = rejected.first().map(|first| {
+        let message = rejected
             .iter()
-            .map(|err| err.message.as_str())
+            .map(|item| item.error().message)
             .collect::<Vec<_>>()
             .join("\n");
-        LineError::new(first.kind, message)
+        LineError::new(first.reason.kind, message)
     });
-    Items { items, error }
+    Items {
+        items,
+        error,
+        rejected,
+    }
 }
 
 pub(crate) fn source_items(line: &str) -> Items<SourceEntryDef> {
     let (items, error) = parse_source_line(line);
-    Items { items, error }
+    Items {
+        items,
+        error,
+        rejected: Vec::new(),
+    }
 }
 
 fn same_reads<T: PartialEq>(lines: &[MitmLine<T>], other: &[MitmLine<T>]) -> bool {
