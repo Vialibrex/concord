@@ -9,7 +9,12 @@ mod android;
 mod apple;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos", windows)))]
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    windows
+)))]
 mod other;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod queued;
