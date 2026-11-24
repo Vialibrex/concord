@@ -154,4 +154,17 @@ mod tests {
             assert_eq!(syntax_parses(source), want, "{source}");
         }
     }
+
+    /// Case folding and the Perl classes skip translation only while regex-syntax's
+    /// `unicode-case` and `unicode-perl` features are on; without them translating these fails.
+    #[test]
+    fn case_folding_and_perl_classes_skip_translation_only_while_it_cannot_fail() {
+        for source in [r"(?i)k\w\d\s", r"(?i:[a-z\w])", r"(?i)[^\d]\S\W\D"] {
+            let tree = ast::parse::Parser::new().parse(source).unwrap();
+            assert!(ast::visit(&tree, CannotFail).is_ok(), "{source}");
+            let translated = Translator::new().translate(source, &tree);
+            assert!(translated.is_ok(), "{source}: {translated:?}");
+            assert!(syntax_parses(source), "{source}");
+        }
+    }
 }
