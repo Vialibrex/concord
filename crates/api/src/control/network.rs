@@ -15,6 +15,7 @@ impl Control {
             self.engine.clone(),
             params.interval_ms,
             params.only_proxy,
+            params.changes_only,
         ))
     }
 

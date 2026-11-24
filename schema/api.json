@@ -3094,6 +3094,11 @@
           "type": "boolean",
           "default": false
         },
+        "changesOnly": {
+          "type": "boolean",
+          "description": "Send a sample only when it differs from the last one sent, the\nsnapshot included; sampling still runs on the interval. Default\nfalse: one sample per interval, as a running clock needs.",
+          "default": false
+        },
         "credit": {
           "type": [
             "integer",

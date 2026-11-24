@@ -35,6 +35,7 @@ pub fn traffic(
     engine: Arc<Engine>,
     interval_ms: Option<u32>,
     only_proxy: bool,
+    changes_only: bool,
 ) -> Subscription<Traffic, Traffic> {
     let period = Duration::from_millis(u64::from(
         interval_ms
@@ -44,10 +45,17 @@ pub fn traffic(
     let snapshot = traffic_now(&engine, only_proxy);
     let mut ticker = interval_at(Instant::now() + period, period);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let events = stream::unfold((engine, ticker), move |(engine, mut ticker)| async move {
-        ticker.tick().await;
-        let data = traffic_now(&engine, only_proxy);
-        Some((Delivery::Event { data, dropped: 0 }, (engine, ticker)))
+    let state = (engine, ticker, snapshot.clone());
+    let events = stream::unfold(state, move |(engine, mut ticker, mut sent)| async move {
+        loop {
+            ticker.tick().await;
+            let data = traffic_now(&engine, only_proxy);
+            if changes_only && data == sent {
+                continue;
+            }
+            sent = data.clone();
+            return Some((Delivery::Event { data, dropped: 0 }, (engine, ticker, sent)));
+        }
     });
     Subscription::new(Some(snapshot), events.boxed())
 }

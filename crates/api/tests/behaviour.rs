@@ -1129,6 +1129,49 @@ async fn the_traffic_stream_ticks_on_its_interval_and_totals_start_at_the_snapsh
     rig.finish().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changes_only_traffic_stream_is_quiet_when_idle_and_sends_the_return_to_zero() {
+    let rig = Rig::new().await;
+    let proxy = port_to_bind_later();
+    rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let target_port = echo_target().await;
+    let mut stream = through_the_proxy(proxy, target_port).await;
+    let quiet = Duration::from_millis(450);
+
+    let mut traffic = rig
+        .control
+        .traffic_watch(TrafficWatchParams {
+            interval_ms: Some(100),
+            changes_only: true,
+            ..TrafficWatchParams::default()
+        })
+        .await
+        .unwrap();
+    let snapshot = traffic.snapshot.take().unwrap();
+    assert!(
+        timeout(quiet, traffic.events.next()).await.is_err(),
+        "nothing moved, so nothing is sent"
+    );
+
+    stream.write_all(b"ping").await.unwrap();
+    let mut echoed = [0u8; 4];
+    stream.read_exact(&mut echoed).await.unwrap();
+    let moving = eventually(&mut traffic.events, |sample| sample.up > 0).await;
+    assert!(moving.total_up > snapshot.total_up, "{moving:?}");
+    let stopped = eventually(&mut traffic.events, |sample| {
+        sample.up == 0 && sample.down == 0
+    })
+    .await;
+    assert!(stopped.total_up >= moving.total_up, "{stopped:?}");
+    assert!(
+        timeout(quiet, traffic.events.next()).await.is_err(),
+        "a rate of zero is sent once"
+    );
+    rig.finish().await;
+}
+
 async fn echo_target() -> u16 {
     let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let port = target.local_addr().unwrap().port();

@@ -11,6 +11,11 @@ dto! {
         pub interval_ms: Option<u32>,
         #[serde(default)]
         pub only_proxy: bool,
+        /// Send a sample only when it differs from the last one sent, the
+        /// snapshot included; sampling still runs on the interval. Default
+        /// false: one sample per interval, as a running clock needs.
+        #[serde(default)]
+        pub changes_only: bool,
         #[serde(flatten)]
         pub watch: WatchOptions,
     }
