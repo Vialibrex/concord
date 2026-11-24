@@ -2,6 +2,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::route::Os;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Prefix {
     addr: IpAddr,
@@ -194,6 +196,16 @@ impl TunOptions {
         (self.mtu as usize).clamp(576, 65_535)
     }
 
+    /// A macOS utun is named by its kernel unit, so any other name is left for the kernel to pick,
+    /// as mihomo picks one itself.
+    pub(crate) fn device_name(&self, os: Os) -> Option<&str> {
+        let name = self.device.as_deref().filter(|name| !name.is_empty())?;
+        let named_by_unit = name.strip_prefix("utun").is_some_and(|unit| {
+            !unit.is_empty() && unit.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        (os != Os::MacOs || named_by_unit).then_some(name)
+    }
+
     pub(crate) fn inet4_broadcast(&self) -> Option<IpAddr> {
         let prefix = self
             .inet4_address
@@ -218,6 +230,21 @@ mod tests {
         assert_eq!(Prefix::parse("10.0.0.1").unwrap().len(), 32);
         assert!(Prefix::parse("10.0.0.1/33").is_none());
         assert!(Prefix::parse("nope").is_none());
+    }
+
+    #[test]
+    fn macos_leaves_a_name_that_is_not_a_utun_unit_to_the_kernel() {
+        let named = |device: &str| TunOptions {
+            device: Some(device.to_owned()),
+            ..TunOptions::default()
+        };
+        for name in ["FlClash", "utun", "utunX", "Meta", "utun-1"] {
+            assert_eq!(named(name).device_name(Os::MacOs), None, "{name}");
+            assert_eq!(named(name).device_name(Os::Linux), Some(name), "{name}");
+        }
+        assert_eq!(named("utun7").device_name(Os::MacOs), Some("utun7"));
+        assert_eq!(named("").device_name(Os::Windows), None);
+        assert_eq!(TunOptions::default().device_name(Os::MacOs), None);
     }
 
     #[test]

@@ -249,8 +249,13 @@ impl TunDevice {
         {
             builder = builder.offload(offload).multi_queue(queues > 1);
         }
-        if let Some(name) = options.device.as_deref().filter(|name| !name.is_empty()) {
-            builder = builder.name(name);
+        match options.device_name(crate::route::Os::current()) {
+            Some(name) => builder = builder.name(name),
+            None => {
+                if let Some(name) = options.device.as_deref().filter(|name| !name.is_empty()) {
+                    tracing::warn!("tun device name {name} is not a utun unit; the system names it");
+                }
+            }
         }
         #[cfg(windows)]
         {
