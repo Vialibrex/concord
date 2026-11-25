@@ -290,6 +290,13 @@ opt-level = 3
 [profile.release.package.boring-sys]
 opt-level = 3
 
+# Module and rule validation parses thousands of regexes; 3 cuts ~22 ms on Android arm64 for ~65 KiB.
+[profile.release.package.regex-syntax]
+opt-level = 3
+
+[profile.release.package.fancy-regex]
+opt-level = 3
+
 [patch.crates-io]
 gotatun = { path = "vendor/gotatun" }
 h3 = { path = "vendor/h3" }
