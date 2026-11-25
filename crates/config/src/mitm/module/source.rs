@@ -1,38 +1,39 @@
 /// The lines of `text` with their numbers from 1, ending at `\r\n`, `\r` or `\n`.
 pub(super) fn numbered(text: &str) -> impl Iterator<Item = (u32, &str)> {
     let has_cr = text.contains('\r');
-    let mut rest = Some(text);
+    let mut offset = 0usize;
+    let mut done = false;
     let mut number = 0u32;
+    let mut next_nl = if has_cr { text.find('\n') } else { None };
     std::iter::from_fn(move || {
-        let text = rest?;
+        if done {
+            return None;
+        }
+        let rest = text.get(offset..)?;
         number = number.saturating_add(1);
         let end = if has_cr {
-            match text.find('\n') {
-                Some(nl) => text
-                    .get(..nl)
-                    .and_then(|head| head.find('\r'))
-                    .unwrap_or(nl),
-                None => match text.find('\r') {
-                    Some(cr) => cr,
-                    None => {
-                        rest = None;
-                        return Some((number, text));
-                    }
-                },
+            if next_nl.is_some_and(|nl| nl < offset) {
+                next_nl = rest.find('\n').map(|at| offset + at);
+            }
+            let limit = next_nl.map_or(rest.len(), |nl| nl - offset);
+            match rest.get(..limit).and_then(|head| head.find('\r')) {
+                Some(cr) => cr,
+                None if next_nl.is_some() => limit,
+                None => {
+                    done = true;
+                    return Some((number, rest));
+                }
             }
         } else {
-            let Some(nl) = text.find('\n') else {
-                rest = None;
-                return Some((number, text));
+            let Some(nl) = rest.find('\n') else {
+                done = true;
+                return Some((number, rest));
             };
             nl
         };
-        let (line, tail) = text.split_at(end);
-        rest = Some(
-            tail.strip_prefix("\r\n")
-                .or_else(|| tail.get(1..))
-                .unwrap_or_default(),
-        );
+        let (line, tail) = rest.split_at(end);
+        let step = if tail.starts_with("\r\n") { 2 } else { 1 };
+        offset += end + step;
         Some((number, line))
     })
 }
@@ -187,6 +188,27 @@ mod tests {
             [(1, "a"), (2, "b"), (3, "")]
         );
         assert_eq!(numbered("").collect::<Vec<_>>(), [(1, "")]);
+    }
+
+    #[test]
+    fn cr_only_lines_with_trailing_lf_stay_linear() {
+        let count = 50_000usize;
+        let mut text = String::with_capacity(count * 4 + 4);
+        for _ in 0..count {
+            text.push_str("a=b\r");
+        }
+        text.push_str("end\n");
+        let lines: Vec<_> = numbered(&text).collect();
+        assert_eq!(lines.len(), count + 2);
+        assert_eq!(lines.first().copied(), Some((1, "a=b")));
+        assert_eq!(
+            lines.get(count).copied(),
+            Some((u32::try_from(count + 1).unwrap(), "end"))
+        );
+        assert_eq!(
+            lines.last().copied(),
+            Some((u32::try_from(count + 2).unwrap(), ""))
+        );
     }
 
     #[test]
