@@ -86,20 +86,6 @@ crate-type = [
 ]
 path = "src/lib.rs"
 
-[[test]]
-name = "udp_oversized_datagram"
-path = "tests/udp_oversized_datagram.rs"
-
-[[bench]]
-name = "crypto_benches"
-path = "benches/crypto_benches/main.rs"
-harness = false
-
-[[bench]]
-name = "throughput_benches"
-path = "benches/throughput_benches/main.rs"
-harness = false
-
 [dependencies.aead]
 version = "0.5.2"
 

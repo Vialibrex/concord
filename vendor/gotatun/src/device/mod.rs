@@ -818,6 +818,7 @@ impl<T: DeviceTransports> DeviceState<T> {
     async fn handle_outgoing(
         device: Weak<RwLock<Self>>,
         mut tun_rx: impl IpRecv,
+        // Concord: take BufferedUdpSend so handle_outgoing can publish ready groups.
         udp: BufferedUdpSend,
         mut packet_pool: PacketBufPool,
     ) -> Result<(), Error> {
@@ -829,6 +830,7 @@ impl<T: DeviceTransports> DeviceState<T> {
             device.tun_rx_mtu.clone()
         };
 
+        // Concord: holds encrypted packets from one IP batch until published together.
         let mut ready = Vec::new();
         loop {
             let packets = match tun_rx.recv(&mut packet_pool).await {
@@ -907,6 +909,7 @@ impl<T: DeviceTransports> DeviceState<T> {
                 drop(peer); // release lock
                 drop(device_guard);
 
+                // Concord: batch multi-packet IP reads into ready groups; singletons keep send_to.
                 let sent = if single {
                     udp.send_to(packet, peer_addr).await
                 } else {

@@ -31,7 +31,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | h3 | Bound frame and DATA read-ahead | hyperium/h3#344, `c916ed5a` (frame headers); #328 and #386 are related | Backport #344; propose the DATA-body extension to hyperium/h3 |
 | h3 | Opt-in draft-00 datagram SETTINGS for WARP | None | Propose the default-off client builder switch to hyperium/h3 |
 | h3 | Allow warnings in the manifest | None | None planned: it gives the path dependency a crates.io dependency's lint cap |
-| gotatun | Deliver already-ready encrypted IP packets to the bounded UDP queue together | None submitted | Propose the batch handoff to mullvad/gotatun |
+| gotatun | Deliver already-ready encrypted IP packets to the bounded UDP queue together | None yet | Propose the batch handoff to mullvad/gotatun |
 | h2 | Ignore DATA and HEADERS on forgotten client streams | None as of 0.4.20 | Issue and PR to hyperium/h2 with the delayed-DATA-after-reset transport test |
 | mio | High-resolution timed waits on Windows | None | PR to tokio-rs/mio, citing Go's default poller path |
 | quinn | `MAX_TRANSMIT_DATAGRAMS` 80 (`MAX_TRANSMIT_SEGMENTS` back to upstream's 10) | n0-computer/noq#636 (noq) | The segment cap is upstream's again; propose only the datagram limit to quinn-rs/quinn |
@@ -70,6 +70,8 @@ The package archive checksum is `5e37c2134d46523ed5b3c4bbdb578225e2e7379d03aea65
   An isolated IP packet, a transport that sends one packet at a time, and packets from timers or the receive task use
   the usual single enqueue. This follows wireguard-go's batch handoff between the device reader, encryption and sender
   (`device/send.go` in metacubex/wireguard-go `a6cecdd7`). Upstream gotatun queues each packet as it encrypts it.
+- `Cargo.toml`, `benches/`, `tests/`: the `[[test]]` and `[[bench]]` targets are removed with their sources.
+- `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`: crates.io packaging metadata, omitted.
 
 ## h2 0.4.20
 

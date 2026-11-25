@@ -28,6 +28,7 @@ use crate::udp::{UdpRecv, UdpSend};
 #[derive(Clone)]
 pub struct BufferedUdpSend {
     _send_task: Arc<Task>,
+    // Concord: cap ready groups to the channel capacity and transport send batch.
     pub(crate) batch_limit: usize,
 
     /// Channel where IPv4 packets are sent to `_send_task`
@@ -43,6 +44,7 @@ impl BufferedUdpSend {
         let (send_tx_v4, mut send_rx_v4) = mpsc::channel::<(Packet, SocketAddr)>(capacity);
         let (send_tx_v6, mut send_rx_v6) = mpsc::channel::<(Packet, SocketAddr)>(capacity);
 
+        // Concord: capture max_packet_count before moving udp_tx so batch_limit matches the sender.
         let max_packet_count = udp_tx.max_number_of_packets_to_send();
         let send_task = Task::spawn("buffered UDP send", async move {
             let mut buf_v4 = vec![];
@@ -231,6 +233,7 @@ impl UdpRecv for BufferedUdpReceive {
     }
 }
 
+// Concord: verify ready-group family splitting and packet-level backpressure.
 #[cfg(test)]
 #[tokio::test]
 async fn ready_groups_keep_family_order_and_packet_backpressure() {
