@@ -60,7 +60,6 @@ platform::watch::POLL 2 s  # mihomo and sing-box use fsnotify events, which need
 proto::DEFAULT_BATCH_MS 16  # sing-box's daemon sends each batch as soon as one entry arrives (`daemon/started_service.go:414-445`); 0 would change the host's frame rate. Needs a host-side measurement.
 proto::DEFAULT_CREDIT 4  # equals the FlClash host's `_initialCredit` and Kotlin `INITIAL_CREDIT` (FlClash rs `lib/core/api/core_client.dart:18`, `android/core/src/main/java/com/follow/clash/core/CoreClient.kt:23`); equality is a coupling, not a basis, and neither side derives 4 (no reference has batch credit).
 proto::MAX_MESSAGE 67108864  # equals the FlClash host's frame codec MAX_FRAME_SIZE (FlClash rs `plugins/rust_api/rust/src/ipc/frame.rs:4`); equality is a coupling, and neither side derives 64 MiB from the largest message it must carry.
-proxy::hysteria::BRUTAL_MTU 1200  # Initial datagram size given to Hysteria Brutal, 1200; mihomo Hysteria Brutal starts at 1252 (`transport/hysteria/congestion/brutal.go:11`, `initMaxDatagramSize = 1252`)
 proxy::hysteria::DATAGRAM_FRAME 1200  # Advertised max_datagram_frame_size 1200, chosen for Hysteria 1 server interop; mihomo's quic-go advertises 16383 (`internal/wire/datagram_frame.go:14`, `connection.go:351`)
 proxy::mieru::packet::OUT_QUEUE 32  # Per-session outgoing queue 32 on the packet underlay; Concord's own, no reference found
 proxy::mieru::underlay::BATCH 16  # Frames coalesced per stream-underlay write 16; Concord's own, no reference found

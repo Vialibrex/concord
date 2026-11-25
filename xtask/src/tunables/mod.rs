@@ -22,7 +22,7 @@ const WIRE: &str = "## Wire And Format Constants";
 const TUNABLE_COLUMNS: &[&str] = &["Item", "Value", "Basis", "Citation or derivation"];
 const WIRE_COLUMNS: &[&str] = &["Item or module", "Spec"];
 /// Entries in `xtask/tunables.txt`. It only comes down: lower it with the file.
-const RATCHET_CEILING: usize = 76;
+const RATCHET_CEILING: usize = 75;
 
 pub(crate) fn check(root: &Path) -> Result<(), String> {
     let items = scan(root)?;

@@ -16,6 +16,7 @@ const MIN_PACING_DELAY: Duration = Duration::from_millis(1);
 #[derive(Clone, Copy)]
 enum BrutalProfile {
     Legacy,
+    Hysteria,
     Hysteria2,
 }
 
@@ -50,6 +51,10 @@ impl Brutal {
         )
     }
 
+    pub fn hysteria(bytes_per_sec: u64, rtt: Duration, now: Instant) -> Self {
+        Self::with_profile(bytes_per_sec, BrutalProfile::Hysteria, 1252, rtt, now)
+    }
+
     pub fn hysteria2(bytes_per_sec: u64, rtt: Duration, now: Instant) -> Self {
         Self::with_profile(bytes_per_sec, BrutalProfile::Hysteria2, 1252, rtt, now)
     }
@@ -81,6 +86,7 @@ impl Brutal {
     }
 
     fn burst(&self) -> u64 {
+        // Quinn needs the H2 scheduling headroom even for H1's smaller reference bucket.
         (self.pacing_rate().saturating_mul(4) / 1000).max(10 * self.mtu)
     }
 
@@ -90,12 +96,14 @@ impl Brutal {
         }
         let factor = match self.profile {
             BrutalProfile::Legacy => 1.25,
+            BrutalProfile::Hysteria => 1.5,
             BrutalProfile::Hysteria2 => 2.0,
         };
         let window =
             (self.bytes_per_sec as f64 * self.rtt.as_secs_f64() * factor / self.ack_rate) as u64;
         match self.profile {
             BrutalProfile::Legacy => window.max(10 * self.mtu),
+            BrutalProfile::Hysteria => window.max(1),
             BrutalProfile::Hysteria2 => window.max(self.mtu),
         }
     }
@@ -105,7 +113,9 @@ impl Brutal {
             return reference_window;
         }
         // Quinn reserves the next packet before admission; the references compare bytes already in flight.
-        reference_window.saturating_add(self.mtu).saturating_add(1)
+        reference_window
+            .saturating_add(self.mtu)
+            .saturating_add(u64::from(matches!(self.profile, BrutalProfile::Hysteria2)))
     }
 
     fn second(&self, now: Instant) -> u64 {
@@ -150,7 +160,10 @@ impl Controller for Brutal {
         _app_limited: bool,
         rtt: &RttEstimator,
     ) {
-        self.rtt = rtt.get();
+        self.rtt = match self.profile {
+            BrutalProfile::Hysteria => rtt.conservative(),
+            BrutalProfile::Legacy | BrutalProfile::Hysteria2 => rtt.get(),
+        };
         let second = self.second(now);
         if let Some(slot) = self.slot_mut(second) {
             slot.acks += 1;
@@ -223,7 +236,9 @@ impl Controller for Brutal {
     fn initial_window(&self) -> u64 {
         match self.profile {
             BrutalProfile::Legacy => UNKNOWN_RTT_WINDOW.max(1252),
-            BrutalProfile::Hysteria2 => self.admission_window(UNKNOWN_RTT_WINDOW),
+            BrutalProfile::Hysteria | BrutalProfile::Hysteria2 => {
+                self.admission_window(UNKNOWN_RTT_WINDOW)
+            }
         }
     }
 
@@ -380,6 +395,25 @@ mod tests {
         let now = Instant::now();
         let h2 = Brutal::hysteria2(12_500_000, Duration::from_millis(40), now);
         assert_eq!(h2.reference_window(), 1_000_000);
+    }
+
+    #[test]
+    fn hysteria_reference_window_uses_quinn_batching_without_changing_h2() {
+        let now = Instant::now();
+        let mut h1 = Brutal::hysteria(12_500_000, Duration::from_millis(40), now);
+        let h2 = Brutal::hysteria2(12_500_000, Duration::from_millis(40), now);
+        assert_eq!(h1.reference_window(), 750_000);
+        assert_eq!(h1.metrics().pacing_rate, h2.metrics().pacing_rate);
+        assert_eq!(h1.metrics().send_quantum, Some(50_000));
+        assert_eq!(h1.metrics().min_pacing_delay, Some(MIN_PACING_DELAY));
+        h1.on_mtu_update(9000);
+        assert_eq!(h1.burst(), 90_000);
+        for reference_window in [UNKNOWN_RTT_WINDOW, 750_000] {
+            let admission = h1.admission_window(reference_window);
+            for in_flight in [reference_window - 1, reference_window, reference_window + 1] {
+                assert_eq!(in_flight + h1.mtu < admission, in_flight < reference_window);
+            }
+        }
     }
 
     #[test]

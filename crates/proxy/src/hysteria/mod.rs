@@ -43,7 +43,6 @@ const DEFAULT_HOP_SECS: u64 = 10;
 /// of the server's queue.
 const DATAGRAM_FRAME: u64 = 1200;
 const MBPS: u64 = 125_000;
-const BRUTAL_MTU: u16 = 1200;
 const CLOSE_PROTOCOL: u32 = 1;
 const CLOSE_AUTH: u32 = 2;
 
@@ -96,7 +95,7 @@ impl Hysteria {
             hello.recv_bps
         };
         if let Some(switch) = self.controllers.handle() {
-            switch.replace(Box::new(Brutal::new(rate, BRUTAL_MTU, Instant::now())));
+            switch.replace_brutal(Brutal::hysteria(rate, quic.conn.rtt(), Instant::now()));
         }
         Ok(control)
     }
