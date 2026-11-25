@@ -7,9 +7,11 @@ use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use concord_api::{
     Control, ControlOptions, ControlService, Delivery, EventBus, EventStream, LogBridge,
 };
@@ -1519,34 +1521,114 @@ async fn a_closed_connection_says_which_side_ended_it_or_that_the_core_did() {
 async fn answer_names(socket: UdpSocket) {
     let mut buf = [0u8; 512];
     while let Ok((len, from)) = socket.recv_from(&mut buf).await {
-        let query = &buf[..len];
-        let mut name = Vec::new();
-        let mut end = 12;
-        while end < len && query[end] != 0 {
-            let label = usize::from(query[end]);
-            name.push(
-                String::from_utf8_lossy(&query[end + 1..(end + 1 + label).min(len)]).into_owned(),
-            );
-            end += 1 + label;
+        if let Some(reply) = answer(&buf[..len]) {
+            let _ = socket.send_to(&reply, from).await;
         }
-        let Some(question) = query.get(12..end + 5) else {
-            continue;
-        };
-        let is_a = question[question.len() - 4..question.len() - 2] == [0, 1];
-        let address = if name.join(".") == "mapped.test" {
-            [198, 51, 100, 7]
-        } else {
-            [127, 0, 0, 1]
-        };
-        let mut reply = query[..2].to_vec();
-        reply.extend_from_slice(&[0x81, 0x80, 0, 1, 0, u8::from(is_a), 0, 0, 0, 0]);
-        reply.extend_from_slice(question);
-        if is_a {
-            reply.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
-            reply.extend_from_slice(&address);
-        }
-        let _ = socket.send_to(&reply, from).await;
     }
+}
+
+fn answer(query: &[u8]) -> Option<Vec<u8>> {
+    let len = query.len();
+    let mut name = Vec::new();
+    let mut end = 12;
+    while end < len && query[end] != 0 {
+        let label = usize::from(query[end]);
+        name.push(
+            String::from_utf8_lossy(&query[end + 1..(end + 1 + label).min(len)]).into_owned(),
+        );
+        end += 1 + label;
+    }
+    let question = query.get(12..end + 5)?;
+    let is_a = question[question.len() - 4..question.len() - 2] == [0, 1];
+    let address = if name.join(".") == "mapped.test" {
+        [198, 51, 100, 7]
+    } else {
+        [127, 0, 0, 1]
+    };
+    let mut reply = query[..2].to_vec();
+    reply.extend_from_slice(&[0x81, 0x80, 0, 1, 0, u8::from(is_a), 0, 0, 0, 0]);
+    reply.extend_from_slice(question);
+    if is_a {
+        reply.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+        reply.extend_from_slice(&address);
+    }
+    Some(reply)
+}
+
+/// A DNS-over-HTTP upstream that answers the first request on each connection and then keeps the
+/// connection open without answering, as a server on a network the device has left does.
+async fn doh_answering_once_per_connection() -> (u16, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counter = connections.clone();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    if stream.read_exact(&mut byte).await.is_err() {
+                        return;
+                    }
+                    head.push(byte[0]);
+                }
+                let head = String::from_utf8_lossy(&head);
+                let encoded = head
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|target| target.split("dns=").nth(1))
+                    .unwrap_or_default();
+                let query = URL_SAFE_NO_PAD.decode(encoded).unwrap();
+                let reply = answer(&query).unwrap();
+                let mut response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\n\r\n",
+                    reply.len()
+                )
+                .into_bytes();
+                response.extend_from_slice(&reply);
+                stream.write_all(&response).await.unwrap();
+                let mut rest = [0u8; 512];
+                while matches!(stream.read(&mut rest).await, Ok(read) if read > 0) {}
+            });
+        }
+    });
+    (port, connections)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_network_update_drops_the_dns_connections_of_the_old_network() {
+    let rig = Rig::new().await;
+    let (port, connections) = doh_answering_once_per_connection().await;
+    rig.write_config(&format!(
+        "dns:\n  enable: true\n  nameserver:\n    - http://127.0.0.1:{port}/dns-query\n"
+    ));
+    rig.apply().await.unwrap();
+    let query = |name: &str| DnsQueryParams {
+        name: name.to_string(),
+        qtype: None,
+    };
+    rig.control.dns_query(query("before.test")).await.unwrap();
+    for (round, interface_changed) in [false, true].into_iter().enumerate() {
+        rig.control
+            .network_update(NetworkUpdateParams {
+                dns_servers: None,
+                interface_changed,
+            })
+            .await
+            .unwrap();
+        let answered = rig
+            .control
+            .dns_query(query(&format!("after{round}.test")))
+            .await;
+        assert!(
+            answered.is_ok(),
+            "interface_changed {interface_changed}: {answered:?}"
+        );
+    }
+    assert_eq!(connections.load(Ordering::SeqCst), 3);
+    rig.finish().await;
 }
 
 fn a_query(name: &str) -> Vec<u8> {

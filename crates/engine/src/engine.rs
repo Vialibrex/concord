@@ -613,8 +613,11 @@ impl Engine {
         }
     }
 
+    /// A DNS connection opened over the network the device left may stay open and never answer,
+    /// so the upstream connections go with the cached answers.
     pub fn network_changed(&self) {
         self.shared.platform.network_changed();
+        self.reset_resolver_connections();
         self.clear_dns_cache();
         self.mitm.network_changed();
         if let Some(outbounds) = self.outbounds() {
