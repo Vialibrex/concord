@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use concord_config::mitm::module::{
     ArgumentDef, IgnoreReason, ModuleFormat, ModuleInput, ModuleMeta, ModuleOff, ModuleRule,
-    NetworkDef, ResourceDef, RuleSetDef, lines, read_module,
+    NetworkDef, ResourceDef, RuleSetDef, lines, read_module_lines,
 };
 use concord_config::mitm::modules::name_stored_files;
 use serde::Serialize;
@@ -57,18 +57,18 @@ pub(crate) fn view_module(
     env: &ParseEnv,
     stored: &impl Fn(&str) -> Option<String>,
 ) -> ModuleView {
-    let def = read_module(text, input);
-    let mut section = def.section(text);
+    let lines = lines(text);
+    let def = read_module_lines(text, &lines, input);
+    let mut section = def.section_from_lines(&lines);
     name_stored_files(&mut section, stored);
     let mut validation = check_def(&section, env);
-    let force_http = check_def(&def.force_http_section(text), env);
+    let force_http = check_def(&def.force_http_section_from_lines(&lines), env);
     if let Some(issues) = force_http.issues.into_values().next() {
         validation.issues.insert(FORCE_HTTP.to_string(), issues);
     }
     if let Some(views) = force_http.views.into_values().next() {
         validation.views.insert(FORCE_HTTP.to_string(), views);
     }
-    let lines = lines(text);
     let line_text = |line: u32| {
         lines
             .get((line as usize).saturating_sub(1))

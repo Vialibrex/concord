@@ -472,18 +472,19 @@ pub(super) fn policy_of(policy: &str) -> Result<Policy, Refusal> {
 /// A rule line without its inline comment: `//`, `#` or `;` after a space, outside quotes
 /// (rules/overview.html, Composition).
 fn without_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
     let mut quoted = false;
     let mut after_space = false;
-    for (at, c) in line.char_indices() {
-        if c == '"' {
+    for (at, &b) in bytes.iter().enumerate() {
+        if b == b'"' {
             quoted = !quoted;
-        } else if !quoted && after_space {
-            let rest = line.get(at..).unwrap_or_default();
-            if rest.starts_with("//") || rest.starts_with('#') || rest.starts_with(';') {
-                return line.get(..at).unwrap_or(line).trim_end();
-            }
+        } else if !quoted
+            && after_space
+            && (b == b'#' || b == b';' || (b == b'/' && bytes.get(at + 1) == Some(&b'/')))
+        {
+            return line.get(..at).unwrap_or(line).trim_end();
         }
-        after_space = c == ' ' || c == '\t';
+        after_space = b == b' ' || b == b'\t';
     }
     line
 }
@@ -500,12 +501,12 @@ pub(super) fn rule_parts(text: &str) -> Vec<&str> {
 fn split_rule(text: &str, nested: bool) -> Vec<&str> {
     let mut parts = Vec::new();
     let (mut depth, mut quoted, mut start) = (0i32, false, 0);
-    for (at, c) in text.char_indices() {
-        match c {
-            '"' => quoted = !quoted,
-            '(' if nested && !quoted => depth += 1,
-            ')' if nested && !quoted => depth -= 1,
-            ',' if !quoted && depth == 0 => {
+    for (at, &b) in text.as_bytes().iter().enumerate() {
+        match b {
+            b'"' => quoted = !quoted,
+            b'(' if nested && !quoted => depth += 1,
+            b')' if nested && !quoted => depth -= 1,
+            b',' if !quoted && depth == 0 => {
                 parts.push(text.get(start..at).unwrap_or_default().trim());
                 start = at + 1;
             }
@@ -562,7 +563,11 @@ fn translate(kind: &str, payload: &str, nested: bool) -> Result<(String, bool), 
         _ => value.to_string(),
     };
     let resolves = matches!(*target, "IP-CIDR" | "IP-CIDR6" | "GEOIP" | "IP-ASN");
-    Ok((format!("{target},{value}"), resolves))
+    let mut rule = String::with_capacity(target.len() + 1 + value.len());
+    rule.push_str(target);
+    rule.push(',');
+    rule.push_str(&value);
+    Ok((rule, resolves))
 }
 
 /// `AND,((A,a),(B,b))`; `NOT` takes one operand.

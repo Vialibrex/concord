@@ -228,35 +228,14 @@ impl ModuleDef {
     /// The module's lists as a section in force, each line as the module wrote it, numbered
     /// by its module line: what the engine compiles and views. `text` is the module read.
     pub fn section(&self, text: &str) -> MitmDef {
-        let lines = lines(text);
-        let at = |line: u32| -> (usize, String) {
-            let index = line as usize;
-            let text = lines
-                .get(index.saturating_sub(1))
-                .copied()
-                .unwrap_or_default();
-            (index, text.to_string())
-        };
-        fn each<T: Clone, U>(
-            list: &[ModuleLine<T>],
-            at: &impl Fn(u32) -> (usize, String),
-            map: impl Fn(&T) -> U,
-        ) -> Vec<MitmLine<U>> {
-            list.iter()
-                .map(|line| {
-                    let (index, text) = at(line.line);
-                    MitmLine {
-                        index,
-                        text,
-                        read: map(&line.def),
-                        origin: None,
-                    }
-                })
-                .collect()
-        }
+        self.section_from_lines(&lines(text))
+    }
+
+    /// Like [ModuleDef::section], reusing the pre-split trimmed [lines] of the module.
+    pub fn section_from_lines(&self, lines: &[&str]) -> MitmDef {
         let lists = &self.lists;
         let skip = lists.skip_server_cert_verify.as_ref().map(|line| {
-            let (index, text) = at(line.line);
+            let (index, text) = line_at(lines, line.line);
             MitmLine {
                 index,
                 text,
@@ -271,42 +250,72 @@ impl ModuleDef {
         MitmDef {
             enable: true,
             h2: lists.h2.is_some(),
-            hostname: each(&lists.hostname, &at, |line| line.items.clone()),
-            hostname_disabled: each(&lists.hostname_disabled, &at, Clone::clone),
+            hostname: each_line(&lists.hostname, lines, |line| line.items.clone()),
+            hostname_disabled: each_line(&lists.hostname_disabled, lines, Clone::clone),
             skip_server_cert_verify_hostname: skip.into_iter().collect(),
-            client_source_address: each(&lists.client_source_address, &at, Clone::clone),
-            url_rewrite: each(&lists.url_rewrite, &at, Clone::clone),
-            header_rewrite: each(&lists.header_rewrite, &at, Clone::clone),
-            body_rewrite: each(&lists.body_rewrite, &at, Clone::clone),
-            map_local: each(&lists.map_local, &at, Clone::clone),
-            request_body_mock: each(&lists.request_body_mock, &at, Clone::clone),
-            script: each(&lists.script, &at, Clone::clone),
+            client_source_address: each_line(&lists.client_source_address, lines, Clone::clone),
+            url_rewrite: each_line(&lists.url_rewrite, lines, Clone::clone),
+            header_rewrite: each_line(&lists.header_rewrite, lines, Clone::clone),
+            body_rewrite: each_line(&lists.body_rewrite, lines, Clone::clone),
+            map_local: each_line(&lists.map_local, lines, Clone::clone),
+            request_body_mock: each_line(&lists.request_body_mock, lines, Clone::clone),
+            script: each_line(&lists.script, lines, Clone::clone),
             ..MitmDef::default()
         }
     }
 
     /// `force-http-engine-hosts` as a section's `hostname` list, for viewing.
     pub fn force_http_section(&self, text: &str) -> MitmDef {
-        let module = ModuleDef {
-            lists: ModuleLists {
-                hostname: self
-                    .lists
-                    .force_http_hostname
-                    .iter()
-                    .map(|line| ModuleLine {
-                        line: line.line,
-                        def: HostLine {
-                            insert: false,
-                            items: line.def.clone(),
-                        },
-                    })
-                    .collect(),
-                ..ModuleLists::default()
-            },
-            ..ModuleDef::default()
-        };
-        module.section(text)
+        if self.lists.force_http_hostname.is_empty() {
+            return MitmDef {
+                enable: true,
+                ..MitmDef::default()
+            };
+        }
+        self.force_http_section_from_lines(&lines(text))
     }
+
+    /// Like [ModuleDef::force_http_section], reusing pre-split trimmed [lines].
+    pub fn force_http_section_from_lines(&self, lines: &[&str]) -> MitmDef {
+        if self.lists.force_http_hostname.is_empty() {
+            return MitmDef {
+                enable: true,
+                ..MitmDef::default()
+            };
+        }
+        MitmDef {
+            enable: true,
+            hostname: each_line(&self.lists.force_http_hostname, lines, Clone::clone),
+            ..MitmDef::default()
+        }
+    }
+}
+
+fn line_at(lines: &[&str], line: u32) -> (usize, String) {
+    let index = line as usize;
+    let text = lines
+        .get(index.saturating_sub(1))
+        .copied()
+        .unwrap_or_default();
+    (index, text.to_string())
+}
+
+fn each_line<T, U>(
+    list: &[ModuleLine<T>],
+    lines: &[&str],
+    map: impl Fn(&T) -> U,
+) -> Vec<MitmLine<U>> {
+    list.iter()
+        .map(|line| {
+            let (index, text) = line_at(lines, line.line);
+            MitmLine {
+                index,
+                text,
+                read: map(&line.def),
+                origin: None,
+            }
+        })
+        .collect()
 }
 
 /// The lines of `text` trimmed, the first at index 0 for line 1, as definitions count them.
@@ -318,8 +327,14 @@ pub fn lines(text: &str) -> Vec<&str> {
 
 /// Reads `text` in the format it is written in.
 pub fn read_module(text: &str, input: &ModuleInput<'_>) -> ModuleDef {
-    match stash::document(text) {
+    let lines = lines(text);
+    read_module_lines(text, &lines, input)
+}
+
+/// Reads `text` using its pre-split trimmed [lines].
+pub fn read_module_lines(text: &str, lines: &[&str], input: &ModuleInput<'_>) -> ModuleDef {
+    match stash::document(text, lines) {
         Some(document) => stash::read(&document, text, input),
-        None => surge::read(text, input),
+        None => surge::read_lines(lines, input),
     }
 }

@@ -10,8 +10,8 @@ use super::requirement::evaluate;
 use super::resource::{ResourceKind, is_url, locate};
 use super::rule::{RuleReader, ip_rewrite};
 use super::source::{
-    LineRequirement, ListMark, is_comment, key_value, list_mark, numbered, section_name,
-    split_requirement, unquote,
+    LineRequirement, ListMark, is_comment, key_value, list_mark, section_name, split_requirement,
+    unquote,
 };
 use super::{
     HostLine, IgnoreReason, IgnoredLine, ModuleDef, ModuleFormat, ModuleInput, ModuleLine,
@@ -63,15 +63,15 @@ struct Declarations {
     inline_sets: Vec<String>,
 }
 
-fn declarations(text: &str, def: &mut ModuleDef) -> Declarations {
+fn declarations(lines: &[&str], def: &mut ModuleDef) -> Declarations {
     let mut meta = ModuleMeta::default();
     let mut inline_sets = Vec::new();
     let mut format = ModuleFormat::Surge;
     let mut tag = None;
     let mut in_arguments = false;
     let mut sectioned = false;
-    for (number, raw) in numbered(text) {
-        let line = raw.trim();
+    for (index, &line) in lines.iter().enumerate() {
+        let number = u32::try_from(index + 1).unwrap_or(u32::MAX);
         if in_arguments && !line.is_empty() && !is_comment(line) && section_name(line).is_none() {
             match read_loon(line, number) {
                 Ok(argument) => def.arguments.push(argument),
@@ -143,22 +143,25 @@ fn declarations(text: &str, def: &mut ModuleDef) -> Declarations {
     }
 }
 
-pub(super) fn read(text: &str, input: &ModuleInput<'_>) -> ModuleDef {
+pub(super) fn read_lines(lines: &[&str], input: &ModuleInput<'_>) -> ModuleDef {
     let mut def = ModuleDef::default();
     let Declarations {
         meta,
         format,
         inline_sets,
-    } = declarations(text, &mut def);
+    } = declarations(lines, &mut def);
     let mut reader = Reader::new(input, inline_sets, def);
     reader.def.format = format;
-    let mut section: Option<&str> = None;
-    for (number, raw) in numbered(text) {
-        let trimmed = raw.trim();
-        if let Some(name) = section_name(trimmed) {
-            section = Some(name);
+    let mut section: Option<(&str, String)> = None;
+    for (index, &trimmed) in lines.iter().enumerate() {
+        if trimmed.is_empty() || (is_comment(trimmed) && !trimmed.starts_with("#!REQUIREMENT")) {
             continue;
         }
+        if let Some(name) = section_name(trimmed) {
+            section = Some((name, name.to_ascii_lowercase()));
+            continue;
+        }
+        let number = u32::try_from(index + 1).unwrap_or(u32::MAX);
         let (line, requirement) = split_requirement(trimmed);
         if line.is_empty() || is_comment(line) {
             continue;
@@ -169,7 +172,7 @@ pub(super) fn read(text: &str, input: &ModuleInput<'_>) -> ModuleDef {
             reader.ignore(number, reason, None);
             continue;
         }
-        let Some(section) = section else {
+        let Some((section, lower)) = section.as_ref().map(|(s, l)| (*s, l.as_str())) else {
             match qx::kind(line) {
                 Some(kind) => reader.read_qx(kind, line, number),
                 None if reader.def.format == ModuleFormat::QuantumultX => {
@@ -179,15 +182,16 @@ pub(super) fn read(text: &str, input: &ModuleInput<'_>) -> ModuleDef {
             }
             continue;
         };
-        let lower = section.to_ascii_lowercase();
         if lower == "argument" {
             continue;
         }
-        if lower == "script" || loon::is_new_script(line) {
-            reader.declare_script(line, number);
+        let new_syntax = loon::is_new(line);
+        let new_script = new_syntax && line.contains("script(");
+        if lower == "script" || new_script {
+            reader.declare_script(line, number, new_script);
         }
-        if matches!(lower.as_str(), "rewrite" | "script") && loon::is_new(line) {
-            reader.read_new(line, number);
+        if matches!(lower, "rewrite" | "script") && new_syntax {
+            reader.read_new(line, number, new_script);
             continue;
         }
         let raw = line;
@@ -202,7 +206,7 @@ pub(super) fn read(text: &str, input: &ModuleInput<'_>) -> ModuleDef {
         if line.is_empty() || is_comment(line) {
             continue;
         }
-        reader.read_line(&lower, section, line, raw, number);
+        reader.read_line(lower, section, line, raw, number);
     }
     reader.def.meta = meta;
     reader.finish()
@@ -441,8 +445,8 @@ impl<'a> Reader<'a> {
     }
 
     /// A new-syntax Loon line, read with the arguments as typed values.
-    fn read_new(&mut self, line: &str, number: u32) {
-        match loon::read_new(line, &self.def.arguments, self.input.arguments) {
+    fn read_new(&mut self, line: &str, number: u32, is_script: bool) {
+        match loon::read_new(line, &self.def.arguments, self.input.arguments, is_script) {
             Ok(Some(outs)) => outs.into_iter().for_each(|out| self.place(number, out)),
             Ok(None) => self.ignore(number, IgnoreReason::Disabled, None),
             Err((reason, detail)) => self.ignore(number, reason, detail),
@@ -524,8 +528,8 @@ impl<'a> Reader<'a> {
 
     /// Counted before the arguments are filled in, so a script an argument turns off still
     /// asks for consent, and so does a line an argument may make into any script.
-    fn declare_script(&mut self, line: &str, number: u32) {
-        if loon::is_new_script(line) {
+    fn declare_script(&mut self, line: &str, number: u32, is_new_script: bool) {
+        if is_new_script {
             self.def.declared_scripts.push(number);
             return;
         }

@@ -33,11 +33,10 @@ const SHOWN: [&str; 10] = [
 ];
 
 /// The override `text` is, when it is one.
-pub(super) fn document(text: &str) -> Option<ParsedDocument> {
-    let sectioned = text.lines().any(|line| {
-        let line = line.trim();
-        line.starts_with('[') && line.ends_with(']')
-    });
+pub(super) fn document(text: &str, lines: &[&str]) -> Option<ParsedDocument> {
+    let sectioned = lines
+        .iter()
+        .any(|line| line.starts_with('[') && line.ends_with(']'));
     if sectioned {
         return None;
     }

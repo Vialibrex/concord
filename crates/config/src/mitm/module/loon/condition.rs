@@ -1,12 +1,14 @@
 //! A Loon condition read into the URL pattern and the head patterns Concord matches a rule by.
 //! Plugin arguments are known when the module is read, so a test on one is decided then.
 
-use fancy_regex::Regex;
+use fancy_regex::{Expr, Regex};
 use regex::escape;
 use serde_json::Value;
 
 use super::lexer::Token;
 use super::{Cursor, Refusal, Scope, condition, unreadable};
+use crate::mitm::pattern::syntax_parses;
+use crate::mitm::relax;
 
 #[derive(Debug)]
 enum Cond {
@@ -238,8 +240,34 @@ pub(super) fn scoped(source: &str, flags: &str) -> String {
 }
 
 fn groups(source: &str) -> Result<usize, Refusal> {
+    if let Ok(tree) = Expr::parse_tree(source)
+        && tree.backrefs.is_empty()
+        && !tree.contains_subroutines
+        && let Some(count) = simple_groups(&tree.expr)
+        && syntax_parses(&relax(source))
+    {
+        return Ok(count);
+    }
     let regex = Regex::new(source).map_err(|err| unreadable(err.to_string()))?;
     Ok(regex.captures_len().saturating_sub(1))
+}
+
+fn simple_groups(expr: &Expr) -> Option<usize> {
+    match expr {
+        Expr::Group(inner) => Some(1 + simple_groups(inner)?),
+        Expr::Concat(items) | Expr::Alt(items) => items
+            .iter()
+            .try_fold(0usize, |acc, item| Some(acc + simple_groups(item)?)),
+        Expr::Repeat { child, .. } | Expr::AtomicGroup(child) => simple_groups(child),
+        Expr::Empty
+        | Expr::Any { .. }
+        | Expr::Assertion(_)
+        | Expr::GeneralNewline { .. }
+        | Expr::Literal { .. }
+        | Expr::LiteralBytes { .. }
+        | Expr::Delegate { .. } => Some(0),
+        _ => None,
+    }
 }
 
 fn fold(cond: Cond) -> Cond {
@@ -542,5 +570,26 @@ mod tests {
         assert!(regex.is_match(&head("APPLICATION/JSON")).unwrap());
         assert!(!regex.is_match(&head("text/application/json")).unwrap());
         assert!(!regex.is_match(&head("application/jsonp")).unwrap());
+    }
+
+    #[test]
+    fn groups_matches_compiled_regex() {
+        for source in [
+            r"^https?://a\.test/(\w+)/(\d+)",
+            r"(?:a)(b)(?<k>c)((d))",
+            r"(?n)(a)(?<k>b)",
+            r"[(]a[)](b)",
+            r"(?>a(b))(c)",
+            r"(?=a(b))(c)",
+            r"(a)\1",
+            "(a",
+            r"\p{Nope}",
+            r"(?<=a+)",
+            r"(a)\2",
+        ] {
+            let want = Regex::new(source).map(|r| r.captures_len().saturating_sub(1));
+            let got = groups(source);
+            assert_eq!(got.ok(), want.ok(), "{source}");
+        }
     }
 }

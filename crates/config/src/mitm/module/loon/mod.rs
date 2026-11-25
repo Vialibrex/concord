@@ -43,15 +43,12 @@ pub(super) fn is_new(line: &str) -> bool {
     }
 }
 
-pub(super) fn is_new_script(line: &str) -> bool {
-    is_new(line) && line.contains("script(")
-}
-
 /// A new-syntax line; `Ok(None)` when its arguments turn it off.
 pub(super) fn read_new(
     line: &str,
     arguments: &[ArgumentDef],
     values: &BTreeMap<String, String>,
+    is_script: bool,
 ) -> Result<Option<Vec<Out>>, Refusal> {
     let tokens = lex(line).map_err(|err| unreadable(err.0))?;
     let mut cursor = Cursor { tokens, at: 0 };
@@ -60,7 +57,7 @@ pub(super) fn read_new(
         values,
         captures: Vec::new(),
     };
-    if is_new_script(line) {
+    if is_script {
         return Ok(script::read(&mut cursor, &mut scope)?.map(|def| vec![Out::Script(def)]));
     }
     let response = match cursor.next() {

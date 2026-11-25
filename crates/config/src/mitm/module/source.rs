@@ -1,13 +1,31 @@
 /// The lines of `text` with their numbers from 1, ending at `\r\n`, `\r` or `\n`.
 pub(super) fn numbered(text: &str) -> impl Iterator<Item = (u32, &str)> {
+    let has_cr = text.contains('\r');
     let mut rest = Some(text);
     let mut number = 0u32;
     std::iter::from_fn(move || {
         let text = rest?;
         number = number.saturating_add(1);
-        let Some(end) = text.find(['\r', '\n']) else {
-            rest = None;
-            return Some((number, text));
+        let end = if has_cr {
+            match text.find('\n') {
+                Some(nl) => text
+                    .get(..nl)
+                    .and_then(|head| head.find('\r'))
+                    .unwrap_or(nl),
+                None => match text.find('\r') {
+                    Some(cr) => cr,
+                    None => {
+                        rest = None;
+                        return Some((number, text));
+                    }
+                },
+            }
+        } else {
+            let Some(nl) = text.find('\n') else {
+                rest = None;
+                return Some((number, text));
+            };
+            nl
         };
         let (line, tail) = text.split_at(end);
         rest = Some(
@@ -160,6 +178,15 @@ mod tests {
     fn lines_end_at_every_line_break() {
         let lines: Vec<_> = numbered("a\r\nb\rc\n\nd").collect();
         assert_eq!(lines, [(1, "a"), (2, "b"), (3, "c"), (4, ""), (5, "d")]);
+        assert_eq!(
+            numbered("a\nb\n").collect::<Vec<_>>(),
+            [(1, "a"), (2, "b"), (3, "")]
+        );
+        assert_eq!(
+            numbered("a\rb\r").collect::<Vec<_>>(),
+            [(1, "a"), (2, "b"), (3, "")]
+        );
+        assert_eq!(numbered("").collect::<Vec<_>>(), [(1, "")]);
     }
 
     #[test]

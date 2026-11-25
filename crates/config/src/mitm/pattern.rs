@@ -76,7 +76,7 @@ pub fn parses(source: &str) -> bool {
 /// only on a Unicode property it does not know or where Unicode mode is turned off, given the
 /// crate's default features; it is most of the work, case folding above all, so a tree with
 /// neither skips it.
-fn syntax_parses(source: &str) -> bool {
+pub(crate) fn syntax_parses(source: &str) -> bool {
     let Ok(tree) = ast::parse::Parser::new().parse(source) else {
         return false;
     };
