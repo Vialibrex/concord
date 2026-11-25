@@ -100,7 +100,6 @@ impl FetchAs<'_> {
         let tls = TlsSettings {
             trust: self.identity.trust.clone(),
             skip_cert_verify: self.fetcher.options.load().skip_cert_verify,
-            offer_h2: true,
         };
         let mut hops = Vec::new();
         let exchange = async {

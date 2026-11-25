@@ -107,6 +107,13 @@ confirming it with a run.
 
 Concord already takes these from the references; keep them unless the reference moves.
 
+- [language-neutral] **Downloads and URL tests speak HTTP/1.1 without ALPN** as mihomo `3f27ef39` does: its
+  provider and geo downloads (`component/http/http.go:70-87`) and URL tests (`adapter/adapter.go:229-239`) each
+  build an `http.Transport` with their own dialer and TLS config, which keeps metacubex/http v0.1.8 from turning
+  HTTP/2 on (`transport.go:471-475`), so the hello offers no ALPN; Go writes header names in canonical case.
+  `crates/group/src/http.rs` (`connect`) does the same; `a_request_goes_out_as_go_writes_it` and
+  `the_tls_hello_offers_no_alpn` hold it.
+
 - [language-neutral] **What a stop sends** follows sing-box `824dbcf`: an outbound's close cancels its context
   and runs its cleanups (`adapter/lifecycle.go:128-142`); TUIC closes its QUIC connection with
   CONNECTION_CLOSE (`protocol/tuic/outbound.go:164-171`) and SSH closes the TCP connection without

@@ -6,7 +6,7 @@ use concord_tls::{TlsConnector, TlsOptions, TrustStore};
 use http::{HeaderMap, Method};
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::body::Incoming;
-use hyper::client::conn::{http1, http2};
+use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
 
 #[derive(Debug, thiserror::Error)]
@@ -103,13 +103,11 @@ impl Streaming {
     }
 }
 
-enum Sender {
-    H1(http1::SendRequest<Full<Bytes>>),
-    H2(http2::SendRequest<Full<Bytes>>),
-}
-
+/// HTTP/1.1 as mihomo's downloads and URL tests speak it: their `http.Transport` sets its own
+/// dialer and TLS config and so never turns HTTP/2 on (metacubex/http v0.1.8 `transport.go:471`),
+/// which leaves the hello without ALPN, and Go writes header names in canonical case.
 pub struct Connection {
-    sender: Sender,
+    sender: http1::SendRequest<Full<Bytes>>,
     target: Target,
 }
 
@@ -117,7 +115,6 @@ pub struct Connection {
 pub struct TlsSettings {
     pub trust: Arc<TrustStore>,
     pub skip_cert_verify: bool,
-    pub offer_h2: bool,
 }
 
 /// Runs the TLS handshake when the target is `https`, then the HTTP one. The
@@ -129,16 +126,10 @@ pub async fn connect(
     tasks: &Tasks,
 ) -> Result<Connection, HttpError> {
     if !target.tls {
-        return handshake(io, target, false, tasks).await;
+        return handshake(io, target, tasks).await;
     }
-    let alpn = if tls.offer_h2 {
-        vec!["h2".to_string(), "http/1.1".to_string()]
-    } else {
-        vec!["http/1.1".to_string()]
-    };
     let connector = TlsConnector::new(
         TlsOptions {
-            alpn,
             skip_cert_verify: tls.skip_cert_verify,
             ..TlsOptions::default()
         },
@@ -149,32 +140,18 @@ pub async fn connect(
         .connect(io, &target.host)
         .await
         .map_err(|err| HttpError::Tls(err.to_string()))?;
-    let h2 = stream.negotiated_alpn() == Some(b"h2".as_slice());
-    handshake(Box::new(stream), target, h2, tasks).await
+    handshake(Box::new(stream), target, tasks).await
 }
 
-async fn handshake(
-    io: BoxStream,
-    target: &Target,
-    h2: bool,
-    tasks: &Tasks,
-) -> Result<Connection, HttpError> {
-    let io = TokioIo::new(io);
-    let sender = if h2 {
-        let (sender, conn) = http2::handshake(tasks.clone(), io)
-            .await
-            .map_err(protocol)?;
-        tasks.spawn(async move {
-            let _ = conn.await;
-        });
-        Sender::H2(sender)
-    } else {
-        let (sender, conn) = http1::handshake(io).await.map_err(protocol)?;
-        tasks.spawn(async move {
-            let _ = conn.await;
-        });
-        Sender::H1(sender)
-    };
+async fn handshake(io: BoxStream, target: &Target, tasks: &Tasks) -> Result<Connection, HttpError> {
+    let (sender, conn) = http1::Builder::new()
+        .title_case_headers(true)
+        .handshake(TokioIo::new(io))
+        .await
+        .map_err(protocol)?;
+    tasks.spawn(async move {
+        let _ = conn.await;
+    });
     Ok(Connection {
         sender,
         target: target.clone(),
@@ -182,10 +159,6 @@ async fn handshake(
 }
 
 impl Connection {
-    pub fn is_h2(&self) -> bool {
-        matches!(self.sender, Sender::H2(_))
-    }
-
     /// Redirects are not followed. A body longer than `limit` is an error.
     pub async fn send(
         &mut self,
@@ -210,31 +183,15 @@ impl Connection {
         body: Bytes,
         limit: usize,
     ) -> Result<Streaming, HttpError> {
-        let target = &self.target;
-        let h2 = self.is_h2();
-        let uri = if h2 {
-            format!(
-                "{}://{}{}",
-                if target.tls { "https" } else { "http" },
-                target.authority(),
-                target.path
-            )
-        } else {
-            target.path.clone()
-        };
-        let mut builder = http::Request::builder().method(method).uri(uri);
-        if !h2 {
-            builder = builder.header(http::header::HOST, target.authority());
-        }
+        let mut builder = http::Request::builder()
+            .method(method)
+            .uri(self.target.path.as_str())
+            .header(http::header::HOST, self.target.authority());
         for (name, value) in headers {
             builder = builder.header(name.as_str(), value.as_str());
         }
         let request = builder.body(Full::new(body)).map_err(protocol)?;
-        let response = match &mut self.sender {
-            Sender::H1(sender) => sender.send_request(request).await,
-            Sender::H2(sender) => sender.send_request(request).await,
-        }
-        .map_err(protocol)?;
+        let response = self.sender.send_request(request).await.map_err(protocol)?;
         let (parts, body) = response.into_parts();
         Ok(Streaming {
             status: parts.status.as_u16(),
@@ -285,7 +242,7 @@ mod tests {
             }
         });
         let target = Target::parse("http://probe.test/generate_204").unwrap();
-        let mut conn = handshake(Box::new(client), &target, false, &Default::default())
+        let mut conn = handshake(Box::new(client), &target, &Default::default())
             .await
             .unwrap();
         for _ in 0..2 {
@@ -295,6 +252,75 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status, 204);
         }
+    }
+
+    #[tokio::test]
+    async fn a_request_goes_out_as_go_writes_it() {
+        let (client, mut server) = duplex(4096);
+        let seen = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            let mut buf = vec![0u8; 1024];
+            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = server.read(&mut buf).await.unwrap();
+                seen.extend_from_slice(&buf[..n]);
+            }
+            server
+                .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8(seen).unwrap()
+        });
+        let target = Target::parse("http://files.test:8080/list?a=1").unwrap();
+        let mut conn = handshake(Box::new(client), &target, &Default::default())
+            .await
+            .unwrap();
+        let headers = [("user-agent".to_string(), "probe".to_string())];
+        conn.send(Method::GET, &headers, Bytes::new(), 16)
+            .await
+            .unwrap();
+        assert_eq!(
+            seen.await.unwrap(),
+            "GET /list?a=1 HTTP/1.1\r\nHost: files.test:8080\r\nUser-Agent: probe\r\n\r\n"
+        );
+    }
+
+    /// The extension types of the ClientHello in the first TLS record.
+    fn hello_extensions(record: &[u8]) -> Vec<u16> {
+        let u16_at = |at: usize| u16::from_be_bytes([record[at], record[at + 1]]);
+        let mut at = 5 + 4 + 2 + 32;
+        at += 1 + usize::from(record[at]);
+        at += 2 + usize::from(u16_at(at));
+        at += 1 + usize::from(record[at]);
+        let end = at + 2 + usize::from(u16_at(at));
+        at += 2;
+        let mut types = Vec::new();
+        while at < end {
+            types.push(u16_at(at));
+            at += 4 + usize::from(u16_at(at + 2));
+        }
+        types
+    }
+
+    #[tokio::test]
+    async fn the_tls_hello_offers_no_alpn() {
+        let (client, mut server) = duplex(1 << 16);
+        let hello = tokio::spawn(async move {
+            let mut record = vec![0u8; 5];
+            server.read_exact(&mut record).await.unwrap();
+            let len = usize::from(u16::from_be_bytes([record[3], record[4]]));
+            record.resize(5 + len, 0);
+            server.read_exact(&mut record[5..]).await.unwrap();
+            record
+        });
+        let target = Target::parse("https://files.test/list").unwrap();
+        let tls = TlsSettings {
+            trust: TrustStore::new(b"", Vec::new()),
+            skip_cert_verify: false,
+        };
+        let _ = connect(Box::new(client), &target, &tls, &Default::default()).await;
+        let extensions = hello_extensions(&hello.await.unwrap());
+        assert!(extensions.contains(&0), "{extensions:?} carries SNI");
+        assert!(!extensions.contains(&16), "{extensions:?} has no ALPN");
     }
 
     #[tokio::test]
@@ -314,7 +340,7 @@ mod tests {
             }
         });
         let target = Target::parse("http://files.test/big").unwrap();
-        let mut conn = handshake(Box::new(client), &target, false, &Default::default())
+        let mut conn = handshake(Box::new(client), &target, &Default::default())
             .await
             .unwrap();
         let mut whole = conn.open(Method::GET, &[], Bytes::new(), 10).await.unwrap();

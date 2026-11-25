@@ -87,7 +87,6 @@ impl Outbounds {
         let settings = TlsSettings {
             trust: self.shared.trust.clone(),
             skip_cert_verify: false,
-            offer_h2: false,
         };
         let mut connection = http::connect(io, &target, &settings, &self.shared.tasks)
             .await
