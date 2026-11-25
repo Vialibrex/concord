@@ -337,10 +337,12 @@ impl UdpRecv for WireRecv {
             for (data, from) in batch.iter() {
                 let mut packet = pool.get();
                 let len = data.len().min(packet.len());
-                packet.truncate(len);
-                packet.copy_from_slice(&data[..len]);
-                clear_reserved(&mut packet);
-                packets.push((packet, from));
+                if let Some((dst, src)) = packet.get_mut(..len).zip(data.get(..len)) {
+                    dst.copy_from_slice(src);
+                    packet.truncate(len);
+                    clear_reserved(&mut packet);
+                    packets.push((packet, from));
+                }
             }
         } else {
             packets.push(self.recv_from(pool).await?);
