@@ -1151,6 +1151,7 @@ dependencies = [
  "concord-tls",
  "concord-tun",
  "concord-tunnel",
+ "flate2",
  "futures-util",
  "http",
  "http-body-util",

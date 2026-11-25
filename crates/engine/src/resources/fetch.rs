@@ -1,4 +1,4 @@
-use std::io::Seek as _;
+use std::io::{Seek as _, Write as _};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use concord_platform::HomeDir;
 use concord_platform::mmap::MappedFile;
 use concord_tls::TrustStore;
 use concord_tunnel::Tunnel;
+use flate2::write::MultiGzDecoder;
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
@@ -85,17 +86,11 @@ impl FetchAs<'_> {
     async fn fetch<T>(
         &self,
         request: &FetchRequest,
-        take: impl AsyncFnOnce(&mut Streaming) -> Result<T, FetchError>,
+        take: impl AsyncFnOnce(&mut Body<'_>) -> Result<T, FetchError>,
     ) -> Result<(FetchHead, T), FetchError> {
         let deadline = Instant::now() + request.timeout;
         let mut url = request.url.clone();
-        let mut headers = request.headers.clone();
-        if !headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
-        {
-            headers.push(("User-Agent".to_string(), self.identity.user_agent.clone()));
-        }
+        let (headers, gzip) = request_headers(&request.headers, &self.identity.user_agent);
         let limit = request
             .size_limit
             .and_then(|limit| usize::try_from(limit).ok())
@@ -133,17 +128,28 @@ impl FetchAs<'_> {
                         .to_string();
                     continue;
                 }
+                let gunzip = gzip
+                    && response
+                        .headers
+                        .get(http::header::CONTENT_ENCODING)
+                        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"gzip"));
                 let head = FetchHead {
                     status: response.status,
                     headers: response
                         .headers
                         .iter()
+                        .filter(|(name, _)| {
+                            !gunzip
+                                || (*name != http::header::CONTENT_ENCODING
+                                    && *name != http::header::CONTENT_LENGTH)
+                        })
                         .filter_map(|(name, value)| {
                             Some((name.to_string(), value.to_str().ok()?.to_string()))
                         })
                         .collect(),
                 };
-                let taken = take(&mut response).await?;
+                let mut body = Body::new(&mut response, gunzip, limit);
+                let taken = take(&mut body).await?;
                 drop(connection);
                 return Ok((head, taken));
             }
@@ -155,6 +161,75 @@ impl FetchAs<'_> {
         tokio::time::timeout_at(deadline, exchange)
             .await
             .map_err(|_| fetch_error(FetchErrorKind::Timeout, "context deadline exceeded"))?
+    }
+}
+
+/// The request's own headers, with what Go's `Transport` and curl send when it names none:
+/// the config's User-Agent, `Accept: */*`, and `Accept-Encoding: gzip`, which also says whether
+/// the body is the fetch's to decompress. As in Go, a request that asks for an encoding itself
+/// reads the body as sent.
+fn request_headers(own: &[(String, String)], user_agent: &str) -> (Vec<(String, String)>, bool) {
+    let named = |name: &str| own.iter().any(|(key, _)| key.eq_ignore_ascii_case(name));
+    let mut headers = own.to_vec();
+    if !named("user-agent") {
+        headers.push(("User-Agent".to_string(), user_agent.to_string()));
+    }
+    if !named("accept") {
+        headers.push(("Accept".to_string(), "*/*".to_string()));
+    }
+    let gzip = !named("accept-encoding") && !named("range");
+    if gzip {
+        headers.push(("Accept-Encoding".to_string(), "gzip".to_string()));
+    }
+    (headers, gzip)
+}
+
+/// A body as the caller reads it: gunzipped when the fetch asked for gzip and got it, held to
+/// the request's size limit after decoding.
+pub(crate) struct Body<'a> {
+    response: &'a mut Streaming,
+    gunzip: Option<MultiGzDecoder<Vec<u8>>>,
+    limit: usize,
+    read: usize,
+}
+
+impl<'a> Body<'a> {
+    fn new(response: &'a mut Streaming, gunzip: bool, limit: usize) -> Self {
+        Body {
+            response,
+            gunzip: gunzip.then(|| MultiGzDecoder::new(Vec::new())),
+            limit,
+            read: 0,
+        }
+    }
+
+    /// The next piece of the body, `None` past its end.
+    pub(crate) async fn chunk(&mut self) -> Result<Option<Bytes>, FetchError> {
+        let corrupt = |err: std::io::Error| fetch_error(FetchErrorKind::Other, err.to_string());
+        loop {
+            let piece = match (
+                self.response.chunk().await.map_err(http_error)?,
+                &mut self.gunzip,
+            ) {
+                (Some(piece), None) => piece,
+                (Some(piece), Some(decoder)) => {
+                    decoder.write_all(&piece).map_err(corrupt)?;
+                    Bytes::from(std::mem::take(decoder.get_mut()))
+                }
+                (None, _) => match self.gunzip.take() {
+                    Some(decoder) => Bytes::from(decoder.finish().map_err(corrupt)?),
+                    None => return Ok(None),
+                },
+            };
+            if piece.is_empty() {
+                continue;
+            }
+            self.read = self.read.saturating_add(piece.len());
+            if self.read > self.limit {
+                return Err(fetch_error(FetchErrorKind::Other, "length limit exceeded"));
+            }
+            return Ok(Some(piece));
+        }
     }
 }
 
@@ -179,9 +254,9 @@ impl Fetcher for TunnelFetcher {
 impl Fetcher for FetchAs<'_> {
     async fn get(&self, request: FetchRequest) -> Result<FetchResponse, FetchError> {
         let (head, body) = self
-            .fetch(&request, async |response: &mut Streaming| {
+            .fetch(&request, async |response: &mut Body<'_>| {
                 let mut body = Vec::new();
-                while let Some(chunk) = response.chunk().await.map_err(http_error)? {
+                while let Some(chunk) = response.chunk().await? {
                     body.extend_from_slice(&chunk);
                 }
                 Ok(body)
@@ -200,10 +275,10 @@ impl Fetcher for FetchAs<'_> {
         sink: &mut (dyn AsyncWrite + Send + Unpin),
     ) -> Result<FetchHead, FetchError> {
         let (head, ()) = self
-            .fetch(&request, async |response: &mut Streaming| {
+            .fetch(&request, async |response: &mut Body<'_>| {
                 let written =
                     |err: std::io::Error| fetch_error(FetchErrorKind::Other, err.to_string());
-                while let Some(chunk) = response.chunk().await.map_err(http_error)? {
+                while let Some(chunk) = response.chunk().await? {
                     sink.write_all(&chunk).await.map_err(written)?;
                 }
                 sink.flush().await.map_err(written)

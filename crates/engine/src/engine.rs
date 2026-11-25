@@ -44,6 +44,8 @@ use crate::views::*;
 
 mod connections;
 #[cfg(test)]
+mod fetch_tests;
+#[cfg(test)]
 mod lifecycle_tests;
 #[cfg_attr(not(feature = "mitm"), path = "engine/mitm_disabled.rs")]
 mod mitm;
