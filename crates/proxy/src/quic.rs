@@ -26,6 +26,17 @@ use crate::node::{Egress, resolve_server};
 /// quic-go's `HandshakeIdleTimeout`; quinn has no separate handshake timer, so a dial
 /// without its own deadline gets this as a whole-handshake bound.
 const HANDSHAKE_IDLE: Duration = Duration::from_secs(5);
+const CLIENT_CID_LENGTH: usize = 0;
+
+fn client_endpoint_config() -> EndpointConfig {
+    let mut config = EndpointConfig::default();
+    config.cid_generator(|| {
+        Box::new(quinn_proto::RandomConnectionIdGenerator::new(
+            CLIENT_CID_LENGTH,
+        ))
+    });
+    config
+}
 
 pub(crate) enum Crypto {
     Rustls(Arc<rustls::ClientConfig>),
@@ -172,7 +183,7 @@ impl QuicLink {
     /// hysteria does. The hop schedule and the obfuscation are cloned, so one link can
     /// connect again after a drop.
     pub(crate) async fn connect(&self, cx: &DialCx<'_>) -> io::Result<QuicConn> {
-        self.connect_endpoint(cx, EndpointConfig::default()).await
+        self.connect_endpoint(cx, client_endpoint_config()).await
     }
 
     pub(crate) async fn connect_endpoint(
@@ -195,7 +206,7 @@ impl QuicLink {
         let proxy_cx = DialCx::new(cx.env, Initiator::Proxy, cx.deadline);
         let sockets = &cx.env.sockets;
         dial_each(&proxy_cx, &self.server, self.egress.version(), |addr| {
-            self.connect_to(cx, sockets.ip4p(addr), EndpointConfig::default())
+            self.connect_to(cx, sockets.ip4p(addr), client_endpoint_config())
         })
         .await
     }
@@ -208,7 +219,7 @@ impl QuicLink {
         remote: SocketAddr,
     ) -> io::Result<QuicConn> {
         let raw = TokioRuntime.wrap_udp_socket(socket)?;
-        self.handshake(cx, raw, remote, EndpointConfig::default())
+        self.handshake(cx, raw, remote, client_endpoint_config())
             .await
     }
 
@@ -267,12 +278,44 @@ impl QuicLink {
     reason = "the tests talk to a loopback endpoint directly"
 )]
 mod tests {
+    use std::net::Ipv4Addr;
+    use std::time::Instant;
+
     use concord_quic::{QuicStream, transport_config};
     use quinn::crypto::rustls::QuicClientConfig;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
     use crate::testing::quic_server;
+
+    fn initial_source_cid_length(config: EndpointConfig) -> usize {
+        let options = TlsOptions {
+            skip_cert_verify: true,
+            ..TlsOptions::default()
+        };
+        let tls =
+            concord_tls::quic_client_config(&options, TrustStore::new(b"", Vec::new()), &["h3"])
+                .unwrap();
+        let client =
+            quinn_proto::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls).unwrap()));
+        let mut endpoint = quinn_proto::Endpoint::new(Arc::new(config), None, true, Some([1; 32]));
+        let now = Instant::now();
+        let (_, mut conn) = endpoint
+            .connect(now, client, (Ipv4Addr::LOCALHOST, 4433).into(), "localhost")
+            .unwrap();
+        let mut packet = Vec::new();
+        let transmit = conn.poll_transmit(now, 1, &mut packet).unwrap();
+        let packet = packet.get(..transmit.size).unwrap();
+        assert_ne!(packet.first().copied().unwrap() & 0x80, 0);
+        let destination_cid_length = usize::from(*packet.get(5).unwrap());
+        usize::from(*packet.get(6 + destination_cid_length).unwrap())
+    }
+
+    #[test]
+    fn single_connection_client_uses_the_reference_source_cid() {
+        assert_eq!(initial_source_cid_length(EndpointConfig::default()), 8);
+        assert_eq!(initial_source_cid_length(client_endpoint_config()), 0);
+    }
 
     #[tokio::test]
     async fn the_halves_move_data_both_ways_and_the_hold_outlives_both() {

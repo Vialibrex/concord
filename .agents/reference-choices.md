@@ -302,6 +302,15 @@ Concord already takes these from the references; keep them unless the reference 
   independent rate and burst supplied through the opt-in metrics API (`vendor/PATCHES.md`); substituting the reference
   window factors into Quinn's default 1.25-window/RTT pacer would overrun the configured rate.
 
+- [language-neutral] **QUIC client connection IDs** have zero length on the proxy's dedicated single-use client
+  endpoints (`crates/proxy/src/quic.rs`, `client_endpoint_config`). sing-box's quic-go `v0.61.0-sing-box-mod.12` makes
+  `Dial` transports single-use (`client.go:145-148`) and keeps their zero default CID length (`transport.go:395-404`).
+  mihomo `v1.19.33` uses the same model (`adapter/outbound/hysteria2.go:224-229`, `transport/tuic/common/dial.go:37-42`,
+  quic-go `2548683b76f4` `transport.go:247`, `:410-415`). Each proxy endpoint owns one outgoing connection, including
+  address-race attempts on separate sockets; MASQUE keeps its explicit 20-byte CID through `connect_endpoint`. Quinn
+  routes zero-CID replies by remote address (`vendor/quinn-proto/src/endpoint.rs:1110-1116`), and port hopping already
+  restores the logical base port in `crates/quic/src/socket.rs` (`WrappedSocket::poll_recv`) before that lookup.
+
 - [language-neutral] **Interface lookups for auto-detect** answer from one reading of the interfaces and the
   default route, read again only after a change. sing-box `824dbcf` binds a dial through `AutoDetectInterfaceFunc`
   (`route/network.go:342-366`): the destination is looked up in the cached `DefaultInterfaceFinder` (sing
@@ -616,6 +625,7 @@ MiB, GiB, ns, µs, ms, s, min, h), or as the source text in backticks; `cfg` var
 | `proxy::mieru::underlay::TICK` | 5 s | B | Idle check period 5 s: mieru `pkg/protocol/underlay_base.go:39` (`sessionCleanInterval = 5 * time.Second`). |
 | `proxy::mieru::underlay::WINDOW` | 4096 | B | Advertised receive window 4096: mieru `pkg/protocol/session.go:54` (`maxWindowSize = segmentTreeCapacity`, 4096 at `:48`). |
 | `quic::DATAGRAM_QUEUE` | 128 | B | quic-go keeps maxDatagramRcvQueueLen = 128 received datagrams per connection and drops beyond it (sing-box's quic-go `datagram_queue.go:14`, `:98`), the stack sing-quic and mihomo's QUIC clients run; same count, turned into quinn's byte budget by the advertised frame size. |
+| `proxy::quic::CLIENT_CID_LENGTH` | 0 | B | Single-use client transports keep zero CID length in sing-box's quic-go `v0.61.0-sing-box-mod.12` (`client.go:145-148`, `transport.go:395-404`) and mihomo `v1.19.33` (`adapter/outbound/hysteria2.go:224-229`, `transport/tuic/common/dial.go:37-42`, quic-go `2548683b76f4` `transport.go:247`, `:410-415`). |
 | `proxy::quic::HANDSHAKE_IDLE` | 5 s | B | Handshake bound 5 s: quic-go `internal/protocol/params.go:103` (`DefaultHandshakeIdleTimeout = 5 * time.Second`), the quic-go default mihomo and sing-box dial with. |
 | `quic::INITIAL_PACKET_SIZE` | 1280 | B | quic-go InitialPacketSize = 1280 (`internal/protocol/params.go:12`), which sing-quic multiplies the BBR initial window by (`hysteria2/client.go:604-605`) as mihomo does for TUIC and ShadowQUIC (`transport/tuic/common/congestion.go:48`, `transport/shadowquic/congestion.go:20`); same value. |
 | `quic::INITIAL_WINDOW` | 40960 | B | Cubic initial window 32 x 1280: quic-go `internal/congestion/cubic_sender.go:20` (`initialCongestionWindow = 32`, multiplied by the initial datagram size at `:84`) and `internal/protocol/params.go:12` (`InitialPacketSize = 1280`). |
