@@ -212,6 +212,11 @@ dto! {
         /// Entries below this level are left out of this subscription.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub level: Option<LogLevel>,
+        /// Deliver entries below the profile's `log-level` too, so `level` alone filters this
+        /// subscription, as mihomo's `/logs` does. Default false: entries stop at the higher of
+        /// `level` and `log-level`.
+        #[serde(default)]
+        pub ignore_log_level: bool,
         #[serde(flatten)]
         pub watch: WatchOptions,
     }

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use concord_api::sync::lock;
-use concord_api::{Control, ControlOptions, ControlService, Delivery, EventBus};
+use concord_api::{Control, ControlOptions, ControlService, Delivery, EventBus, LogBridge};
 use concord_engine::{Engine, EngineConfig};
 use concord_platform::NativePlatform;
 use concord_proto::types::*;
@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
+use tracing_subscriber::layer::SubscriberExt;
 
 const PATIENCE: Duration = Duration::from_secs(10);
 
@@ -34,6 +35,7 @@ rules:
 
 struct Rig {
     control: Arc<Control>,
+    bus: Arc<EventBus>,
     port: u16,
     secret: &'static str,
     _dir: tempfile::TempDir,
@@ -54,7 +56,7 @@ impl Rig {
         });
         let control = Control::new(
             engine,
-            bus,
+            bus.clone(),
             ControlOptions {
                 profile_controller,
                 ..ControlOptions::default()
@@ -83,6 +85,7 @@ impl Rig {
         tokio::spawn(concord_controller::serve(control.clone()));
         let rig = Rig {
             control,
+            bus,
             port,
             secret,
             _dir: dir,
@@ -760,4 +763,27 @@ async fn next_resource(
             other => panic!("no resource update: {:?}", other.map(|item| item.is_some())),
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_log_stream_filters_by_the_level_it_asks_for_and_not_the_profiles() {
+    let rig = Rig::with_profile(false, &format!("log-level: warning\n{PROFILE}")).await;
+    let _logging = tracing::subscriber::set_default(tracing_subscriber::registry().with(
+        LogBridge::new(rig.bus.gate().clone(), rig.bus.clone(), false),
+    ));
+    let reading = tokio::spawn(first_line(rig.port, "/logs?level=info", rig.secret));
+    timeout(PATIENCE, async {
+        while rig.bus.topic_counts()[0] == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the log stream did not open");
+    tracing::debug!("below what the stream asked for");
+    tracing::info!("[TCP] below the profile's level");
+    let line = reading.await.unwrap();
+    assert_eq!(
+        line,
+        json!({"type": "info", "payload": "[TCP] below the profile's level"})
+    );
 }

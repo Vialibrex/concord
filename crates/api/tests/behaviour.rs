@@ -1109,6 +1109,41 @@ async fn the_log_gate_follows_the_log_subscriptions() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_log_watch_stops_at_the_profiles_level_unless_it_ignores_it() {
+    let rig = Rig::new().await;
+    rig.write_config("log-level: warning\n");
+    rig.apply().await.unwrap();
+    let subscriber = tracing_subscriber::registry().with(LogBridge::new(
+        rig.bus.gate().clone(),
+        rig.bus.clone(),
+        false,
+    ));
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let watch = |level, ignore_log_level| {
+        rig.control.log_watch(LogWatchParams {
+            level: Some(level),
+            ignore_log_level,
+            ..LogWatchParams::default()
+        })
+    };
+    let mut capped = watch(LogLevel::Debug, false).await.unwrap().events;
+    let mut ignoring = watch(LogLevel::Info, true).await.unwrap().events;
+
+    tracing::debug!("below both");
+    tracing::info!("below the profile");
+    tracing::warn!("at the profile");
+    assert_eq!(next(&mut ignoring).await.text, "below the profile");
+    assert_eq!(next(&mut ignoring).await.text, "at the profile");
+    assert_eq!(next(&mut capped).await.text, "at the profile");
+
+    drop(ignoring);
+    tracing::info!("below the profile again");
+    tracing::error!("above the profile");
+    assert_eq!(next(&mut capped).await.text, "above the profile");
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_traffic_stream_ticks_on_its_interval_and_totals_start_at_the_snapshot() {
     let rig = Rig::new().await;
     let mut traffic = rig

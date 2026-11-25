@@ -176,6 +176,7 @@ pub fn memory(control: Arc<Control>) -> Values {
 pub async fn logs(control: &Arc<Control>, level: LogLevel, structured: bool) -> Values {
     let params = LogWatchParams {
         level: Some(level),
+        ignore_log_level: true,
         ..Default::default()
     };
     match control.log_watch(params).await {

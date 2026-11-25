@@ -164,6 +164,13 @@ impl<T, G> QueueStream<T, G> {
             _guard: guard,
         }
     }
+
+    pub fn holding<H>(self, extra: H) -> QueueStream<T, (G, H)> {
+        QueueStream {
+            queue: self.queue,
+            _guard: (self._guard, extra),
+        }
+    }
 }
 
 impl<T, G: Unpin> Stream for QueueStream<T, G> {

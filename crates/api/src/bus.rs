@@ -13,7 +13,7 @@ use concord_proto::types::{ConnectionDelta, CoreEvent, DnsEntry, LogEntry, LogLe
 use futures_util::stream::Stream;
 
 use crate::convert;
-use crate::logging::LogGate;
+use crate::logging::{IgnoreLevel, LogGate};
 use crate::stream::{Delivery, PolicyQueue, QueueStream, policy_of};
 
 const LOG_CAPACITY: usize = 1024;
@@ -339,16 +339,30 @@ impl EventBus {
         QueueStream::new(queue, membership)
     }
 
+    /// Without `ignore_log_level` an entry also has to reach the profile's `log-level`, which
+    /// another subscription that ignores it may have opened the gate below.
     pub fn watch_log(
         &self,
         min: LogLevel,
-    ) -> QueueStream<LogEntry, Membership<QueueSub<LogEntry>>> {
+        ignore_log_level: bool,
+    ) -> QueueStream<LogEntry, (Membership<QueueSub<LogEntry>>, Option<IgnoreLevel>)> {
+        let hold =
+            ignore_log_level.then(|| self.gate.ignore_level_from(convert::engine_level(min)));
+        let accept: Filter<LogEntry> = if ignore_log_level {
+            Box::new(move |entry: &LogEntry| entry.level >= min)
+        } else {
+            let gate = self.gate.clone();
+            Box::new(move |entry: &LogEntry| {
+                entry.level >= min && entry.level >= convert::log_level(gate.level())
+            })
+        };
         Self::queue_stream(
             &self.log,
             policy_of("log.watch"),
             LOG_CAPACITY,
-            Some(Box::new(move |entry: &LogEntry| entry.level >= min)),
+            Some(accept),
         )
+        .holding(hold)
     }
 
     pub fn watch_dns(&self) -> QueueStream<DnsEntry, Membership<QueueSub<DnsEntry>>> {
@@ -778,13 +792,13 @@ mod tests {
     #[test]
     fn leaving_a_topic_a_holder_poisoned_still_turns_its_gate_off() {
         let bus = EventBus::new();
-        let stream = bus.watch_log(LogLevel::Info);
+        let stream = bus.watch_log(LogLevel::Info, false);
         concord_test_support::poison(&bus.log.subs);
         drop(stream);
         assert!(!bus.gate.wants(concord_common::LogLevel::Error));
         assert!(!bus.enabled());
         assert_eq!(bus.subscribers(), 0);
-        let again = bus.watch_log(LogLevel::Info);
+        let again = bus.watch_log(LogLevel::Info, false);
         assert!(bus.gate.wants(concord_common::LogLevel::Error));
         drop(again);
     }
@@ -793,8 +807,8 @@ mod tests {
     fn the_log_gate_streams_while_a_log_subscription_lives() {
         let bus = EventBus::new();
         assert!(!bus.gate.wants(concord_common::LogLevel::Error));
-        let first = bus.watch_log(LogLevel::Info);
-        let second = bus.watch_log(LogLevel::Info);
+        let first = bus.watch_log(LogLevel::Info, false);
+        let second = bus.watch_log(LogLevel::Info, false);
         assert!(bus.gate.wants(concord_common::LogLevel::Error));
         drop(first);
         assert!(bus.gate.wants(concord_common::LogLevel::Error));

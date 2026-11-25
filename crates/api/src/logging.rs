@@ -1,7 +1,8 @@
 use std::fmt::Write as _;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
+use concord_common::sync::lock;
 use concord_common::{CoreEvent, EventSink, LogLevel, LogRecord};
 use tracing::field::{Field, Visit};
 use tracing::subscriber::Interest;
@@ -10,10 +11,13 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 
 /// Whether log entries are wanted and from what level. Entries are produced only
-/// while a `log.watch` subscription exists.
+/// while a `log.watch` subscription exists, from the profile's `log-level`, or
+/// from a lower level a subscription that ignores it asked for.
 pub struct LogGate {
     streaming: AtomicBool,
     level: AtomicU8,
+    floor: AtomicU8,
+    ignoring: Mutex<[usize; LogLevel::ALL.len()]>,
 }
 
 impl LogGate {
@@ -21,6 +25,8 @@ impl LogGate {
         Arc::new(LogGate {
             streaming: AtomicBool::new(false),
             level: AtomicU8::new(LogLevel::Info as u8),
+            floor: AtomicU8::new(LogLevel::Silent as u8),
+            ignoring: Mutex::new([0; LogLevel::ALL.len()]),
         })
     }
 
@@ -32,8 +38,52 @@ impl LogGate {
         self.level.store(level as u8, Ordering::SeqCst);
     }
 
+    pub(crate) fn level(&self) -> LogLevel {
+        let level = self.level.load(Ordering::Relaxed);
+        LogLevel::ALL
+            .into_iter()
+            .find(|known| *known as u8 == level)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn wants(&self, level: LogLevel) -> bool {
-        self.streaming.load(Ordering::Relaxed) && level as u8 >= self.level.load(Ordering::Relaxed)
+        self.streaming.load(Ordering::Relaxed)
+            && (level as u8 >= self.level.load(Ordering::Relaxed)
+                || level as u8 >= self.floor.load(Ordering::Relaxed))
+    }
+
+    /// Opens the gate from `level` whatever the profile's level, until the hold is dropped.
+    pub(crate) fn ignore_level_from(self: &Arc<Self>, level: LogLevel) -> IgnoreLevel {
+        self.count_ignoring(level, |count| *count += 1);
+        IgnoreLevel {
+            gate: self.clone(),
+            level,
+        }
+    }
+
+    fn count_ignoring(&self, level: LogLevel, change: impl FnOnce(&mut usize)) {
+        let mut ignoring = lock(&self.ignoring);
+        if let Some(count) = ignoring.get_mut(level as usize) {
+            change(count);
+        }
+        let floor = LogLevel::ALL
+            .into_iter()
+            .zip(ignoring.iter())
+            .find_map(|(level, count)| (*count > 0).then_some(level))
+            .unwrap_or(LogLevel::Silent);
+        self.floor.store(floor as u8, Ordering::SeqCst);
+    }
+}
+
+pub struct IgnoreLevel {
+    gate: Arc<LogGate>,
+    level: LogLevel,
+}
+
+impl Drop for IgnoreLevel {
+    fn drop(&mut self) {
+        self.gate
+            .count_ignoring(self.level, |count| *count = count.saturating_sub(1));
     }
 }
 

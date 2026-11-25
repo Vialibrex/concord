@@ -3880,6 +3880,11 @@
           ],
           "description": "Entries below this level are left out of this subscription."
         },
+        "ignoreLogLevel": {
+          "type": "boolean",
+          "description": "Deliver entries below the profile's `log-level` too, so `level` alone filters this\nsubscription, as mihomo's `/logs` does. Default false: entries stop at the higher of\n`level` and `log-level`.",
+          "default": false
+        },
         "credit": {
           "type": [
             "integer",

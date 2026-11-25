@@ -101,7 +101,8 @@ impl Control {
         params: LogWatchParams,
     ) -> Result<Subscription<Empty, LogEntry>, ApiError> {
         let events = streams::map_stream(
-            self.bus.watch_log(params.level.unwrap_or_default()),
+            self.bus
+                .watch_log(params.level.unwrap_or_default(), params.ignore_log_level),
             |entry| entry,
         );
         Ok(Subscription::new(None, events))
