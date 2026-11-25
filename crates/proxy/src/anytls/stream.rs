@@ -101,18 +101,17 @@ impl Inbox {
                     self.pending = buffer;
                 }
                 Some(Chunk::Lent) => {}
-                Some(Chunk::Fin) => self.ended = true,
-                Some(Chunk::Error(message)) => {
-                    self.ended = true;
-                    return Poll::Ready(Err(CoreError::TargetRefused(message).into()));
-                }
-                None if closer.flow.done.load(Ordering::Acquire) => self.ended = true,
                 None => {
                     self.ended = true;
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::ConnectionReset,
-                        "anytls session closed",
-                    )));
+                    if let Some(message) = closer.flow.remote_err.get() {
+                        return Poll::Ready(Err(CoreError::TargetRefused(message.clone()).into()));
+                    }
+                    if !closer.flow.done.load(Ordering::Acquire) {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::ConnectionReset,
+                            "anytls session closed",
+                        )));
+                    }
                 }
             }
         }

@@ -74,6 +74,8 @@ impl AnyTls {
     }
 
     async fn open_stream(&self, cx: &DialCx<'_>, dst: &Address) -> io::Result<BoxStream> {
+        let mut head = Vec::new();
+        SOCKS.write(dst, &mut head)?;
         let idle = if self.pool.disable_reuse() {
             None
         } else {
@@ -83,16 +85,13 @@ impl AnyTls {
             Some(session) => session,
             None => self.connect_session(cx).await?,
         };
-        let mut stream = match session.open_stream().await {
+        let stream = match session.open_stream(head).await {
             Ok(stream) => stream,
             Err(err) => {
                 session.close();
                 return Err(err);
             }
         };
-        let mut head = Vec::new();
-        SOCKS.write(dst, &mut head)?;
-        stream.write_all(&head).await?;
         Ok(Box::new(stream))
     }
 }

@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::frame::{
     CMD_ALERT, CMD_FIN, CMD_HEART_REQUEST, CMD_HEART_RESPONSE, CMD_SERVER_SETTINGS, CMD_SETTINGS,
-    CMD_SYN, CMD_SYNACK, CMD_UPDATE_PADDING, Framer, frame,
+    CMD_SYNACK, CMD_UPDATE_PADDING, Framer, frame,
 };
 use super::padding::{Padding, parse_map};
 use super::pool::Pool;
@@ -29,6 +29,10 @@ const CHUNK_QUEUE: usize = 1;
 const SYNACK_DEADLINE: Duration = Duration::from_secs(3);
 
 pub(super) enum Out {
+    Open {
+        sid: u32,
+        head: Vec<u8>,
+    },
     Data(Vec<u8>),
     Owned {
         frame: StreamBuffer,
@@ -37,21 +41,19 @@ pub(super) enum Out {
     // These follow the data batch, retaining its extra frame slots until
     // the writer drains it without enlarging every channel item.
     FrameSlot,
-    Unbuffer,
 }
 
 pub(super) enum Chunk {
     Data(StreamBuffer),
     /// The session's reader is lent to the stream, holding the stream's next frame.
     Lent,
-    Fin,
-    Error(String),
 }
 
 #[derive(Default)]
 pub(super) struct Flow {
     pub(super) done: AtomicBool,
     pub(super) reads: OnceLock<ReadBufferOptions>,
+    pub(super) remote_err: OnceLock<String>,
     wrote: AtomicBool,
     draining: AtomicBool,
 }
@@ -262,13 +264,19 @@ impl Session {
         self.out.clone()
     }
 
-    pub(super) async fn open_stream(self: &Arc<Self>) -> io::Result<super::stream::AnyTlsStream> {
+    pub(super) async fn open_stream(
+        self: &Arc<Self>,
+        head: Vec<u8>,
+    ) -> io::Result<super::stream::AnyTlsStream> {
         if self.is_closed() {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         let sid = self.next_sid.fetch_add(1, Ordering::AcqRel) + 1;
         let (tx, rx) = mpsc::channel(CHUNK_QUEUE);
         let flow = Arc::new(Flow::default());
+        if !head.is_empty() {
+            flow.wrote();
+        }
         if sid >= 2 && self.peer_version.load(Ordering::Acquire) >= 2 {
             let session = self.clone();
             let watch = self.tasks.spawn(async move {
@@ -286,19 +294,9 @@ impl Session {
                 flow: flow.clone(),
             },
         );
-        let sent = async {
-            self.out
-                .send(Out::Data(frame(CMD_SYN, sid, &[])))
-                .await
-                .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))?;
-            self.out
-                .send(Out::Unbuffer)
-                .await
-                .map_err(|_| io::Error::from(io::ErrorKind::BrokenPipe))
-        };
-        if let Err(err) = sent.await {
+        if self.out.send(Out::Open { sid, head }).await.is_err() {
             lock(&self.streams).remove(&sid);
-            return Err(err);
+            return Err(io::ErrorKind::BrokenPipe.into());
         }
         if self.is_closed() {
             return Err(io::ErrorKind::BrokenPipe.into());
@@ -328,13 +326,18 @@ impl Session {
         }
     }
 
-    async fn finish_remote(self: &Arc<Self>, sid: u32, last: Chunk) {
+    fn finish_remote(self: &Arc<Self>, sid: u32, error: Option<String>) {
         let entry = lock(&self.streams).remove(&sid);
         if let Some(entry) = entry {
-            if !entry.flow.done.swap(true, Ordering::AcqRel) {
+            if let Some(message) = error {
+                let _ = entry.flow.remote_err.set(message);
+            }
+            let release = !entry.flow.done.swap(true, Ordering::AcqRel);
+            // Drop the sender before releasing the session so EOF/errors never block read_loop on CHUNK_QUEUE.
+            drop(entry);
+            if release {
                 self.release();
             }
-            let _ = entry.tx.send(last).await;
         }
     }
 
@@ -409,14 +412,14 @@ impl Session {
                 }
                 Frame::Control { cmd, sid, payload } => (cmd, sid, payload),
             };
-            if !self.control(cmd, sid, payload).await {
+            if !self.control(cmd, sid, payload) {
                 return Ok(());
             }
         }
     }
 
     /// Handles a control frame; false when the server ends the session.
-    async fn control(self: &Arc<Self>, cmd: u8, sid: u32, payload: Vec<u8>) -> bool {
+    fn control(self: &Arc<Self>, cmd: u8, sid: u32, payload: Vec<u8>) -> bool {
         match cmd {
             CMD_SYNACK => {
                 if let Some(watch) = lock(&self.synack_watch).take() {
@@ -424,12 +427,11 @@ impl Session {
                 }
                 if !payload.is_empty() {
                     let message = String::from_utf8_lossy(&payload).into_owned();
-                    self.finish_remote(sid, Chunk::Error(format!("remote: {message}")))
-                        .await;
+                    self.finish_remote(sid, Some(format!("remote: {message}")));
                     self.queue(Out::Data(frame(CMD_FIN, sid, &[])));
                 }
             }
-            CMD_FIN => self.finish_remote(sid, Chunk::Fin).await,
+            CMD_FIN => self.finish_remote(sid, None),
             CMD_ALERT => {
                 if !payload.is_empty() {
                     tracing::debug!(
@@ -518,7 +520,7 @@ async fn write_loop(session: Arc<Session>, mut queue: mpsc::Receiver<Out>, write
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anytls::frame::{CMD_PSH, HEADER, MAX_FRAME, data_frames};
+    use crate::anytls::frame::{CMD_PSH, CMD_SYN, CMD_WASTE, HEADER, MAX_FRAME, data_frames};
     use tokio::io::AsyncReadExt;
 
     fn queued_stream() -> (
@@ -731,7 +733,7 @@ mod tests {
         let pool = Pool::new(false, 0, Tasks::default());
         let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
         let session = Session::start(Box::new(near), 1, &pool, padding, "");
-        let mut stream = session.open_stream().await.unwrap();
+        let mut stream = session.open_stream(Vec::new()).await.unwrap();
         stream.write_all(b"start").await.unwrap();
         assert_eq!(read_frame(&mut far).await.0, CMD_SETTINGS);
         assert_eq!(read_frame(&mut far).await.0, CMD_SYN);
@@ -843,7 +845,7 @@ mod tests {
             Padding::parse(scheme.as_bytes()).unwrap(),
         ));
         let session = Session::start(Box::new(near), 1, &pool, padding, "");
-        let mut stream = session.open_stream().await.unwrap();
+        let mut stream = session.open_stream(Vec::new()).await.unwrap();
         for (owned, payload) in writes {
             if *owned {
                 let mut buffer = relay_buffer(HEADER, payload);
@@ -903,7 +905,7 @@ mod tests {
         let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
         let session = Session::start(Box::new(near), 1, &pool, padding, "meta");
         assert!(pool.register(session.clone(), pool.ticket()));
-        let mut stream = session.open_stream().await.unwrap();
+        let mut stream = session.open_stream(Vec::new()).await.unwrap();
         stream.write_all(b"hello").await.unwrap();
 
         let (cmd, sid, body) = read_frame(&mut far).await;
@@ -948,7 +950,7 @@ mod tests {
         let pool = Pool::new(false, 0, Tasks::default());
         let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
         let session = Session::start(Box::new(near), 1, &pool, padding, "");
-        let mut stream = session.open_stream().await.unwrap();
+        let mut stream = session.open_stream(Vec::new()).await.unwrap();
         let early: Vec<u8> = (0..MAX_FRAME).map(|i| i.to_le_bytes()[1]).collect();
         far.write_all(&frame(CMD_PSH, 1, &early)).await.unwrap();
         let writer = BufferRequirements {
@@ -989,7 +991,7 @@ mod tests {
         let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
         let session = Session::start(Box::new(near), 1, &pool, padding, "");
         assert!(pool.register(session.clone(), pool.ticket()));
-        let mut stream = session.open_stream().await.unwrap();
+        let mut stream = session.open_stream(Vec::new()).await.unwrap();
         for byte in *b"ab" {
             far.write_all(&frame(CMD_PSH, 1, &[byte])).await.unwrap();
             let mut got = [0];
@@ -1033,8 +1035,8 @@ mod tests {
         let pool = Pool::new(false, 0, Tasks::default());
         let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
         let session = Session::start(Box::new(near), 1, &pool, padding, "");
-        let mut first = session.open_stream().await.unwrap();
-        let mut second = session.open_stream().await.unwrap();
+        let mut first = session.open_stream(Vec::new()).await.unwrap();
+        let mut second = session.open_stream(Vec::new()).await.unwrap();
         let mut got = [0];
         for byte in *b"abc" {
             far.write_all(&frame(CMD_PSH, 1, &[byte])).await.unwrap();
@@ -1069,7 +1071,7 @@ mod tests {
         far.write_all(&late[50..]).await.unwrap();
         let next = pool.take_idle().unwrap();
         assert_eq!(next.seq, session.seq);
-        let mut stream = next.open_stream().await.unwrap();
+        let mut stream = next.open_stream(Vec::new()).await.unwrap();
         far.write_all(&frame(CMD_PSH, 2, b"next")).await.unwrap();
         let mut got = [0; 4];
         stream.read_exact(&mut got).await.unwrap();
@@ -1102,7 +1104,7 @@ mod tests {
             let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
             let session = Session::start(Box::new(near), 1, &pool, padding, "");
             assert!(pool.register(session.clone(), pool.ticket()));
-            let mut stream = session.open_stream().await.unwrap();
+            let mut stream = session.open_stream(Vec::new()).await.unwrap();
             let data: Vec<u8> = (0..size).map(|i| i.to_le_bytes()[0]).collect();
             tokio::join!(
                 async {
@@ -1133,7 +1135,7 @@ mod tests {
         let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
         let session = Session::start(Box::new(near), 1, &pool, padding, "meta");
         assert!(pool.register(session.clone(), pool.ticket()));
-        let stream: BoxStream = Box::new(session.open_stream().await.unwrap());
+        let stream: BoxStream = Box::new(session.open_stream(Vec::new()).await.unwrap());
         let (mut read, mut write) = stream.into_split();
         let reader = tokio::spawn(async move {
             let mut got = [0u8; 5];
@@ -1164,7 +1166,7 @@ mod tests {
         let pool = Pool::new(false, 0, Tasks::default());
         let padding = Arc::new(ArcSwap::from_pointee(Padding::default_scheme()));
         let session = Session::start(Box::new(near), 1, &pool, padding, "");
-        let mut stream = session.open_stream().await.unwrap();
+        let mut stream = session.open_stream(Vec::new()).await.unwrap();
         far.write_all(&frame(CMD_SYNACK, 1, b"dial failed"))
             .await
             .unwrap();
@@ -1183,9 +1185,159 @@ mod tests {
         let pool = Pool::new(false, 0, Tasks::default());
         let padding = Arc::new(ArcSwap::from_pointee(Padding::default_scheme()));
         let session = Session::start(Box::new(near), 1, &pool, padding, "");
-        let mut stream = session.open_stream().await.unwrap();
+        let mut stream = session.open_stream(Vec::new()).await.unwrap();
         drop(far);
         assert!(stream.read(&mut [0u8; 4]).await.is_err());
         assert!(session.is_closed());
+    }
+
+    #[tokio::test]
+    async fn a_stream_open_with_destination_preserves_padding_then_combines_syn_and_head() {
+        let (near, mut far) = tokio::io::duplex(1 << 16);
+        let pool = Pool::new(false, 0, Tasks::default());
+        let padding = Arc::new(ArcSwap::from_pointee(
+            Padding::parse(b"stop=4\n1=120-120\n2=20-20\n3=30-30").unwrap(),
+        ));
+        let session = Session::start(Box::new(near), 1, &pool, padding, "m");
+        assert!(pool.register(session.clone(), pool.ticket()));
+
+        let first = session.open_stream(b"dest1".to_vec()).await.unwrap();
+        assert_eq!(read_frame(&mut far).await.0, CMD_SETTINGS);
+        assert_eq!(read_frame(&mut far).await, (CMD_SYN, 1, Vec::new()));
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 1, b"dest1".to_vec()));
+        assert_eq!(read_frame(&mut far).await.0, CMD_WASTE);
+        drop(first);
+        assert_eq!(read_frame(&mut far).await, (CMD_FIN, 1, Vec::new()));
+        assert_eq!(read_frame(&mut far).await.0, CMD_WASTE);
+
+        let second = session.open_stream(b"dest2".to_vec()).await.unwrap();
+        assert_eq!(read_frame(&mut far).await, (CMD_SYN, 2, Vec::new()));
+        assert_eq!(read_frame(&mut far).await.0, CMD_WASTE);
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 2, b"dest2".to_vec()));
+        drop(second);
+        assert_eq!(read_frame(&mut far).await, (CMD_FIN, 2, Vec::new()));
+
+        let third = session.open_stream(b"dest3".to_vec()).await.unwrap();
+        assert_eq!(read_frame(&mut far).await, (CMD_SYN, 3, Vec::new()));
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 3, b"dest3".to_vec()));
+        drop(third);
+        assert_eq!(read_frame(&mut far).await, (CMD_FIN, 3, Vec::new()));
+        session.close();
+    }
+
+    #[tokio::test]
+    async fn a_remote_fin_does_not_block_the_session_reader_behind_a_queued_frame() {
+        let (near, mut far) = tokio::io::duplex(1 << 16);
+        let pool = Pool::new(false, 0, Tasks::default());
+        let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap()));
+        let session = Session::start(Box::new(near), 1, &pool, padding, "");
+        assert!(pool.register(session.clone(), pool.ticket()));
+
+        let mut first = session.open_stream(b"d1".to_vec()).await.unwrap();
+        assert_eq!(read_frame(&mut far).await.0, CMD_SETTINGS);
+        assert_eq!(read_frame(&mut far).await, (CMD_SYN, 1, Vec::new()));
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 1, b"d1".to_vec()));
+
+        far.write_all(&frame(CMD_PSH, 1, b"first")).await.unwrap();
+        far.write_all(&frame(CMD_FIN, 1, &[])).await.unwrap();
+
+        let reused = loop {
+            if let Some(idle) = pool.take_idle() {
+                break idle;
+            }
+            tokio::task::yield_now().await;
+        };
+        let mut second = reused.open_stream(b"d2".to_vec()).await.unwrap();
+        far.write_all(&frame(CMD_PSH, 2, b"second")).await.unwrap();
+        let mut got_second = [0u8; 6];
+        second.read_exact(&mut got_second).await.unwrap();
+        assert_eq!(&got_second, b"second");
+
+        let mut got_first = [0u8; 5];
+        first.read_exact(&mut got_first).await.unwrap();
+        assert_eq!(&got_first, b"first");
+        assert_eq!(first.read(&mut got_first).await.unwrap(), 0);
+        session.close();
+    }
+
+    #[tokio::test]
+    async fn a_vectored_open_handles_short_writes() {
+        use std::io::IoSlice;
+        use std::pin::Pin;
+        use tokio::io::AsyncWrite;
+
+        struct ShortVectored {
+            written: Arc<Mutex<Vec<u8>>>,
+            limit: usize,
+        }
+
+        impl AsyncWrite for ShortVectored {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                let take = buf.len().min(self.limit);
+                lock(&self.written).extend_from_slice(&buf[..take]);
+                Poll::Ready(Ok(take))
+            }
+
+            fn poll_write_vectored(
+                self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                bufs: &[IoSlice<'_>],
+            ) -> Poll<io::Result<usize>> {
+                let mut left = self.limit;
+                let mut total = 0;
+                let mut out = lock(&self.written);
+                for slice in bufs {
+                    if left == 0 {
+                        break;
+                    }
+                    let take = slice.len().min(left);
+                    out.extend_from_slice(&slice[..take]);
+                    left -= take;
+                    total += take;
+                }
+                Poll::Ready(Ok(total))
+            }
+
+            fn is_write_vectored(&self) -> bool {
+                true
+            }
+
+            fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let mut writer = FrameWriter {
+            sink: Box::new(ShortVectored {
+                written: written.clone(),
+                limit: 3,
+            }),
+            framer: Framer {
+                buffering: false,
+                buffer: Vec::new(),
+                padding_on: false,
+                counter: 0,
+                padding: Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=0").unwrap())),
+            },
+        };
+        writer
+            .send(Out::Open {
+                sid: 7,
+                head: b"dest-addr".to_vec(),
+            })
+            .await
+            .unwrap();
+        let mut expected = frame(CMD_SYN, 7, &[]);
+        expected.extend_from_slice(&frame(CMD_PSH, 7, b"dest-addr"));
+        assert_eq!(*lock(&written), expected);
     }
 }

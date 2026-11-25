@@ -234,17 +234,23 @@ Concord already takes these from the references; keep them unless the reference 
 
 - [language-neutral] **AnyTLS writes** reserve one FIFO frame slot and accept up to 65535 payload bytes at a time.
   A relay buffer with 7 bytes of headroom is framed in place, as in sing-anytls `580984e4`,
-  `stream.go:313-324`. Its `session.go:446-487,582-590` writes from the caller under the session's write lock.
+  `stream.go:313-324`. Its `session.go:446-487,582-590` writes from the caller under the session's write lock, and
+  `session.go:494-515` opens a stream (`CMD_SYN` and its destination `CMD_PSH`) under one acquisition of that lock.
   mihomo `3f27ef39`, `transport/anytls/session/session.go:381-393,445-447,518`, likewise keeps a write contiguous
-  with respect to other streams and control frames. Concord keeps the writer in the session task for the first
-  payload and the first write following a reply. Consecutive relay writes on the same stream can borrow the idle,
-  unpadded writer with their slot reserved. The task takes any unwritten tail or pending flush in that slot and
-  resumes sole ownership for individual requests, copied frames and control frames.
+  with respect to other streams and control frames. Concord opens a stream (`CMD_SYN`, unbuffering on the first stream,
+  and the destination frame) in one slot of the write queue, keeping the writer in the session task for the first
+  payload and the first write following a reply. Once padding has stopped, `CMD_SYN` and the destination frame are
+  written in one vectored write; while padding is active they keep their separate padded records. Consecutive relay
+  writes on the same stream can borrow the idle, unpadded writer with their slot reserved. The task takes any
+  unwritten tail or pending flush in that slot and resumes sole ownership for individual requests, copied frames and
+  control frames.
 
 - [runtime-bound] **AnyTLS reads** happen in the session's receive loop in both references, which hand each data
   frame to its stream: mihomo `3f27ef39` through a synchronous pipe
   (`transport/anytls/session/session.go:190-200`, `transport/anytls/pipe/io_pipe.go:209-210`), sing-anytls
-  `580984e4` through a one-buffer read signal (`session.go:276-296`, `stream.go:59-84`). A goroutine handoff per frame
+  `580984e4` through a one-buffer read signal (`session.go:276-296`, `stream.go:59-84`), where remote EOF and errors
+  are recorded without waiting for the pending read buffer (`stream.go:115-126`). Concord's per-stream channel holds
+  one data frame and closes without blocking on `CMD_FIN` or a remote refusal. A goroutine handoff per frame
   is cheap; a Tokio task handoff per frame costs a wake, often a reactor wake on another worker. Concord's session
   task lends its resumable read half, with the next frame, to a stream that is the session's only stream and takes
   data frames without writing in between; the stream then reads its own frames in its task. Any other stream's frame
