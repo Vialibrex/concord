@@ -46,6 +46,8 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | shadowsocks | Send the first write over as many chunks as it needs | None | Bug-fix PR |
 | shadowsocks | AEAD-2022 padding of 1 to 900 bytes under 900-byte payloads | None | PR citing sing-shadowsocks |
 | shadowsocks | `set_clock`; split halves; owned in-place writes | None | Last, as one design discussion: the largest and most Concord-specific |
+| tokio | Notify peer workers only after `transition_from_parked` removes self from `idle.sleepers` | None | Bug-fix PR |
+| tokio | Check pending queues in `transition_worker_from_searching` before waking a parked worker | None | Bug-fix PR |
 | tun-rs | `AsyncDevice::into_sync` keeps the owned device | None | PR to tun-rs |
 
 ## boring 5.4.0
@@ -255,6 +257,28 @@ Upgrade `quinn`, `quinn-proto` and `quinn-udp` together; replay these changes an
 - `src/relay/tcprelay/aead_2022.rs`, `src/relay/tcprelay/mod.rs`: `set_clock` replaces the system clock for AEAD-2022
   timestamps; `concord-proxy` points it at the engine's NTP-corrected clock (`f53191e`).
 - `Cargo.toml`, `tests/`: the `[[test]]` targets, their sources and the `env_logger` dev-dependency are removed.
+- `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`: crates.io packaging metadata, omitted.
+
+## tokio 1.54.1
+
+The package archive checksum is `b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3`.
+
+- `src/runtime/scheduler/multi_thread/worker.rs`, `src/runtime/scheduler/multi_thread/idle.rs`:
+  - Fix self-notification on driver wake: move `should_notify_others` -> `notify_parked_local` out of `park_internal`
+    into `Context::park` after `transition_from_parked` (and into `Context::park_yield`). Previously, a worker waking
+    from the I/O or timer driver with >=2 tasks was still in `idle.sleepers`, so `worker_to_notify` could pop and
+    unpark the waking worker itself, leaving its parker `NOTIFIED` (forcing a noop park on the next turn) and causing
+    `unpark_worker_by_id` to fail and mis-set `is_searching = true`.
+  - Fix spurious wakeup on empty queues: `Handle::transition_worker_from_searching` now calls `notify_if_work_pending`
+    (returning `bool`, reusing the same `SeqCst` RMW Dekker ordering as `transition_to_parked`) instead of
+    unconditionally calling `notify_parked_local` when no stealable or injected tasks exist. `TimerFlavor::Alternative`
+    retains the unconditional notify because `notify_if_work_pending` does not inspect `inject_timers`.
+  - Unit tests (`concord_tests` in `worker.rs`, with `Idle::is_searching_any` test helper in `idle.rs`, plus workspace
+    stable-API regressions in `crates/platform/tests/tokio_scheduler.rs`) reproduce both bugs before the fix and assert
+    zero self-notify noop parks, zero mis-set `is_searching`, and single-worker wakeup on single remote task spawns.
+    Tokio's upstream `rt_metrics`, `rt_threaded`, `rt_unstable_metrics`, and `rt_unstable_eager_driver_handoff` suites
+    were also verified against the full upstream package before trimming `tests/`.
+- `Cargo.toml`, `tests/`: the `[[test]]` targets are removed with their sources.
 - `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`: crates.io packaging metadata, omitted.
 
 ## tun-rs 2.8.16

@@ -31,7 +31,7 @@ members = [
     "tools/bench",
     "xtask",
 ]
-exclude = ["vendor/boring", "vendor/gotatun", "vendor/h3", "vendor/h2", "vendor/mio", "vendor/quinn", "vendor/quinn-proto", "vendor/rustls", "vendor/shadowsocks", "vendor/tun-rs"]
+exclude = ["vendor/boring", "vendor/gotatun", "vendor/h3", "vendor/h2", "vendor/mio", "vendor/quinn", "vendor/quinn-proto", "vendor/rustls", "vendor/shadowsocks", "vendor/tokio", "vendor/tun-rs"]
 
 [workspace.package]
 version = "0.1.0"
@@ -307,5 +307,6 @@ quinn = { path = "vendor/quinn" }
 quinn-proto = { path = "vendor/quinn-proto" }
 shadowsocks = { path = "vendor/shadowsocks" }
 mio = { path = "vendor/mio" }
+tokio = { path = "vendor/tokio" }
 
 rustls = { path = "vendor/rustls" }
