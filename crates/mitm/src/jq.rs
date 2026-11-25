@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{LazyLock, OnceLock};
 
 use concord_config::mitm::text::quote;
@@ -5,7 +6,7 @@ use concord_config::mitm::{IssueKind, LineError};
 use jaq_core::compile;
 use jaq_core::load::parse::Def;
 use jaq_core::load::{Arena, File, Loader, lex, parse};
-use jaq_core::{Compiler, Ctx, Vars, data, unwrap_valr};
+use jaq_core::{Bind, Compiler, Ctx, Native, Vars, data, native, unwrap_valr};
 use jaq_json::{Val, read};
 
 type Filter = jaq_core::Filter<data::JustLut<Val>>;
@@ -45,7 +46,7 @@ pub(crate) enum JqOutcome {
 
 impl Jq {
     pub(crate) fn compile(code: &str) -> Result<Jq, JqError> {
-        build(code)?;
+        check(code)?;
         Ok(Jq {
             filter: OnceLock::new(),
             code: code.to_string(),
@@ -78,16 +79,62 @@ impl Jq {
     }
 }
 
-fn build(code: &str) -> Result<Filter, JqError> {
-    let funs = jaq_core::funs()
+fn native_funs() -> impl Iterator<Item = native::Filter<Native<data::JustLut<Val>>>> {
+    jaq_core::funs()
         .chain(jaq_std::funs())
-        .chain(jaq_json::funs());
+        .chain(jaq_json::funs())
+}
+
+/// Checks syntax and name resolution using prelude and native signatures without compiling
+/// the prelude's bodies; `Compiler::compile` never inspects those bodies for the main term.
+fn check(code: &str) -> Result<(), JqError> {
+    let arena = Arena::default();
+    let modules = Loader::new(std::iter::empty())
+        .load(&arena, File { code, path: () })
+        .map_err(|errors| load_error(code, errors))?;
+    let funs = check_funs()
+        .iter()
+        .map(|(name, args)| (*name, args.clone(), ()));
+    compile::Compiler::<&str, ()>::default()
+        .with_funs(funs)
+        .compile(modules)
+        .map(drop)
+        .map_err(compile_error)
+}
+
+fn check_funs() -> &'static [(&'static str, Box<[Bind]>)] {
+    static FUNS: LazyLock<Vec<(&'static str, Box<[Bind]>)>> = LazyLock::new(|| {
+        let mut seen = HashSet::new();
+        let prelude_sigs = prelude().iter().map(|def| {
+            let args: Box<[Bind]> = def
+                .args
+                .iter()
+                .map(|arg| {
+                    if arg.starts_with('$') {
+                        Bind::Var(())
+                    } else {
+                        Bind::Fun(())
+                    }
+                })
+                .collect();
+            (def.name, args)
+        });
+        let native_sigs = native_funs().map(|(name, args, _)| (name, args));
+        prelude_sigs
+            .chain(native_sigs)
+            .filter(|(name, args)| seen.insert((*name, args.len())))
+            .collect()
+    });
+    &FUNS
+}
+
+fn build(code: &str) -> Result<Filter, JqError> {
     let arena = Arena::default();
     let modules = Loader::new(prelude().iter().cloned())
         .load(&arena, File { code, path: () })
         .map_err(|errors| load_error(code, errors))?;
     Compiler::default()
-        .with_funs(funs)
+        .with_funs(native_funs())
         .compile(modules)
         .map_err(compile_error)
 }
@@ -343,5 +390,45 @@ mod tests {
     fn a_filter_runs_on_other_threads() {
         fn shared<T: Send + Sync>(_: &T) {}
         shared(&Jq::compile(".").unwrap());
+    }
+
+    #[test]
+    fn check_matches_full_compile() {
+        assert!(build(".").is_ok());
+        let cases = [
+            ".",
+            ".a = 1 | del(.b) | map(select(IN(1, 2) | not))",
+            "@csv",
+            r#"@tsv "\(.a)""#,
+            "def f($x; g): g | . + $x; f(1; .a)",
+            "def map(f): f; map(.a)",
+            "def rec: if . == 0 then empty else . - 1 | rec end; rec",
+            "label $out | foreach .[] as $x (0; . + $x; if . > 5 then break $out else . end)",
+            "reduce .[] as [$a, {b: $b}] (0; . + $a + $b)",
+            "module {}; [] | .a? | try .b catch .c",
+            r#"import "data" as $d; $d"#,
+            ".a = ",
+            ".a ]",
+            "($) (",
+            "nosuchfn",
+            ".a | nosuchfn(1)",
+            "map(1; 2)",
+            "del(.; .)",
+            "$missing",
+            "break $missing",
+            "foo::bar",
+            r#"import "x" as x; ."#,
+            r#"include "x"; ."#,
+            "@nope",
+            r#"@nope "\(1)""#,
+            "reduce .[] as $x (0)",
+            "foreach .[] as $x (0; .; .; .)",
+            "nosuch1 | $undef + foo::bar + (break $lbl) + nosuch2(1; 2)",
+        ];
+        for code in cases {
+            let checked = check(code).map_err(|err| err.to_string());
+            let built = build(code).map(drop).map_err(|err| err.to_string());
+            assert_eq!(checked, built, "{code}");
+        }
     }
 }
