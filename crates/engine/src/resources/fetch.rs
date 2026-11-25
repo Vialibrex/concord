@@ -23,6 +23,7 @@ use tokio::time::Instant;
 use crate::error::ResourceError;
 
 const MAX_REDIRECTS: usize = 10;
+const FAILED_BODY_NOTE: usize = 4 << 10;
 
 /// Everything the core downloads goes through the tunnel as an inner flow, so a
 /// provider can name the proxy it is fetched through.
@@ -82,7 +83,8 @@ impl TunnelFetcher {
 
 impl FetchAs<'_> {
     /// Follows redirects to the response that is not one, under the request's deadline,
-    /// and reads its body through `take`.
+    /// and reads its body through `take`. A final status outside 2xx is logged with the hops
+    /// before it and the start of its body, since the caller's error carries only the status.
     async fn fetch<T>(
         &self,
         request: &FetchRequest,
@@ -100,6 +102,7 @@ impl FetchAs<'_> {
             skip_cert_verify: self.fetcher.options.load().skip_cert_verify,
             offer_h2: true,
         };
+        let mut hops = Vec::new();
         let exchange = async {
             for _ in 0..MAX_REDIRECTS {
                 let target = Target::parse(&url).map_err(http_error)?;
@@ -116,6 +119,7 @@ impl FetchAs<'_> {
                     .open(http::Method::GET, &headers, Bytes::new(), limit)
                     .await
                     .map_err(http_error)?;
+                hops.push(format!("{} {}", response.status, target.host));
                 if response.status / 100 == 3
                     && let Some(location) = response
                         .headers
@@ -148,11 +152,16 @@ impl FetchAs<'_> {
                         })
                         .collect(),
                 };
-                let mut body = Body::new(&mut response, gunzip, limit);
+                let failed = !(200..=299).contains(&head.status);
+                let mut body = Body::new(&mut response, gunzip, limit, failed);
                 let taken = take(&mut body).await?;
+                if let Some(start) = &body.start {
+                    tracing::warn!("{}", failure_note(&hops, start));
+                }
                 drop(connection);
                 return Ok((head, taken));
             }
+            tracing::warn!("fetch redirected {}", hops.join(" -> "));
             Err(fetch_error(
                 FetchErrorKind::Other,
                 format!("stopped after {MAX_REDIRECTS} redirects"),
@@ -185,21 +194,23 @@ fn request_headers(own: &[(String, String)], user_agent: &str) -> (Vec<(String, 
 }
 
 /// A body as the caller reads it: gunzipped when the fetch asked for gzip and got it, held to
-/// the request's size limit after decoding.
+/// the request's size limit after decoding, with the start of a failed answer kept for the log.
 pub(crate) struct Body<'a> {
     response: &'a mut Streaming,
     gunzip: Option<MultiGzDecoder<Vec<u8>>>,
     limit: usize,
     read: usize,
+    start: Option<Vec<u8>>,
 }
 
 impl<'a> Body<'a> {
-    fn new(response: &'a mut Streaming, gunzip: bool, limit: usize) -> Self {
+    fn new(response: &'a mut Streaming, gunzip: bool, limit: usize, failed: bool) -> Self {
         Body {
             response,
             gunzip: gunzip.then(|| MultiGzDecoder::new(Vec::new())),
             limit,
             read: 0,
+            start: failed.then(Vec::new),
         }
     }
 
@@ -228,9 +239,26 @@ impl<'a> Body<'a> {
             if self.read > self.limit {
                 return Err(fetch_error(FetchErrorKind::Other, "length limit exceeded"));
             }
+            if let Some(start) = &mut self.start {
+                let room = FAILED_BODY_NOTE
+                    .saturating_sub(start.len())
+                    .min(piece.len());
+                start.extend_from_slice(piece.get(..room).unwrap_or_default());
+            }
             return Ok(Some(piece));
         }
     }
+}
+
+/// The hops of a download that ended outside 2xx and the start of its body, on one line:
+/// control characters and runs of white space become one space.
+fn failure_note(hops: &[String], body: &[u8]) -> String {
+    let body = String::from_utf8_lossy(body)
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("fetch answered {}; body: {body}", hops.join(" -> "))
 }
 
 #[async_trait]
@@ -395,4 +423,19 @@ pub(super) fn touch(path: &Path) {
         .write(true)
         .open(path)
         .and_then(|file| file.set_modified(SystemTime::now()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failure_note_names_each_hop_and_the_start_of_the_body_on_one_line() {
+        let hops = ["302 a.test".to_string(), "403 b.test".to_string()];
+        let note = failure_note(&hops, b"<html>\r\n\t<b>no\x07</b>  \x00x</html>");
+        assert_eq!(
+            note,
+            "fetch answered 302 a.test -> 403 b.test; body: <html> <b>no </b> x</html>"
+        );
+    }
 }
