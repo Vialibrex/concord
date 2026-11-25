@@ -254,9 +254,6 @@ impl RuleProviders {
             provider.remember(None, SystemTime::now());
             return Ok(Refresh::Unchanged);
         }
-        if bytes.is_empty() {
-            return Ok(Refresh::Updated);
-        }
         let bytes = self.parse(provider, bytes).await?;
         if let (true, Some(path)) = (update_file, provider.path.clone()) {
             let home = self.home.clone();

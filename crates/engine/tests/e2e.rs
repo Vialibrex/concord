@@ -114,7 +114,9 @@ fn free_port() -> u16 {
 }
 
 /// Answers each path with its body; anything else is a 404.
-async fn http_server(routes: HashMap<&'static str, String>) -> (SocketAddr, Arc<AtomicUsize>) {
+async fn http_server<B: AsRef<[u8]> + Send + Sync + 'static>(
+    routes: HashMap<&'static str, B>,
+) -> (SocketAddr, Arc<AtomicUsize>) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let hits = Arc::new(AtomicUsize::new(0));
@@ -137,16 +139,22 @@ async fn http_server(routes: HashMap<&'static str, String>) -> (SocketAddr, Arc<
                 let head = String::from_utf8_lossy(&head);
                 let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
                 let response = match routes.get(path.as_str()) {
-                    Some(body) => format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                        body.len()
-                    ),
+                    Some(body) => {
+                        let body = body.as_ref();
+                        let mut response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .into_bytes();
+                        response.extend_from_slice(body);
+                        response
+                    }
                     None => {
-                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                            .to_string()
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            .to_vec()
                     }
                 };
-                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.write_all(&response).await;
                 let _ = stream.shutdown().await;
             });
         }
@@ -628,7 +636,7 @@ async fn a_provider_emptied_for_override_expr_leaves_the_config_running() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_geo_file_that_cannot_be_fetched_rejects_the_config() {
-    let (server, hits) = http_server(HashMap::new()).await;
+    let (server, hits) = http_server(HashMap::<_, String>::new()).await;
     let rig = Rig::new();
     let config = format!(
         "geox-url:\n  mmdb: http://{server}/Country.mmdb\nrules:\n  - GEOIP,CN,DIRECT\n  - MATCH,DIRECT\n"
@@ -806,6 +814,30 @@ async fn a_side_load_replaces_a_rule_set_without_a_reapply() {
         .await
         .unwrap();
     assert!(refused(rig.mixed, echo).await);
+    rig.engine.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_mrs_cache_is_not_taken_as_loaded() {
+    let mut set = concord_rules::cidr_set::IpCidrSet::new();
+    assert!(set.add_str("192.0.2.0/24"));
+    set.merge();
+    let mrs = concord_rules::mrs::encode(1, &concord_rules::mrs::MrsPayload::IpCidr(set));
+    let (server, hits) = http_server(HashMap::from([("/r.mrs", mrs.clone())])).await;
+    let rig = Rig::new();
+    let cache = rig.home.path().join("rules/r.mrs");
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(&cache, b"").unwrap();
+    let config = format!(
+        "rule-providers:\n  local:\n    type: http\n    behavior: ipcidr\n    format: mrs\n    url: http://{server}/r.mrs\n    path: rules/r.mrs\n    interval: 3600\n\
+         rules:\n  - RULE-SET,local,REJECT\n  - MATCH,DIRECT\n"
+    );
+    rig.apply(&config).await.unwrap();
+    rig.engine.start_listeners().await;
+    assert!(wait_loaded(&rig, "local").await);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+    assert_eq!(rig.engine.providers().get("local").unwrap().count, 1);
+    assert_eq!(std::fs::read(&cache).unwrap(), mrs);
     rig.engine.shutdown().await;
 }
 
