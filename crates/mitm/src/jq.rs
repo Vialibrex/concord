@@ -10,6 +10,7 @@ use jaq_core::{Bind, Compiler, Ctx, Native, Vars, data, native, unwrap_valr};
 use jaq_json::{Val, read};
 
 type Filter = jaq_core::Filter<data::JustLut<Val>>;
+type Signature = (&'static str, Box<[Bind]>);
 
 /// A jq filter over a JSON body, as Surge's `http-request-jq` and `http-response-jq` run it.
 /// Checked when read, built on first run: each built filter carries its own compiled copy of
@@ -102,8 +103,8 @@ fn check(code: &str) -> Result<(), JqError> {
         .map_err(compile_error)
 }
 
-fn check_funs() -> &'static [(&'static str, Box<[Bind]>)] {
-    static FUNS: LazyLock<Vec<(&'static str, Box<[Bind]>)>> = LazyLock::new(|| {
+fn check_funs() -> &'static [Signature] {
+    static FUNS: LazyLock<Vec<Signature>> = LazyLock::new(|| {
         let mut seen = HashSet::new();
         let prelude_sigs = prelude().iter().map(|def| {
             let args: Box<[Bind]> = def
