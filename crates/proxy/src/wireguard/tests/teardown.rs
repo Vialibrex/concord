@@ -133,17 +133,18 @@ async fn unexpected_channel_close_while_tunnel_is_active_still_logs_tun_errors()
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let recorded = errors.lock().unwrap();
-        let has_deleted = recorded
-            .iter()
-            .any(|msg| msg.contains("TUN device was deleted"));
-        let has_unexpected = recorded
-            .iter()
-            .any(|msg| msg.contains("Unexpected error on tun interface"));
-        if has_deleted && has_unexpected {
+        let saw_both = {
+            let recorded = errors.lock().unwrap();
+            recorded
+                .iter()
+                .any(|msg| msg.contains("TUN device was deleted"))
+                && recorded
+                    .iter()
+                    .any(|msg| msg.contains("Unexpected error on tun interface"))
+        };
+        if saw_both {
             break;
         }
-        drop(recorded);
         assert!(
             tokio::time::Instant::now() < deadline,
             "expected both TUN errors on unexpected channel close, saw: {:?}",
