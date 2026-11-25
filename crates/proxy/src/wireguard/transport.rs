@@ -542,4 +542,38 @@ mod tests {
             assert_eq!(&seen[..n], &[1, 0, 0, 0, i]);
         }
     }
+
+    #[tokio::test]
+    async fn recv_many_from_delivers_datagrams_and_clears_reserved_bytes() {
+        let ours = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let theirs = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let our_addr = ours.local_addr().unwrap();
+        let wire = Wire {
+            carrier: Carrier::Sockets(vec![ours]),
+            reserved: Arc::new(ArcSwap::from_pointee(HashMap::new())),
+            amnezia: None,
+            broken: Arc::default(),
+        };
+        let (_send, mut recv) = wire.split();
+        for tag in 0..4u8 {
+            theirs.send_to(&[4, 7, 8, 9, tag], our_addr).await.unwrap();
+        }
+        let mut batch = RecvBatch::default();
+        let mut pool = PacketBufPool::new(8);
+        let mut packets = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while packets.len() < 4 {
+                recv.recv_many_from(&mut batch, &mut pool, &mut packets)
+                    .await
+                    .unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(packets.len(), 4);
+        for (i, (packet, from)) in packets.iter().enumerate() {
+            assert_eq!(*from, theirs.local_addr().unwrap());
+            assert_eq!(&packet[..], &[4, 0, 0, 0, u8::try_from(i).unwrap()]);
+        }
+    }
 }
