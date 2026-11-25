@@ -279,7 +279,7 @@ async fn ip_h3(
     let mut received = Vec::new();
     while received.len() < 46 {
         let Ok(Some(mut bytes)) = stream.recv_data().await else {
-            wired.driver.abort();
+            wired.driver.stop();
             return;
         };
         received.extend_from_slice(&bytes.copy_to_bytes(bytes.remaining()));
@@ -325,7 +325,7 @@ async fn ip_h3(
         Ok::<(), io::Error>(())
     };
     tokio::select! { _ = receiving => {}, _ = sending => {}, _ = draining => {} }
-    wired.driver.abort();
+    wired.driver.stop();
 }
 
 pub(super) async fn h2_server(status: u16) -> Server {
@@ -422,7 +422,7 @@ async fn ip_h2(body: concord_transport::h2io::H2Body) {
         Ok::<(), io::Error>(())
     };
     tokio::select! { _ = receiving => {}, _ = sending => {} }
-    wired.driver.abort();
+    wired.driver.stop();
 }
 
 pub(super) async fn settings_server(

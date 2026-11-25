@@ -371,3 +371,62 @@ pub(crate) fn quic_server(
         (endpoint, port)
     }
 }
+
+#[derive(Default)]
+struct MessageVisitor(String);
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write as _;
+        if field.name() == "message" {
+            let _ = write!(self.0, "{value:?}");
+        } else {
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        use std::fmt::Write as _;
+        if field.name() == "message" {
+            self.0.push_str(value);
+        } else {
+            let _ = write!(self.0, " {}={value}", field.name());
+        }
+    }
+}
+
+struct ErrorCapture(Arc<Mutex<Vec<String>>>);
+
+impl tracing::Subscriber for ErrorCapture {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        *metadata.level() <= tracing::Level::ERROR
+    }
+
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        if *event.metadata().level() != tracing::Level::ERROR {
+            return;
+        }
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+        lock(&self.0).push(visitor.0);
+    }
+
+    fn enter(&self, _: &tracing::span::Id) {}
+
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+/// Captures `ERROR`-level tracing events on the current thread until the guard drops.
+pub(crate) fn capture_errors() -> (Arc<Mutex<Vec<String>>>, tracing::subscriber::DefaultGuard) {
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let guard = tracing::subscriber::set_default(ErrorCapture(errors.clone()));
+    (errors, guard)
+}

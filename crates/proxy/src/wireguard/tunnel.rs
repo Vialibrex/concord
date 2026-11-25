@@ -14,7 +14,6 @@ use concord_common::{
 use gotatun::device::{Device, DeviceBuilder, Peer};
 use gotatun::x25519::{PublicKey, StaticSecret};
 use ipnetwork::IpNetwork;
-use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 
@@ -23,7 +22,7 @@ use super::config::{PeerConfig, WgConfig};
 use super::dns::RemoteDns;
 use super::transport::{Breaker, Carrier, Reserved, WireFactory};
 use crate::node::{Egress, resolve_server};
-use crate::stack::{Stack, StackConfig, StackRecv, StackSend, TcpConn, UdpPort};
+use crate::stack::{Stack, StackConfig, StackDriver, StackRecv, StackSend, TcpConn, UdpPort};
 
 const IDLE_TICK: Duration = Duration::from_secs(90);
 
@@ -32,7 +31,7 @@ type WgDevice = Device<(WireFactory, StackSend, StackRecv)>;
 pub(super) struct Tunnel {
     pub(super) stack: Arc<Stack>,
     device: Option<WgDevice>,
-    driver: JoinHandle<()>,
+    driver: StackDriver,
     tasks: Tasks,
     dropped: CancellationToken,
     reserved: Arc<Reserved>,
@@ -48,14 +47,17 @@ struct Endpoints {
     checked: Instant,
 }
 
-/// gotatun's own `Drop` stops the device on a task nothing waits for; `stop` lets the engine
-/// wait for it.
+/// Stops gotatun before the stack channels close; dropping the device closes both halves and ends
+/// the driver without gotatun observing EOF.
 impl Drop for Tunnel {
     fn drop(&mut self) {
-        self.driver.abort();
         self.dropped.cancel();
-        if let Some(device) = self.device.take() {
-            self.tasks.spawn_to_end(device.stop());
+        let spawned = self
+            .device
+            .take()
+            .is_some_and(|device| self.tasks.spawn_to_end(device.stop()));
+        if !spawned {
+            self.driver.stop();
         }
     }
 }
@@ -137,7 +139,7 @@ impl Tunnel {
             },
             tasks,
         );
-        let broken = Arc::new(Breaker::new(stack.driver.abort_handle()));
+        let broken = Arc::new(Breaker::new(stack.driver.clone()));
         let factory = WireFactory::new(carrier, reserved.clone(), amnezia.clone(), broken.clone());
         let peers = config
             .peers
@@ -178,6 +180,11 @@ impl Tunnel {
 
     pub(super) fn usable(&self) -> bool {
         !self.broken.tripped() && !self.driver.is_finished()
+    }
+
+    #[cfg(test)]
+    pub(super) fn abort_driver(&self) {
+        self.driver.stop();
     }
 
     pub(super) fn touch(&self) -> u64 {

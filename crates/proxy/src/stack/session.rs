@@ -328,7 +328,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(!parked.is_finished());
         probe.unusable.store(true, Ordering::Relaxed);
-        wired.driver.abort();
+        wired.driver.stop();
         let err = timeout(Duration::from_secs(5), parked)
             .await
             .unwrap()

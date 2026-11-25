@@ -15,9 +15,9 @@ use gotatun::packet::{Packet, PacketBufPool};
 use gotatun::udp::{UdpRecv, UdpSend, UdpTransportFactory, UdpTransportFactoryParams};
 use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
-use tokio::task::AbortHandle;
 
 use super::amnezia::Amnezia;
+use crate::stack::StackDriver;
 
 /// Cloudflare's reserved bytes sit in header bytes 1 to 3, which plain WireGuard keeps zero.
 pub(super) type Reserved = ArcSwap<HashMap<SocketAddr, [u8; 3]>>;
@@ -30,11 +30,11 @@ const HEADER_LEN: usize = 4;
 #[derive(Default)]
 pub(super) struct Breaker {
     tripped: AtomicBool,
-    stack: Option<AbortHandle>,
+    stack: Option<StackDriver>,
 }
 
 impl Breaker {
-    pub(super) fn new(stack: AbortHandle) -> Self {
+    pub(super) fn new(stack: StackDriver) -> Self {
         Breaker {
             tripped: AtomicBool::new(false),
             stack: Some(stack),
@@ -44,7 +44,7 @@ impl Breaker {
     fn trip(&self) {
         self.tripped.store(true, Ordering::Relaxed);
         if let Some(stack) = &self.stack {
-            stack.abort();
+            stack.stop();
         }
     }
 

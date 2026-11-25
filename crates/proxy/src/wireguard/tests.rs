@@ -6,6 +6,7 @@
 )]
 
 mod direct;
+mod teardown;
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};

@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -21,8 +21,8 @@ use gotatun::packet::{Ip, Packet, PacketBufPool};
 use gotatun::tun::{IpRecv, IpSend, MtuWatcher};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{Notify, mpsc};
-use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep_until};
+use tokio_util::sync::CancellationToken;
 
 use crate::util::lock;
 
@@ -216,12 +216,28 @@ impl Wake for NotifyWake {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct StackDriver {
+    stop: CancellationToken,
+    finished: Arc<AtomicBool>,
+}
+
+impl StackDriver {
+    pub(crate) fn stop(&self) {
+        self.stop.cancel();
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.finished.load(Ordering::Acquire)
+    }
+}
+
 /// The two halves gotatun talks to, and the handle the application side uses.
 pub(crate) struct Wired {
     pub(crate) stack: Arc<Stack>,
     pub(crate) send: StackSend,
     pub(crate) recv: StackRecv,
-    pub(crate) driver: JoinHandle<()>,
+    pub(crate) driver: StackDriver,
 }
 
 pub(crate) struct StackSend {
@@ -291,7 +307,19 @@ impl Stack {
             wake: Arc::new(Notify::new()),
             active: AtomicUsize::new(0),
         });
-        let driver = tasks.spawn(drive(stack.clone(), to_wg, from_wg));
+        let stop = CancellationToken::new();
+        let finished = Arc::new(AtomicBool::new(false));
+        let task = drive(
+            stack.clone(),
+            to_wg,
+            from_wg,
+            stop.clone(),
+            finished.clone(),
+        );
+        assert!(
+            tasks.spawn_to_end(task),
+            "Stack::start requires a Tokio runtime"
+        );
         Wired {
             stack,
             send: StackSend { tx: to_stack },
@@ -299,7 +327,7 @@ impl Stack {
                 rx: from_stack,
                 mtu: MtuWatcher::new(u16::try_from(config.mtu).unwrap_or(u16::MAX)),
             },
-            driver,
+            driver: StackDriver { stop, finished },
         }
     }
 
@@ -358,12 +386,16 @@ impl Stack {
 }
 
 /// Fails every connection and wakes every parked receive when the driver ends, whether its
-/// loop returned or its task was aborted.
-struct Stopped<'a>(&'a Stack);
+/// loop returned or its task was cancelled.
+struct Stopped<'a> {
+    stack: &'a Stack,
+    finished: &'a AtomicBool,
+}
 
 impl Drop for Stopped<'_> {
     fn drop(&mut self) {
-        let mut inner = lock(&self.0.inner);
+        self.finished.store(true, Ordering::Release);
+        let mut inner = lock(&self.stack.inner);
         inner.tcp.shutdown();
         for slot in inner.udp.values_mut() {
             if let Some(waker) = slot.waker.take() {
@@ -373,8 +405,37 @@ impl Drop for Stopped<'_> {
     }
 }
 
-async fn drive(stack: Arc<Stack>, out: mpsc::Sender<Packet>, mut from_wg: mpsc::Receiver<Packet>) {
-    let _stopped = Stopped(&stack);
+async fn drive(
+    stack: Arc<Stack>,
+    out: mpsc::Sender<Packet>,
+    mut from_wg: mpsc::Receiver<Packet>,
+    stop: CancellationToken,
+    finished: Arc<AtomicBool>,
+) {
+    let stopped = Stopped {
+        stack: &stack,
+        finished: &finished,
+    };
+    let disconnected = stop
+        .run_until_cancelled(drive_loop(&stack, &out, &mut from_wg))
+        .await
+        .is_some();
+    drop(stopped);
+    if disconnected {
+        let drain = async {
+            tokio::join!(out.closed(), async {
+                while from_wg.recv().await.is_some() {}
+            });
+        };
+        let _ = stop.run_until_cancelled(drain).await;
+    }
+}
+
+async fn drive_loop(
+    stack: &Stack,
+    out: &mpsc::Sender<Packet>,
+    from_wg: &mut mpsc::Receiver<Packet>,
+) {
     let waker = Waker::from(Arc::new(NotifyWake(stack.wake.clone())));
     loop {
         let (deadline, backlog) = {
@@ -382,7 +443,7 @@ async fn drive(stack: Arc<Stack>, out: mpsc::Sender<Packet>, mut from_wg: mpsc::
             inner.tcp.register_waker(&waker);
             inner.handle_rx();
             let deadline = inner.poll_tcp();
-            inner.drain(&out);
+            inner.drain(out);
             (deadline, !inner.tx.is_empty())
         };
         let deadline = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));

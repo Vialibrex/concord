@@ -12,14 +12,14 @@ use super::body::{Body, Sent};
 use super::config::Config;
 use super::h3::{Client, Driver};
 use super::{capsule, datagram};
-use crate::stack::{Stack, StackConfig, StackRecv, StackSend};
+use crate::stack::{Stack, StackConfig, StackDriver, StackRecv, StackSend};
 use crate::wireguard::dns::RemoteDns;
 
 pub(super) struct Tunnel {
     pub(super) stack: Arc<Stack>,
     pub(super) dns: RemoteDns,
     stop: CancellationToken,
-    _driver: JoinHandle<()>,
+    _driver: StackDriver,
     _send: JoinHandle<()>,
     _recv: JoinHandle<()>,
 }

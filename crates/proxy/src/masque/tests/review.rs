@@ -413,3 +413,36 @@ async fn masque_handshake_timeout_cancels_a_peer_waiting_for_settings() {
     };
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
 }
+
+#[tokio::test]
+async fn masque_ip_teardown_and_reset_end_tasks_without_errors() {
+    for network in ["h3", "h2"] {
+        let server = if network == "h2" {
+            fixture::h2_server(200).await
+        } else {
+            fixture::h3_server(false, 200).await
+        };
+        let tracked = crate::testing::Tracked::new();
+        let def = definition(&server, network, json!({}));
+        let concord_config::proxy::ProxyKind::Masque(opts) = &def.kind else {
+            unreachable!()
+        };
+        let node = super::build(&def, opts, &tracked.ctx()).unwrap();
+        tcp_echo(&*node, &Address::new("10.8.0.1", 7), b"").await;
+
+        let (errors, _guard) = crate::testing::capture_errors();
+        node.reset_sessions();
+        assert!(tracked.ended_within(Duration::from_secs(5)).await);
+        drop(node);
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let recorded = errors.lock().unwrap().clone();
+        assert!(
+            recorded.is_empty(),
+            "MASQUE {network} teardown logged errors: {recorded:?}"
+        );
+        drop(_guard);
+        drop(server);
+    }
+}
