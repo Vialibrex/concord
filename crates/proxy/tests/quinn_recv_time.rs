@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use concord_test_support::localhost_tls;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::udp::{RecvMeta, Transmit};
 use quinn::{
@@ -124,28 +125,12 @@ impl AsyncUdpSocket for SlowRead {
 }
 
 fn configs() -> (ServerConfig, ClientConfig) {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![cert.cert.der().clone()],
-            rustls::pki_types::PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into()),
-        )
-        .unwrap();
-    tls.alpn_protocols = vec![b"recv-time".to_vec()];
-    let server = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls).unwrap()));
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(cert.cert.der().clone()).unwrap();
-    let mut tls = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![b"recv-time".to_vec()];
-    let client = ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls).unwrap()));
+    let (mut server_tls, mut client_tls) = localhost_tls(rustls::DEFAULT_VERSIONS);
+    server_tls.alpn_protocols = vec![b"recv-time".to_vec()];
+    client_tls.alpn_protocols = vec![b"recv-time".to_vec()];
+    let server =
+        ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_tls).unwrap()));
+    let client = ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_tls).unwrap()));
     (server, client)
 }
 

@@ -13,6 +13,8 @@ doctest = false
 
 [dependencies]
 concord-api = { workspace = true }
+concord-common = { workspace = true, features = ["io"] }
+concord-platform = { workspace = true }
 concord-proto = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
@@ -31,7 +33,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 concord-engine = { workspace = true }
-concord-platform = { workspace = true }
 concord-test-support = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }

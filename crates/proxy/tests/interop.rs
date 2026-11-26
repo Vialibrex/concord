@@ -15,7 +15,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,6 +27,7 @@ use concord_config::{Capabilities, ProxyParse, parse_proxy};
 use concord_net::Sockets;
 use concord_platform::NativePlatform;
 use concord_proxy::{BuildCtx, build_outbound};
+use concord_test_support::{localhost_tls, port_to_bind_later, tcp_echo, udp_echo};
 use concord_tls::TrustStore;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -169,55 +170,6 @@ fn env() -> DialEnv {
     }
 }
 
-// Below the ephemeral range: a wildcard DIRECT socket in mihomo can share a port with a listener.
-// Multiplied because runs started together have close pids, and each takes a few hundred ports
-// that it only binds later, through mihomo.
-fn free_port() -> u16 {
-    static NEXT: AtomicU16 = AtomicU16::new(0);
-    let offset = (u64::from(std::process::id()) * 397) % 12_000;
-    let base = 20_000 + u16::try_from(offset).unwrap_or(0);
-    loop {
-        let port = base + NEXT.fetch_add(1, Ordering::Relaxed);
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
-            && std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok()
-        {
-            return port;
-        }
-    }
-}
-
-async fn tcp_echo() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut conn, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 16 * 1024];
-                while let Ok(n) = conn.read(&mut buf).await {
-                    if n == 0 || conn.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-    });
-    addr
-}
-
-async fn udp_echo() -> SocketAddr {
-    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let addr = socket.local_addr().unwrap();
-    tokio::spawn(async move {
-        let mut buf = vec![0u8; 65536];
-        while let Ok((n, from)) = socket.recv_from(&mut buf).await {
-            if socket.send_to(&buf[..n], from).await.is_err() {
-                break;
-            }
-        }
-    });
-    addr
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Udp {
     No,
@@ -277,7 +229,7 @@ fn case(
     extra: Value,
     udp: Udp,
 ) -> Case {
-    let port = free_port();
+    let port = port_to_bind_later();
     Case {
         name: name.to_string(),
         listener: listener(name, listener_kind, port, listener_body),
@@ -742,7 +694,7 @@ fn tuic_case(name: &str, v5: bool, listener_extra: &str, extra: Value, certs: &C
 }
 
 fn shadowtls_case(name: &str, version: u8, certs: &Certs) -> Case {
-    let decoy_port = free_port();
+    let decoy_port = port_to_bind_later();
     let decoy = listener(
         &format!("{name}-decoy"),
         "http",
@@ -762,7 +714,7 @@ fn shadowtls_case(name: &str, version: u8, certs: &Certs) -> Case {
 /// A node with `shadow-tls-opts` against a listener whose `shadow-tls` takes the place of its TLS:
 /// the listener's ShadowTLS block, the node's TLS keys and the decoy listener to prepend.
 fn shadowtls_layer(name: &str, version: u8, certs: &Certs) -> (String, Value, String) {
-    let decoy_port = free_port();
+    let decoy_port = port_to_bind_later();
     let decoy = listener(
         &format!("{name}-decoy"),
         "http",
@@ -1088,16 +1040,7 @@ fn pattern(len: usize) -> Vec<u8> {
 /// A TLS 1.3 echo server: through Vision its application data makes both directions leave
 /// the outer TLS for the raw socket.
 async fn tls_echo() -> SocketAddr {
-    let made = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-    let key = rustls::pki_types::PrivateKeyDer::try_from(made.signing_key.serialize_der()).unwrap();
-    let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_protocol_versions(&[&rustls::version::TLS13])
-    .unwrap()
-    .with_no_client_auth()
-    .with_single_cert(vec![made.cert.der().clone()], key)
-    .unwrap();
+    let (config, _) = localhost_tls(&[&rustls::version::TLS13]);
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

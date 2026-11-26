@@ -11,8 +11,13 @@ repository.workspace = true
 [lib]
 doctest = false
 
+[features]
+tls = ["dep:rcgen", "dep:rustls"]
+
 [dependencies]
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "time"] }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 
 [lints]
 workspace = true

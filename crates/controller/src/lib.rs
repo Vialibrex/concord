@@ -14,11 +14,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use concord_api::{Control, ControllerCors, ControllerSettings};
+use concord_common::Tasks;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::routes::Routes;
 
@@ -28,29 +30,40 @@ const FIRST_ACCEPT_BACKOFF: Duration = Duration::from_millis(5);
 const MAX_ACCEPT_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Serves the controller wherever `Control::external_controller` says, and
-/// moves it when that changes. With no address it opens nothing.
-pub async fn serve(control: Arc<Control>) {
+/// moves it when that changes. With no address it opens nothing. Returns once `stop`
+/// is cancelled and every session it served has ended.
+pub async fn serve(control: Arc<Control>, stop: CancellationToken) {
     let mut settings = control.external_controller();
     loop {
         let current = settings.borrow_and_update().clone();
         if !current.address.is_empty() {
             match TcpListener::bind(listen_address(&current.address)).await {
                 Ok(listener) => {
-                    tokio::select! {
-                        () = run(control.clone(), listener, &current) => {}
-                        changed = settings.changed() => {
-                            if changed.is_err() {
-                                return;
-                            }
-                            continue;
-                        }
+                    let tracker = TaskTracker::new();
+                    let ended = stop.child_token();
+                    let _ended_on_drop = ended.clone().drop_guard();
+                    let sessions = Tasks::current(tracker.clone(), ended.clone());
+                    let moved = tokio::select! {
+                        never = run(control.clone(), listener, &current, sessions) => match never {},
+                        changed = settings.changed() => changed.is_ok(),
+                        () = stop.cancelled() => false,
+                    };
+                    ended.cancel();
+                    tracker.close();
+                    tracker.wait().await;
+                    if moved {
+                        continue;
                     }
+                    return;
                 }
                 Err(err) => tracing::error!("External controller listen error: {err}"),
             }
         }
-        if settings.changed().await.is_err() {
-            return;
+        tokio::select! {
+            changed = settings.changed() => if changed.is_err() {
+                return;
+            },
+            () = stop.cancelled() => return,
         }
     }
 }
@@ -64,8 +77,13 @@ fn listen_address(address: &str) -> String {
     }
 }
 
-/// Runs until it is dropped, which also ends every session it started.
-async fn run(control: Arc<Control>, listener: TcpListener, settings: &ControllerSettings) {
+/// Accepts until it is dropped; the sessions run on `sessions`.
+async fn run(
+    control: Arc<Control>,
+    listener: TcpListener,
+    settings: &ControllerSettings,
+    sessions: Tasks,
+) -> Infallible {
     let local = listener.local_addr().ok();
     if let Some(local) = local {
         tracing::info!("RESTful API listening at: {local}");
@@ -75,11 +93,9 @@ async fn run(control: Arc<Control>, listener: TcpListener, settings: &Controller
             );
         }
     }
-    let stop = CancellationToken::new();
-    let _guard = stop.clone().drop_guard();
     let routes = Arc::new(Routes {
         control,
-        stop: stop.clone(),
+        sessions: sessions.clone(),
     });
     let secret: Arc<str> = Arc::from(settings.secret.as_str());
     let cors = Arc::new(settings.cors.clone());
@@ -96,9 +112,8 @@ async fn run(control: Arc<Control>, listener: TcpListener, settings: &Controller
             }
         };
         backoff = Duration::ZERO;
-        let (routes, secret, cors, stop) =
-            (routes.clone(), secret.clone(), cors.clone(), stop.clone());
-        tokio::spawn(async move {
+        let (routes, secret, cors) = (routes.clone(), secret.clone(), cors.clone());
+        sessions.spawn(async move {
             let service = service_fn(move |request| {
                 let (routes, secret, cors) = (routes.clone(), secret.clone(), cors.clone());
                 async move { Ok::<_, Infallible>(answer(&routes, &secret, &cors, request).await) }
@@ -108,10 +123,7 @@ async fn run(control: Arc<Control>, listener: TcpListener, settings: &Controller
                 .header_read_timeout(None)
                 .serve_connection(TokioIo::new(socket), service)
                 .with_upgrades();
-            tokio::select! {
-                _ = connection => {}
-                () = stop.cancelled() => {}
-            }
+            let _ = connection.await;
         });
     }
 }

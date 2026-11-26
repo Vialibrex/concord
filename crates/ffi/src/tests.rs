@@ -4,8 +4,8 @@ use std::sync::mpsc::{Receiver as Inbox, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use concord_api::sync::lock;
 use concord_api::{Control, ControlOptions, EventBus};
+use concord_common::sync::lock;
 use concord_engine::{Engine, EngineConfig};
 use concord_platform::NativePlatform;
 use concord_rpc::Server;

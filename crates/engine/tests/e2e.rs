@@ -5,8 +5,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use concord_common::sync::lock;
@@ -15,7 +15,7 @@ use concord_engine::{
     Engine, EngineConfig, Failure, ProxyView, RouteHit, SetupRequest, UpdateRequest,
 };
 use concord_platform::{NativePlatform, Platform};
-use concord_test_support::{tcp_echo, udp_echo};
+use concord_test_support::{eventually, port_to_bind_later, tcp_echo, udp_echo};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::timeout;
@@ -94,22 +94,6 @@ impl Events {
                 _ => None,
             })
             .collect()
-    }
-}
-
-/// The core binds its ports later than this picks them. They come from below
-/// the ephemeral range, so another test's `bind(0)` or outgoing connection
-/// cannot take one in between, and never repeat within the process.
-fn free_port() -> u16 {
-    static NEXT: OnceLock<AtomicU16> = OnceLock::new();
-    let next = NEXT.get_or_init(|| AtomicU16::new(10_000 + (std::process::id() % 20_000) as u16));
-    loop {
-        let port = next.fetch_add(1, Ordering::Relaxed);
-        let tcp = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port));
-        let udp = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, port));
-        if tcp.is_ok() && udp.is_ok() {
-            return port;
-        }
     }
 }
 
@@ -304,16 +288,6 @@ async fn greeter_server() -> SocketAddr {
     addr
 }
 
-async fn eventually(mut check: impl FnMut() -> bool) -> bool {
-    for _ in 0..200 {
-        if check() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    check()
-}
-
 struct Rig {
     engine: Arc<Engine>,
     events: Arc<Events>,
@@ -364,7 +338,7 @@ impl Rig {
         Rig {
             engine,
             events,
-            mixed: free_port(),
+            mixed: port_to_bind_later(),
             home,
         }
     }
@@ -990,7 +964,7 @@ fn last_a_record(answer: &[u8]) -> [u8; 4] {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_dns_listener_answers_from_hosts_over_udp_and_tcp() {
-    let port = free_port();
+    let port = port_to_bind_later();
     let rig = Rig::new();
     let config = format!(
         "hosts:\n  a.test: 1.2.3.4\n\
@@ -1406,7 +1380,7 @@ async fn udp_skips_a_rule_whose_outbound_has_no_udp() {
     let config = format!(
         "proxies:\n  - {{name: web, type: http, server: 127.0.0.1, port: {}}}\n\
          rules:\n  - NETWORK,UDP,web\n  - MATCH,DIRECT\n",
-        free_port()
+        port_to_bind_later()
     );
     rig.apply(&config).await.unwrap();
     rig.engine.start_listeners().await;
@@ -1486,7 +1460,7 @@ async fn direct_refuses_a_loop_back_into_the_core() {
 async fn a_fake_ip_flow_is_routed_by_the_name_behind_it() {
     let echo = tcp_echo().await;
     let (upstream, seen) = upstream_socks().await;
-    let port = free_port();
+    let port = port_to_bind_later();
     let rig = Rig::new();
     let config = format!(
         "proxies:\n  - {{name: up, type: socks5, server: 127.0.0.1, port: {upstream}}}\n\
@@ -1536,7 +1510,7 @@ async fn fake_ip_of(port: u16, host: &str) -> Ipv4Addr {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stored_fake_ips_outlive_a_restart() {
-    let port = free_port();
+    let port = port_to_bind_later();
     let config = format!(
         "profile:\n  store-fake-ip: true\n\
          dns:\n  enable: true\n  listen: 127.0.0.1:{port}\n  enhanced-mode: fake-ip\n  fake-ip-range: 198.18.0.1/16\n  nameserver:\n    - 127.0.0.1:1\n"
@@ -1888,7 +1862,7 @@ async fn udp_after_a_switch(switch: Switch) {
         rig.engine.stop_listeners().await;
     }
     if switch.move_port {
-        rig.mixed = free_port();
+        rig.mixed = port_to_bind_later();
     }
     let lan = if switch.open_to_lan {
         "allow-lan: true\n"

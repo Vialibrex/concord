@@ -66,7 +66,7 @@ async fn xhttp_h3_talks_to_xray_in_all_three_modes() {
     let binary = concord_test_support::peer("CONCORD_XRAY");
     let dir = tempfile::tempdir().unwrap();
     let certs = certs(dir.path());
-    let port = free_port();
+    let port = port_to_bind_later();
     let mut peer = start(Path::new(&binary), dir.path(), &certs, port);
     wait(&mut peer).await;
     let echo = tcp_echo().await;

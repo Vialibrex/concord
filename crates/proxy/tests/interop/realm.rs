@@ -10,13 +10,13 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tokio::net::UdpSocket;
 
-use super::{Case, Certs, Udp, free_port, listener, merge, tls_lines};
+use super::{Case, Certs, Udp, listener, merge, port_to_bind_later, tls_lines};
 
 pub const TOKEN: &str = "realm-token";
 
 fn ports() -> &'static (u16, u16) {
     static PORTS: OnceLock<(u16, u16)> = OnceLock::new();
-    PORTS.get_or_init(|| (free_port(), free_port()))
+    PORTS.get_or_init(|| (port_to_bind_later(), port_to_bind_later()))
 }
 
 pub fn stun_port() -> u16 {
@@ -53,7 +53,7 @@ fn realm_case(
     client_extra: Value,
     certs: &Certs,
 ) -> Case {
-    let port = free_port();
+    let port = port_to_bind_later();
     let body = format!(
         "    users:\n      user: hy2-pw\n{}{}{server_extra}",
         tls_lines(certs),

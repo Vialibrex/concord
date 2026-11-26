@@ -13,6 +13,7 @@ doctest = false
 
 [dependencies]
 concord-api = { workspace = true }
+concord-common = { workspace = true }
 concord-proto = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 tokio-util = { workspace = true }

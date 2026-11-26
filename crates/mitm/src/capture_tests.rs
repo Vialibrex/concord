@@ -19,6 +19,7 @@ use crate::testing::{
     Client, Handler, Reply, Rig, Service, TEST_APP, TestServer, Wire, echo, flow, header_value,
     offer_on, rig_for, start_server, start_service,
 };
+use concord_test_support::eventually;
 
 fn capture(rig: &Rig, section: serde_json::Value) {
     let errors = rig.config(section);
@@ -666,7 +667,7 @@ async fn bodies_count_against_the_byte_limit() {
     client.get("/small").await;
     settled(&rig, "conn-1", 1).await;
     client.get("/large").await;
-    crate::testing::eventually(|| rig.mitm.exchanges("conn-1").exchanges.is_empty()).await;
+    assert!(eventually(|| rig.mitm.exchanges("conn-1").exchanges.is_empty()).await);
 }
 
 #[tokio::test]

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use concord_api::{Control, ControlService, Delivery, EventStream};
+use concord_common::Tasks;
 use concord_proto::types::{
     ConnectionInfo, ConnectionWatchParams, Empty, LogLevel, LogWatchParams, Traffic,
     TrafficWatchParams,
@@ -24,7 +25,6 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::{Message, Role};
-use tokio_util::sync::CancellationToken;
 
 use crate::http::{Body, is_websocket};
 use crate::shapes;
@@ -36,11 +36,7 @@ const TICK: Duration = Duration::from_secs(1);
 
 /// Answers with `values` as a WebSocket when the request asks for one, otherwise
 /// as a chunked JSON stream.
-pub fn respond(
-    request: Request<Incoming>,
-    values: Values,
-    stop: CancellationToken,
-) -> Response<Body> {
+pub fn respond(request: Request<Incoming>, values: Values, sessions: &Tasks) -> Response<Body> {
     if !is_websocket(request.headers()) {
         let lines = values.map(|value| {
             let mut bytes = serde_json::to_vec(&value).unwrap_or_default();
@@ -60,16 +56,13 @@ pub fn respond(
             "handshake error: bad Sec-WebSocket-Key header",
         );
     };
-    tokio::spawn(async move {
+    sessions.spawn(async move {
         let Ok(upgraded) = hyper::upgrade::on(request).await else {
             return;
         };
         let socket =
             WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
-        tokio::select! {
-            () = pump(socket, values) => {}
-            () = stop.cancelled() => {}
-        }
+        pump(socket, values).await;
     });
     let mut response = crate::http::empty(StatusCode::SWITCHING_PROTOCOLS);
     let headers = response.headers_mut();

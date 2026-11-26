@@ -89,7 +89,7 @@ async fn ask(port: u16, name: &str) -> [u8; 4] {
 async fn a_dns_script_answers_and_one_that_fails_or_runs_out_of_time_leaves_the_name_to_dns() {
     let nameserver = super::mitm::nameserver_answering([10, 0, 0, 1]).await;
     let named = super::mitm::nameserver_answering([10, 0, 0, 2]).await;
-    let port = free_port();
+    let port = port_to_bind_later();
     let rig = Rig::new();
     let resources = rig.home.path().join("mitm/resources");
     std::fs::create_dir_all(&resources).unwrap();
@@ -130,7 +130,7 @@ async fn a_dns_script_answers_and_one_that_fails_or_runs_out_of_time_leaves_the_
 async fn a_dns_script_reaching_its_own_domain_does_not_wait_on_itself() {
     let nameserver = super::mitm::nameserver_answering([127, 0, 0, 1]).await;
     let (server, hits) = http_server(HashMap::from([("/ip", "192.0.2.9".to_string())])).await;
-    let port = free_port();
+    let port = port_to_bind_later();
     let rig = Rig::new();
     let resources = rig.home.path().join("mitm/resources");
     std::fs::create_dir_all(&resources).unwrap();

@@ -10,16 +10,10 @@ use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+use concord_test_support::port_to_bind_later;
+
 const BINARY: &str = env!("CARGO_BIN_EXE_concord");
 const BODY: &str = "hello from the origin";
-
-fn free_port() -> u16 {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 fn serve_once(listener: TcpListener) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
@@ -96,7 +90,7 @@ fn run_proxies_through_the_profiles_mixed_listener_and_stops_on_sigterm() {
     let origin = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let origin_port = origin.local_addr().unwrap().port();
     let served = serve_once(origin);
-    let mixed = free_port();
+    let mixed = port_to_bind_later();
     let profiles = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let config = profiles.path().join("profile.yaml");

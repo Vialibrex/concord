@@ -4,6 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::thread;
+use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
@@ -19,14 +20,16 @@ pub fn free_port() -> u16 {
 /// A loopback port, free for TCP and UDP, for a listener the code under test binds only later.
 /// It lies below the range the OS hands out to `bind(0)` and to outgoing connections (from 32768
 /// on Linux, 49152 on macOS), where [`free_port`]'s come from and where any socket the run opens
-/// meanwhile could take it. Each call in a process gets a different port.
+/// meanwhile could take it. Each call in a process gets a different port, and processes started
+/// together, whose pids are close, start far apart.
 #[expect(
     clippy::disallowed_methods,
     reason = "a loopback probe is never protected"
 )]
 pub fn port_to_bind_later() -> u16 {
     static NEXT: AtomicU16 = AtomicU16::new(0);
-    let first = 20_000 + u16::try_from(std::process::id() % 4_000).unwrap_or_default();
+    let first =
+        20_000 + u16::try_from(u64::from(std::process::id()) * 397 % 4_000).unwrap_or_default();
     (0..8_000)
         .map(|_| first + NEXT.fetch_add(1, Ordering::Relaxed) % 8_000)
         .find(|&port| {
@@ -105,6 +108,43 @@ pub async fn udp_echo() -> SocketAddr {
         }
     });
     addr
+}
+
+/// Whether `check` holds within about five seconds, polling every 25 ms.
+pub async fn eventually(mut check: impl FnMut() -> bool) -> bool {
+    for _ in 0..200 {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    check()
+}
+
+/// A rustls server for `localhost` on a fresh self-signed certificate, and a client that trusts
+/// that certificate alone, both on `versions`: `rustls::DEFAULT_VERSIONS`, or TLS 1.3 for QUIC.
+#[cfg(feature = "tls")]
+pub fn localhost_tls(
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> (rustls::ServerConfig, rustls::ClientConfig) {
+    let made = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let cert = made.cert.der().clone();
+    let key = rustls::pki_types::PrivatePkcs8KeyDer::from(made.signing_key.serialize_der());
+    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let server = rustls::ServerConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(versions)
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.clone()], key.into())
+        .unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(cert).unwrap();
+    let client = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(versions)
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    (server, client)
 }
 
 /// Poisons `mutex` as a task that panics while holding it does.

@@ -174,7 +174,7 @@ fn path_of(pid: u32) -> Option<String> {
 }
 
 /// macOS 27 lists in `pcblist_n` only the caller's own sockets when a third-party app started the
-/// caller, as the FlClash desktop app starts Concord. libproc still reads the descriptors of every
+/// caller, as a desktop host app starts Concord. libproc still reads the descriptors of every
 /// process of the same user, as lsof does, so a miss there falls back to walking them.
 pub fn find(network: Network, src: SocketAddr) -> Option<ProcessInfo> {
     let listed = read_pcblist(network).and_then(|dump| select(&parse_pcblist(&dump), network, src));

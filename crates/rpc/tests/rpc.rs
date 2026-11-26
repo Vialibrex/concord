@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use concord_api::sync::lock;
 use concord_api::{ControlService, PolicyQueue, QueueStream, ServiceInfo, Subscription};
+use concord_common::sync::lock;
 use concord_proto::ApiError;
 use concord_proto::StreamPolicy;
 use concord_proto::types::*;

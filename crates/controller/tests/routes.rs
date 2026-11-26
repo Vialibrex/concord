@@ -7,17 +7,18 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use concord_api::sync::lock;
 use concord_api::{Control, ControlOptions, ControlService, Delivery, EventBus, LogBridge};
+use concord_common::sync::lock;
 use concord_engine::{Engine, EngineConfig};
 use concord_platform::NativePlatform;
 use concord_proto::types::*;
-use concord_test_support::free_port;
+use concord_test_support::port_to_bind_later;
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::layer::SubscriberExt;
 
 const PATIENCE: Duration = Duration::from_secs(10);
@@ -38,6 +39,8 @@ struct Rig {
     bus: Arc<EventBus>,
     port: u16,
     secret: &'static str,
+    stop: CancellationToken,
+    served: tokio::task::JoinHandle<()>,
     _dir: tempfile::TempDir,
 }
 
@@ -69,7 +72,7 @@ impl Rig {
             })
             .await
             .unwrap();
-        let port = free_port();
+        let port = port_to_bind_later();
         let secret = "s3cret";
         let mut profile = profile.to_string();
         if profile_controller {
@@ -82,12 +85,15 @@ impl Rig {
             .config_apply(ConfigApplyParams::default())
             .await
             .unwrap();
-        tokio::spawn(concord_controller::serve(control.clone()));
+        let stop = CancellationToken::new();
+        let served = tokio::spawn(concord_controller::serve(control.clone(), stop.clone()));
         let rig = Rig {
             control,
             bus,
             port,
             secret,
+            stop,
+            served,
             _dir: dir,
         };
         if profile_controller {
@@ -606,7 +612,7 @@ async fn rules_connections_and_providers_have_mihomos_shape() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_new_address_moves_the_controller_and_an_empty_one_closes_it() {
     let rig = Rig::new(false).await;
-    let moved = free_port();
+    let moved = port_to_bind_later();
     rig.listen(moved).await;
     rig.wait_open(moved).await;
     assert!(TcpStream::connect(("127.0.0.1", rig.port)).await.is_err());
@@ -625,6 +631,39 @@ async fn a_new_address_moves_the_controller_and_an_empty_one_closes_it() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("the controller stayed open");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_controller_returns_only_after_its_sessions_end() {
+    let mut rig = Rig::new(false).await;
+    let stream = TcpStream::connect(("127.0.0.1", rig.port)).await.unwrap();
+    let mut reader = BufReader::new(stream);
+    let request = format!(
+        "GET /traffic HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\n\r\n",
+        rig.secret
+    );
+    reader
+        .get_mut()
+        .write_all(request.as_bytes())
+        .await
+        .unwrap();
+    let mut head = String::new();
+    timeout(PATIENCE, reader.read_line(&mut head))
+        .await
+        .expect("the push did not start")
+        .unwrap();
+    rig.stop.cancel();
+    timeout(PATIENCE, &mut rig.served)
+        .await
+        .expect("serve did not return")
+        .unwrap();
+    let mut rest = Vec::new();
+    timeout(PATIENCE, reader.read_to_end(&mut rest))
+        .await
+        .expect("the push outlived the controller")
+        .unwrap();
+    assert!(TcpStream::connect(("127.0.0.1", rig.port)).await.is_err());
+    rig.control.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

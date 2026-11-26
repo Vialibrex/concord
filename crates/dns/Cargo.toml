@@ -37,11 +37,11 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 concord-net = { workspace = true }
+concord-test-support = { workspace = true, features = ["tls"] }
 tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
-rcgen = { workspace = true }
 
 [lints]
 workspace = true

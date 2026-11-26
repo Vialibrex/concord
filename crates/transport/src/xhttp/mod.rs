@@ -15,6 +15,7 @@ use std::task::{Context, Poll, ready};
 use concord_common::sync::lock;
 use concord_common::{BoxStream, Stream, Tasks};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
+use tokio_util::task::AbortOnDropHandle;
 
 use config::{SessionIds, Settings, effective_mode, session_id_generator};
 pub use config::{XhttpOptions, XhttpReuse};
@@ -250,7 +251,8 @@ impl XhttpClient {
             inner: writer,
             failure,
         });
-        let mut keep: Vec<Box<dyn Send>> = vec![Box::new(AbortOnDrop(task)), Box::new(down_lease)];
+        let mut keep: Vec<Box<dyn Send>> =
+            vec![Box::new(AbortOnDropHandle::new(task)), Box::new(down_lease)];
         if !same {
             keep.push(Box::new(up_lease));
         }
@@ -299,14 +301,6 @@ fn checked(pending: Pending, what: &'static str, ok: fn(u16) -> bool) -> Pending
         }
         Ok((status, body))
     })
-}
-
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 struct Guarded {

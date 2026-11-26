@@ -10,9 +10,10 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::testing::{
-    Client, Handler, Reply, Rig, Service, Wire, echo, eventually, flow, flow_of, full_body,
-    offer_on, rig_for, start_server, start_service,
+    Client, Handler, Reply, Rig, Service, Wire, echo, flow, flow_of, full_body, offer_on, rig_for,
+    start_server, start_service,
 };
+use concord_test_support::eventually;
 
 /// `echo`, except `/api` answers a JSON document for the body rewrites to edit.
 fn api_or_echo() -> Handler {
@@ -737,7 +738,7 @@ async fn marks_and_keeps_what_decrypting_a_client_refused() {
     assert!(refused.is_err());
     drop(refused);
     let _ = tokio::time::timeout(Duration::from_secs(10), offer).await;
-    eventually(|| rig.dialer.marks().len() == 2 && rig.dialer.marks()[1].is_some()).await;
+    assert!(eventually(|| rig.dialer.marks().len() == 2 && rig.dialer.marks()[1].is_some()).await);
     assert_eq!(rig.dialer.marks()[1], Some(ConnMark::Refused));
 
     let mut again = Client::tls(&rig, "example.test", 443, &["http/1.1"])
@@ -889,7 +890,7 @@ async fn a_connection_dropped_before_decrypting_lists_as_plain() {
         .unwrap();
     drop(near);
     let _ = tokio::time::timeout(Duration::from_secs(10), offer).await;
-    eventually(|| rig.dialer.marks() == vec![Some(ConnMark::Plain)]).await;
+    assert!(eventually(|| rig.dialer.marks() == vec![Some(ConnMark::Plain)]).await);
 }
 
 #[tokio::test]
@@ -1543,7 +1544,7 @@ async fn the_upstream_of_a_session_still_open_closes_when_the_engine_stops() {
     tokio::time::timeout(Duration::from_secs(2), tracker.wait())
         .await
         .expect("the session's tasks outlived the stop");
-    eventually(|| closed.load(Ordering::SeqCst)).await;
+    assert!(eventually(|| closed.load(Ordering::SeqCst)).await);
     drop(client);
 }
 
@@ -1717,8 +1718,8 @@ async fn a_replaced_engine_closes_its_idle_sessions_and_is_dropped() {
     assert_eq!(client.get("/x").await.status, 200);
 
     rig.config(section("b"));
-    eventually(|| closed(&client)).await;
-    eventually(|| old.upgrade().is_none()).await;
+    assert!(eventually(|| closed(&client)).await);
+    assert!(eventually(|| old.upgrade().is_none()).await);
 }
 
 #[tokio::test]
@@ -1748,7 +1749,7 @@ async fn turning_mitm_off_closes_the_idle_sessions() {
     assert_eq!(client.get("/x").await.status, 200);
 
     rig.config(json!({"enable": false}));
-    eventually(|| closed(&client)).await;
+    assert!(eventually(|| closed(&client)).await);
 }
 
 #[tokio::test]
@@ -1772,7 +1773,7 @@ async fn a_request_under_way_when_its_engine_is_replaced_is_answered_in_full() {
     release.notify_one();
     let (client, answer) = pending.await.unwrap();
     assert_eq!(answer.unwrap().text(), "done");
-    eventually(|| closed(&client)).await;
+    assert!(eventually(|| closed(&client)).await);
 }
 
 #[tokio::test]
@@ -1814,7 +1815,7 @@ async fn an_h2_client_of_a_replaced_engine_gets_goaway_and_its_open_stream_finis
     assert_eq!(response.status(), 200);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"done");
-    eventually(|| closed(&client)).await;
+    assert!(eventually(|| closed(&client)).await);
 }
 
 #[tokio::test]
@@ -1845,7 +1846,7 @@ async fn a_websocket_keeps_its_replaced_engine_until_it_closes() {
     assert!(old.upgrade().is_some());
 
     drop(tls);
-    eventually(|| old.upgrade().is_none()).await;
+    assert!(eventually(|| old.upgrade().is_none()).await);
 }
 
 #[tokio::test]

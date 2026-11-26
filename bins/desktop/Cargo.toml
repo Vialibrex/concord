@@ -27,12 +27,14 @@ concord-rpc = { workspace = true }
 futures-util = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true, features = ["release_max_level_debug"] }
 # Never called here: it caps the `log` records that dependencies such as rustls compile in.
 log = { workspace = true, features = ["release_max_level_debug"] }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+concord-test-support = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 

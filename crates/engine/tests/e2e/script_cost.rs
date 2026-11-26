@@ -253,7 +253,10 @@ async fn script_cost() {
         ),
     ];
     for (cell, base, with, by_name, concurrency) in cells {
-        let (a, b) = (rig(&base, free_port()).await, rig(&with, free_port()).await);
+        let (a, b) = (
+            rig(&base, port_to_bind_later()).await,
+            rig(&with, port_to_bind_later()).await,
+        );
         let names = if by_name {
             ["without", "with"]
         } else {
@@ -288,7 +291,7 @@ async fn script_cost() {
         b.engine.shutdown().await;
     }
 
-    let port = free_port();
+    let port = port_to_bind_later();
     let dns = rig(last, port).await;
     let fresh = |suffix: &'static str| move |i: usize| query(port, format!("q{i}.{suffix}"));
     let again = |name: &'static str| move |_| query(port, name.to_string());
@@ -356,7 +359,11 @@ async fn footprint(echo: SocketAddr) {
         println!("MM-COST footprint: /proc only, skipped");
         return;
     };
-    let rig = rig("  - SCRIPT,never,REJECT\n  - MATCH,DIRECT\n", free_port()).await;
+    let rig = rig(
+        "  - SCRIPT,never,REJECT\n  - MATCH,DIRECT\n",
+        port_to_bind_later(),
+    )
+    .await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let before = status().unwrap();
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -775,7 +775,7 @@ async fn mitm_drops_quic_to_a_listed_host_by_name_or_fake_ip() {
     let echo = udp_echo().await;
     let port = echo.port();
     let nameserver = nameserver_answering([127, 0, 0, 1]).await;
-    let dns = free_port();
+    let dns = port_to_bind_later();
     let rig = Rig::new();
     let info = rig.engine.mitm().generate_certificate().unwrap();
     let config = format!(

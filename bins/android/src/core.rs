@@ -5,6 +5,7 @@ use concord_engine::{Engine, EngineConfig};
 use concord_ffi::Hub;
 use concord_rpc::Server;
 use tokio::runtime::{Builder, Runtime};
+use tokio_util::sync::CancellationToken;
 
 use crate::platform::{AndroidPlatform, PlatformHost};
 
@@ -56,7 +57,10 @@ impl<C: PlatformHost> Core<C> {
             },
         );
         let server = Arc::new(Server::new(control.clone()));
-        runtime.spawn(concord_controller::serve(control.clone()));
+        runtime.spawn(concord_controller::serve(
+            control.clone(),
+            CancellationToken::new(),
+        ));
         drop(entered);
         let hub = Hub::new(runtime.handle().clone(), server);
         Ok(Core {

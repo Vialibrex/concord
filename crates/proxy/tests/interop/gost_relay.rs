@@ -17,7 +17,7 @@ async fn gost_relay_round_trips_with_upstream_gost() {
     ] {
         for forward in [false, true] {
             for udp in [false, true] {
-                let port = free_port();
+                let port = port_to_bind_later();
                 let target = if udp { udp_echo } else { echo };
                 let remote = if forward {
                     format!("/{target}")

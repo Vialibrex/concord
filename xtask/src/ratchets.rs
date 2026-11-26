@@ -12,7 +12,7 @@ use syn::visit::{self, Visit};
 use crate::stream_policy::rust_files;
 
 const FILE: &str = "xtask/ratchets.txt";
-const ROOTS: &[&str] = &["crates", "bins"];
+const ROOTS: &[&str] = &["crates", "bins", "tools"];
 const FILE_LINES: usize = 800;
 const FN_LINES: usize = 120;
 

@@ -153,19 +153,28 @@ const LAYERS: &[(&str, Opt, &[&str])] = &[
     (
         "concord-controller",
         Opt::Inherit,
-        &["concord-api", "concord-proto"],
+        &[
+            "concord-api",
+            "concord-common",
+            "concord-platform",
+            "concord-proto",
+        ],
     ),
     (
         "concord-rpc",
         Opt::Inherit,
-        &["concord-api", "concord-proto"],
+        &["concord-api", "concord-common", "concord-proto"],
     ),
     (
         "concord-ipc",
         Opt::Inherit,
         &["concord-rpc", "concord-proto"],
     ),
-    ("concord-ffi", Opt::Inherit, &["concord-api", "concord-rpc"]),
+    (
+        "concord-ffi",
+        Opt::Inherit,
+        &["concord-api", "concord-common", "concord-rpc"],
+    ),
     ("concord-test-support", Opt::Inherit, &[]),
 ];
 

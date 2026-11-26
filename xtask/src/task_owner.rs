@@ -1,8 +1,9 @@
 //! Holds the background tasks below the engine to `concord_common::Tasks`, which registers each with
-//! the engine's tracker so shutdown can stop it and wait for it. A task started with
-//! `tokio::spawn`, on a runtime `Handle`, in a `JoinSet` or by hyper's `TokioExecutor` outlives the
-//! engine. The check reads names, not types: it sees these by the paths and imports that name
-//! them, so a handle that arrives without its type being named stays out of its sight.
+//! the engine's tracker so shutdown can stop it and wait for it, and the external controller's
+//! sessions to the `Tasks` over its listener's tracker. A task started with `tokio::spawn`, on a
+//! runtime `Handle`, in a `JoinSet` or by hyper's `TokioExecutor` outlives its owner. The check
+//! reads names, not types: it sees these by the paths and imports that name them, so a handle that
+//! arrives without its type being named stays out of its sight.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,7 @@ const OWNED: &[&str] = &[
     "crates/mitm/src",
     "crates/api/src",
     "crates/engine/src",
+    "crates/controller/src",
 ];
 
 pub(crate) fn check(root: &Path) -> Result<(), String> {
@@ -230,7 +232,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_crates_below_the_engine_spawn_only_through_tasks() {
+    fn the_owned_crates_spawn_only_through_tasks() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         if let Err(problems) = check(&root) {
             panic!("{problems}");

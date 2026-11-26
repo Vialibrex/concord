@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use concord_api::{Control, ControlService, Delivery, Origin, Reload, valid_status_ranges};
+use concord_common::Tasks;
 use concord_proto::types::{
     ConfigPatchParams, ConnectionCloseParams, CoreEvent, DelayRunEvent, DelayRunParams,
     DelayTestParams, DnsQueryParams, Empty, EventsWatchParams, GeoUpdateParams, ProviderKind,
@@ -15,7 +16,6 @@ use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Limited};
 use hyper::body::{Body as _, Incoming};
 use serde_json::{Map, Value, json};
-use tokio_util::sync::CancellationToken;
 
 use crate::http::{
     Body, bad_request, empty, error, json, not_found, parse_body, query, segments, unsupported,
@@ -25,7 +25,7 @@ use crate::stream;
 
 pub struct Routes {
     pub control: Arc<Control>,
-    pub stop: CancellationToken,
+    pub sessions: Tasks,
 }
 
 impl Routes {
@@ -43,11 +43,11 @@ impl Routes {
             })),
             (&Method::GET, ["traffic"]) => {
                 let values = stream::traffic(&self.control).await;
-                stream::respond(request, values, self.stop.clone())
+                stream::respond(request, values, &self.sessions)
             }
             (&Method::GET, ["memory"]) => {
                 let values = stream::memory(self.control.clone());
-                stream::respond(request, values, self.stop.clone())
+                stream::respond(request, values, &self.sessions)
             }
             (&Method::GET, ["logs"]) => self.logs(request).await,
             (_, ["configs", ..]) => self.configs(request, &method, &path[1..]).await,
@@ -93,7 +93,7 @@ impl Routes {
         };
         let structured = query(request.uri(), "format").as_deref() == Some("structured");
         let values = stream::logs(&self.control, level, structured).await;
-        stream::respond(request, values, self.stop.clone())
+        stream::respond(request, values, &self.sessions)
     }
 
     async fn catalog(&self) -> Option<Catalog> {
@@ -324,7 +324,7 @@ impl Routes {
                 };
                 let values =
                     stream::connections(self.control.clone(), Duration::from_millis(period));
-                stream::respond(request, values, self.stop.clone())
+                stream::respond(request, values, &self.sessions)
             }
             (&Method::GET, []) => {
                 let mut table = stream::Table::new(self.control.clone());

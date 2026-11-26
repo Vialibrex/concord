@@ -26,7 +26,7 @@ pub use concord_group::{
     DelayRecord, GroupView, HealthSnapshot, NodeStateView, NodeView, ProxyView, ProxyViews,
     SelectError, StatusRanges, UrlHealth,
 };
-pub use concord_platform::{HomeDir, local_utc_offset};
+pub use concord_platform::HomeDir;
 pub use engine::{
     Engine, EngineConfig, MitmService, Providers, SetupRequest, TunPatch, UpdateRequest,
 };

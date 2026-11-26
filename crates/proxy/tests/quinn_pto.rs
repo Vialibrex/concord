@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
+use concord_test_support::localhost_tls;
 use quinn_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn_proto::{
     ClientConfig, Connection, ConnectionHandle, DatagramEvent, Dir, EcnCodepoint, Endpoint, Event,
@@ -95,29 +96,13 @@ struct Pair {
 }
 impl Pair {
     fn new(window: Option<u32>) -> Self {
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let mut tls = rustls::ServerConfig::builder_with_provider(provider.clone())
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![cert.cert.der().clone()],
-                rustls::pki_types::PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into()),
-            )
-            .unwrap();
-        tls.alpn_protocols = vec![b"pto-contract".to_vec()];
+        let (mut server_tls, mut client_tls) = localhost_tls(rustls::DEFAULT_VERSIONS);
+        server_tls.alpn_protocols = vec![b"pto-contract".to_vec()];
+        client_tls.alpn_protocols = vec![b"pto-contract".to_vec()];
         let mut server =
-            ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls).unwrap()));
-        let mut roots = rustls::RootCertStore::empty();
-        roots.add(cert.cert.der().clone()).unwrap();
-        let mut tls = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        tls.alpn_protocols = vec![b"pto-contract".to_vec()];
-        let mut client = ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls).unwrap()));
+            ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_tls).unwrap()));
+        let mut client =
+            ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_tls).unwrap()));
         let mut transport = TransportConfig::default();
         transport
             .max_idle_timeout(None)

@@ -235,7 +235,7 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
 - **DNS:** a `dhcp://<interface>` upstream runs as `system://` with a warning. A `ts://`, `tailscale://`, `et://` or
   `easytier://` server is skipped with a warning, as its tailscale or easytier node is set aside; a list, such as one
   `nameserver-policy` entry, left with no other server answers REFUSED, so those names do not go to another resolver.
-- **Accepted without effect:** `skip-auth-prefixes` and `inbound-tfo` (a non-empty value gets a warning).
+- **Accepted without effect:** `inbound-tfo` (a non-empty value gets a warning).
 - **Deprecated fingerprint names:** `chrome_psk`, the other `chrome_*` variants and `randomized` are read as `chrome`
   and `random` with a warning.
 - **TProxy UDP** does not carry DSCP.

@@ -12,6 +12,7 @@ use concord_proto::types::{
     LogWatchParams, ProfileRef,
 };
 use futures_util::StreamExt;
+use tokio_util::sync::CancellationToken;
 
 pub const USAGE: &str = "\
 Usage: concord run [-c <file>] [-d <directory>]
@@ -65,7 +66,11 @@ fn default_home() -> Option<PathBuf> {
 }
 
 pub async fn run(control: Arc<Control>, options: Options) -> ExitCode {
-    let controller = tokio::spawn(concord_controller::serve(Arc::clone(&control)));
+    let controller_stop = CancellationToken::new();
+    let controller = tokio::spawn(concord_controller::serve(
+        Arc::clone(&control),
+        controller_stop.clone(),
+    ));
     let code = match start(&control, &options).await {
         Ok(home) => {
             serve(&control, options.config.as_deref(), &home).await;
@@ -76,7 +81,8 @@ pub async fn run(control: Arc<Control>, options: Options) -> ExitCode {
             ExitCode::FAILURE
         }
     };
-    controller.abort();
+    controller_stop.cancel();
+    let _ = controller.await;
     super::shut_down(&control).await;
     code
 }

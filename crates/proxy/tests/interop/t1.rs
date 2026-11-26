@@ -32,7 +32,7 @@ fn snell_case(
 }
 
 fn snell_shadowtls_case(name: &str, snell: u32, version: u8, certs: &Certs) -> Case {
-    let decoy_port = super::free_port();
+    let decoy_port = super::port_to_bind_later();
     let decoy = super::listener(
         &format!("{name}-decoy"),
         "http",
@@ -166,9 +166,9 @@ fn mieru_udp_cases() -> Vec<Case> {
     let every = nonce_every_packet(2, true);
     let first = nonce_every_packet(1, false);
     let range = loop {
-        let first = super::free_port();
-        let middle = super::free_port();
-        let last = super::free_port();
+        let first = super::port_to_bind_later();
+        let middle = super::port_to_bind_later();
+        let last = super::port_to_bind_later();
         if middle == first + 1 && last == middle + 1 {
             break (first, last);
         }
@@ -227,9 +227,9 @@ fn mieru_cases() -> Vec<Case> {
     let (listener_3, client_3) = pattern(3, 32, false, 0);
     let (listener_4, client_4) = pattern(4, 15, false, 1);
     let range = loop {
-        let first = super::free_port();
-        let middle = super::free_port();
-        let last = super::free_port();
+        let first = super::port_to_bind_later();
+        let middle = super::port_to_bind_later();
+        let last = super::port_to_bind_later();
         if middle == first + 1 && last == middle + 1 {
             break (first, last);
         }

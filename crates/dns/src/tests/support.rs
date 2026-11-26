@@ -157,18 +157,7 @@ pub async fn serve_tcp(handler: Handler) -> Server {
 }
 
 pub async fn serve_tls(handler: Handler) -> Server {
-    let key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-    let chain = vec![key.cert.der().clone()];
-    let private = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(key.signing_key.serialize_der()),
-    );
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let config = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(chain, private)
-        .unwrap();
+    let (config, _) = concord_test_support::localhost_tls(rustls::DEFAULT_VERSIONS);
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -477,18 +466,7 @@ pub fn parse(bytes: &[u8]) -> Message {
 
 fn quic_server_config(alpn: &[u8]) -> quinn::ServerConfig {
     use quinn::crypto::rustls::QuicServerConfig;
-    let key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-    let chain = vec![key.cert.der().clone()];
-    let private = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(key.signing_key.serialize_der()),
-    );
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(chain, private)
-        .unwrap();
+    let (mut tls, _) = concord_test_support::localhost_tls(&[&rustls::version::TLS13]);
     tls.alpn_protocols = vec![alpn.to_vec()];
     quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls).unwrap()))
 }
@@ -539,18 +517,7 @@ pub async fn serve_h3(handler: Handler) -> Server {
 
 pub async fn serve_quic(handler: Handler) -> Server {
     use quinn::crypto::rustls::QuicServerConfig;
-    let key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-    let chain = vec![key.cert.der().clone()];
-    let private = rustls::pki_types::PrivateKeyDer::Pkcs8(
-        rustls::pki_types::PrivatePkcs8KeyDer::from(key.signing_key.serialize_der()),
-    );
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(chain, private)
-        .unwrap();
+    let (mut tls, _) = concord_test_support::localhost_tls(&[&rustls::version::TLS13]);
     tls.alpn_protocols = vec![b"doq".to_vec()];
     let config =
         quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls).unwrap()));

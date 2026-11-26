@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicU16;
+
 use concord_common::ResourceKind;
 use concord_config::mitm::modules::{RESOURCES_DIR, stored_name};
 use concord_engine::mitm_types::{FailureReason, ModuleStatus, ResourceState};

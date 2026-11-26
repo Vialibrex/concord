@@ -12,6 +12,7 @@ use concord_common::sync::lock;
 use concord_common::{CoreEvent, CoreOptions, EventSink, RouteStamp};
 use concord_engine::{Engine, EngineConfig, SetupRequest, UpdateRequest};
 use concord_platform::NativePlatform;
+use concord_test_support::eventually;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -110,16 +111,6 @@ async fn http_body(body: &'static str) -> SocketAddr {
         }
     });
     addr
-}
-
-async fn eventually(mut check: impl FnMut() -> bool) -> bool {
-    for _ in 0..200 {
-        if check() {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    check()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

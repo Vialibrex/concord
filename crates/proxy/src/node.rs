@@ -256,16 +256,7 @@ mod tests {
 
     #[allow(clippy::unwrap_used, reason = "test helper")]
     async fn secured(client_fingerprint: &str) -> TlsConn {
-        let made = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-        let key = rustls::pki_types::PrivatePkcs8KeyDer::from(made.signing_key.serialize_der());
-        let server = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::aws_lc_rs::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![made.cert.der().clone()], key.into())
-        .unwrap();
+        let (server, _) = concord_test_support::localhost_tls(rustls::DEFAULT_VERSIONS);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 

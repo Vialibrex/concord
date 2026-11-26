@@ -17,6 +17,7 @@ use concord_engine::{Engine, EngineConfig};
 use concord_ipc::{FramedChannel, Token};
 use concord_rpc::Server;
 use tokio::runtime::Builder;
+use tokio_util::sync::CancellationToken;
 use tracing_subscriber::layer::SubscriberExt;
 
 const EXIT_CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -129,13 +130,18 @@ async fn embedded(address: String, token: Token) -> ExitCode {
     }
 
     let server = Server::new(Arc::clone(&control));
-    let controller = tokio::spawn(concord_controller::serve(Arc::clone(&control)));
+    let controller_stop = CancellationToken::new();
+    let controller = tokio::spawn(concord_controller::serve(
+        Arc::clone(&control),
+        controller_stop.clone(),
+    ));
     tokio::select! {
         () = server.serve(FramedChannel::new(socket)) => {}
         () = termination() => {}
     }
 
-    controller.abort();
+    controller_stop.cancel();
+    let _ = controller.await;
     shut_down(&control).await;
     ExitCode::SUCCESS
 }

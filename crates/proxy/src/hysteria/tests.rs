@@ -15,11 +15,12 @@ use concord_common::{Address, DialCx, Initiator, Outbound, PacketBuf, recv_packe
 use concord_config::proxy::ProxyKind;
 use concord_config::{Capabilities, ProxyParse, parse_proxy};
 use concord_quic::{ObfsSpec, wrap_socket};
+use concord_test_support::{tcp_echo, udp_echo};
 use concord_tls::TrustStore;
 use quinn::Endpoint;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UdpSocket};
+use tokio::net::UdpSocket;
 
 use super::wire::{Defrag, UdpHeader, parse_udp, put_udp_header, udp_header_len};
 use crate::ctx::BuildCtx;
@@ -235,36 +236,6 @@ fn client(port: u16, extra: Value) -> Result<Arc<dyn Outbound>, crate::ctx::Buil
         unreachable!()
     };
     super::build(&def, opts, &BuildCtx::new(TrustStore::new(b"", Vec::new())))
-}
-
-async fn tcp_echo() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        while let Ok((mut conn, _)) = listener.accept().await {
-            tokio::spawn(async move {
-                let mut buf = vec![0u8; 8192];
-                while let Ok(n) = conn.read(&mut buf).await {
-                    if n == 0 || conn.write_all(&buf[..n]).await.is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-    });
-    addr
-}
-
-async fn udp_echo() -> SocketAddr {
-    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let addr = socket.local_addr().unwrap();
-    tokio::spawn(async move {
-        let mut buf = vec![0u8; 65536];
-        while let Ok((n, from)) = socket.recv_from(&mut buf).await {
-            let _ = socket.send_to(&buf[..n], from).await;
-        }
-    });
-    addr
 }
 
 fn dst(addr: SocketAddr) -> Address {

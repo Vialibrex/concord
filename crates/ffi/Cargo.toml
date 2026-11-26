@@ -13,6 +13,7 @@ doctest = false
 
 [dependencies]
 concord-api = { workspace = true }
+concord-common = { workspace = true }
 concord-rpc = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 tracing = { workspace = true }

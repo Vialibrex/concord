@@ -11,6 +11,7 @@ use futures_util::stream::{self, Stream};
 use futures_util::{FutureExt, StreamExt};
 use tokio::sync::watch;
 use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep};
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::bus::{ConnStream, EventBus};
 use crate::convert;
@@ -220,14 +221,6 @@ pub fn proxies(engine: Arc<Engine>, bus: &EventBus) -> Subscription<ProxyGroups,
     Subscription::new(Some(snapshot), events.boxed())
 }
 
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 /// Ends the stream also when the engine stops the run before its `done`.
 struct CloseOnDrop(Arc<PolicyQueue<DelayRunEvent>>);
 
@@ -271,7 +264,7 @@ pub fn delay_run(
         }
         sink.0.push(DelayRunEvent::Done);
     });
-    QueueStream::new(queue, AbortOnDrop(driver)).boxed()
+    QueueStream::new(queue, AbortOnDropHandle::new(driver)).boxed()
 }
 
 pub fn map_stream<T, U>(

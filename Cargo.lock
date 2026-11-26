@@ -990,6 +990,7 @@ dependencies = [
  "log",
  "serde_json",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1010,6 +1011,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1056,6 +1058,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "concord-api",
+ "concord-common",
  "concord-engine",
  "concord-platform",
  "concord-proto",
@@ -1088,12 +1091,14 @@ dependencies = [
  "concord-platform",
  "concord-proto",
  "concord-rpc",
+ "concord-test-support",
  "futures-util",
  "libc",
  "log",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1110,6 +1115,7 @@ dependencies = [
  "concord-net",
  "concord-platform",
  "concord-quic",
+ "concord-test-support",
  "concord-tls",
  "futures-util",
  "h3",
@@ -1121,7 +1127,6 @@ dependencies = [
  "hyper-util",
  "quinn",
  "rand 0.9.5",
- "rcgen",
  "regex",
  "rustls",
  "thiserror 2.0.21",
@@ -1183,6 +1188,7 @@ name = "concord-ffi"
 version = "0.1.0"
 dependencies = [
  "concord-api",
+ "concord-common",
  "concord-engine",
  "concord-platform",
  "concord-rpc",
@@ -1445,6 +1451,7 @@ name = "concord-rpc"
 version = "0.1.0"
 dependencies = [
  "concord-api",
+ "concord-common",
  "concord-proto",
  "futures-util",
  "serde",
@@ -1481,6 +1488,8 @@ dependencies = [
 name = "concord-test-support"
 version = "0.1.0"
 dependencies = [
+ "rcgen",
+ "rustls",
  "tokio",
 ]
 
@@ -1515,6 +1524,7 @@ dependencies = [
  "tokio",
  "tokio-boring",
  "tokio-rustls",
+ "tokio-util",
  "tracing",
 ]
 
@@ -1526,6 +1536,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "concord-common",
+ "concord-test-support",
  "concord-tls",
  "futures-util",
  "h2",

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use concord_api::local_utc_offset;
+use concord_platform::local_utc_offset;
 use concord_proto::types::{
     ConnectionInfo, DelayRecord, DnsQueryResult, DnsRecord, GeneralState, GroupInfo, LogLevel,
     NodeInfo, ProviderInfo, ProxyGroups, ProxyState, RuleEntry,

@@ -17,6 +17,7 @@ use concord_common::{Address, DialCx, Initiator, Outbound, PacketBuf, recv_packe
 use concord_config::proxy::ProxyKind;
 use concord_config::{Capabilities, ProxyParse, parse_proxy};
 use concord_quic::{BbrProfile, DatagramHub, ObfsSpec, SwitchFactory};
+use concord_test_support::udp_echo;
 use concord_tls::{TlsOptions, TrustStore};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -288,18 +289,6 @@ async fn running(quirks: Quirks) -> (u16, Arc<Seen>, quinn::Endpoint) {
     let seen = Arc::new(Seen::default());
     tokio::spawn(serve(endpoint.clone(), seen.clone(), quirks));
     (port, seen, endpoint)
-}
-
-async fn udp_echo() -> SocketAddr {
-    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    let addr = socket.local_addr().unwrap();
-    tokio::spawn(async move {
-        let mut buf = vec![0u8; 65536];
-        while let Ok((n, from)) = socket.recv_from(&mut buf).await {
-            let _ = socket.send_to(&buf[..n], from).await;
-        }
-    });
-    addr
 }
 
 fn address(addr: SocketAddr) -> Address {

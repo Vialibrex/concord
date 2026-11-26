@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::PollSender;
+use tokio_util::task::AbortOnDrop;
 
 use super::MuxSession;
 use super::inbox::{Inbox, send_detached, write_frames};
@@ -226,15 +227,6 @@ async fn read_loop(core: &Core, mut io: BoxRead) -> io::Result<()> {
     }
 }
 
-/// Without a runtime to drain on, the writer stops with the session.
-struct AbortOnDrop(tokio::task::AbortHandle);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 impl Drop for SmuxSession {
     fn drop(&mut self) {
         self.core.close();
@@ -246,7 +238,8 @@ impl Drop for SmuxSession {
             }
             if let Some(mut writer) = tasks.next() {
                 let deadline = tokio::time::Instant::now() + DRAIN_TIMEOUT;
-                let guard = AbortOnDrop(writer.abort_handle());
+                // Without a runtime to drain on, the writer stops with the session.
+                let guard = AbortOnDrop::new(writer.abort_handle());
                 self.core.tasks.spawn_detached(async move {
                     let _guard = guard;
                     if tokio::time::timeout_at(deadline, &mut writer)

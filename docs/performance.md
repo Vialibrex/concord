@@ -99,7 +99,7 @@ marks a metric whose run of Concord against itself varied too much between round
 
 ## Android
 
-Concord inside the FlClash Android app, against the same app on its Go core (a mihomo fork), on a Xiaomi Mi 11
+Concord inside an Android host app, against the same app on its Go core (a mihomo fork), on a Xiaomi Mi 11
 (Snapdragon 888, Android 14), with a later pre-release build of Concord. Each app carries the load through its own VPN
 (`VpnService`) with no proxy (`direct`) and its default TUN settings. The bench attaches to the running app
 (`concord-bench run --attach … --via tun`) and sends as another app's uid; the origin is another machine reached over
@@ -130,7 +130,7 @@ Flutter engine loaded; PSS is read from `smaps_rollup`, in two passes of opposit
 
 **A link that loads the core.** The Android emulator (arm64, API 34, 4 vCPUs, 4 GiB, on an Apple M4 Pro) runs the
 origin and a SOCKS5 relay (the sing-box command-line client) inside itself, so no traffic leaves it and the apps,
-not a link, set the rate. Concord's FlClash app is compared with SFA, the sing-box app, on its default TUN stack
+not a link, set the rate. The host app on Concord is compared with SFA, the sing-box app, on its default TUN stack
 (sing-tun's Go stack). Each app sends the bench's load to the relay through its own VPN at the same MTU, one flow per
 workload and four for "four flows". Each app ran five rounds of 10 s, each in a fresh process with the order rotating,
 in one emulator session per MTU. CPU is the app process's own CPU time; figures are judged as on Linux.
@@ -152,7 +152,7 @@ each segment, Concord's upload at MTU 1500 was 17% below SFA's at 29% more CPU p
 ## Not Covered Yet
 
 - Windows.
-- TUN, which is being worked on; these results are through the SOCKS5 port only.
+- TUN on Linux and macOS: their results are through the SOCKS5 port; only Android's go through a TUN.
 - The other protocols and workloads (several flows at once, idle connections, large profiles), and links with added
   delay or loss.
 - On Android: proxy protocols and new connections, and a link that loads the core on a phone rather than in the

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use concord_api::ControlService;
-use concord_api::sync::lock;
+use concord_common::sync::lock;
 use concord_proto::types::{HelloParams, HelloResult, Limits};
 use concord_proto::{
     ApiError, Cap, DEFAULT_BATCH_MS, DEFAULT_CREDIT, Kind, MAX_BATCH_BYTES, METHODS,

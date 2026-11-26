@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use concord_common::{BoxStream, Tasks};
 use rustls_pki_types::ServerName;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::stream::RealityStream;
 
@@ -30,7 +31,7 @@ async fn browse(browser: &Browser, stream: RealityStream, host: String) -> Optio
     let user_agent = browser.user_agent;
     let stream: BoxStream = Box::new(stream);
     let (sender, connection) = h2::client::handshake(stream).await.ok()?;
-    let _driver = AbortOnDrop(h2_driver(&browser.tasks, connection));
+    let _driver = AbortOnDropHandle::new(h2_driver(&browser.tasks, connection));
     let padding = "0".repeat(rand::random_range(30..62usize));
     let request = http::Request::builder()
         .method("GET")
@@ -60,7 +61,7 @@ async fn jls_fallback(
         let Ok((sender, connection)) = h2::client::handshake(stream).await else {
             return;
         };
-        let _driver = AbortOnDrop(h2_driver(tasks, connection));
+        let _driver = AbortOnDropHandle::new(h2_driver(tasks, connection));
         if let Ok(request) = http::Request::builder()
             .uri(format!("https://{host}/"))
             .header("user-agent", user_agent)
@@ -97,14 +98,6 @@ fn h2_driver(
     tasks.spawn(async move {
         let _ = connection.await;
     })
-}
-
-struct AbortOnDrop(tokio::task::JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
 }
 
 fn authority(name: &ServerName<'_>) -> String {

@@ -20,6 +20,7 @@ concord-common = { workspace = true, features = ["io"] }
 concord-platform = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["net", "time", "io-util", "macros", "rt", "sync"] }
+tokio-util = { workspace = true }
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 aws-lc-rs = { workspace = true }

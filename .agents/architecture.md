@@ -7,8 +7,8 @@ This describes the tree as it is. Where this file and the code disagree, the cod
 - **Config is data.** `concord-config` parses YAML into typed definitions with no sockets, no tokio and no runtime
   objects, so parsing, validation, share links and dumps work on their own.
 - **No global mutable state.** Everything hangs off an `Engine` instance; tests run several at once.
-- **Capabilities are types.** Closed enums and explicit `Stream` methods (`tcp`, `peer_addr`, `needs_handshake`,
-  `direct`, `into_split`), never `Any` and downcasts.
+- **Capabilities are types.** Closed enums and explicit `Stream` methods (`tcp`, `into_tcp`, `peer_addr`,
+  `needs_handshake`, `direct`, `into_split`, the buffer requirements and `poll_*_buffer`), never `Any` and downcasts.
 - **Abstraction cost follows frequency.** Per connection may box (`async_trait`, `Box<dyn Stream>`); per packet may
   not allocate (`PacketSession` is `poll_*`, `PacketBuf` keeps headroom so headers are written in place); TUN uses
   concrete types.
@@ -32,13 +32,17 @@ The exact edges are in `xtask/src/layers.rs`. From the bottom up:
 | Pipeline | `tunnel` | Pre-handle, sniff, route, dial, track, relay; UDP NAT; connection table |
 | Edges | `inbound`, `tun`, `mitm` | mixed/http/socks/redir/tproxy listeners; TUN device, routes and stack driver; MITM, scripts, capture |
 | Root | `engine` | Composition, lifecycle, apply, background tasks, state that outlives a config |
-| Control | `proto`, `api`, `rpc`, `ipc`, `ffi` | Wire types and registry; one typed function per method; JSON-RPC; socket framing and handshake; the C ABI |
+| Control | `proto`, `api`, `controller`, `rpc`, `ipc`, `ffi` | Wire types and registry; one typed function per method; the Clash REST and WebSocket API for dashboards; JSON-RPC; socket framing and handshake; the C ABI |
 | Binaries | `bins/desktop`, `bins/android` | The `concord` executable and the C ABI `cdylib` `libconcord.so` |
 
 Inversions that keep it acyclic: inbound and tun hand flows to the tunnel through `FlowHandler`; proxy dials named
 nodes (`dialer-proxy` may name a group) through `NodeDialer`; DNS dials through the tunnel with `dns::UpstreamDialer`,
 which the engine implements and guards against loops; providers download through `group::Fetcher`; MITM is offered
 flows through `common::intercept`, and the engine's default-on `mitm` feature links it.
+
+The control crates take what they need below `api` from the crate that owns it: `common`'s `sync` and `Tasks`, and
+the platform's clock for the controller's timestamps. `api` re-exports a lower type only where its own signatures
+carry it (`Origin`, `ControllerCors`), not to route around `check-layers`.
 
 ## TCP Data Path
 
@@ -146,7 +150,8 @@ the TUN stack and MITM outlive a shutdown, so they take the config's `Tasks` eac
 the stop is replaced at shutdown, and what they leave running (accepted connections, DNS answers, sessions) ends with
 it. The engine's own work runs on its `Tasks` too. xtask's `task_owner` test keeps `tokio::spawn`, runtime handles,
 `JoinSet` and `TokioExecutor` out of `proxy`, `quic`, `transport`, `net`, `tls`, `dns`, `group`, `tunnel`, `inbound`,
-`tun`, `mitm`, `engine` and `api`.
+`tun`, `mitm`, `engine` and `api`, and out of `controller`, whose sessions run on a `Tasks` over its listener's own
+tracker and have ended before `serve` moves the listener or returns.
 
 What the engine runs has one of three lifetimes, and a new service picks one:
 
@@ -183,8 +188,8 @@ count over the first two IV bytes (`proxy/src/vmess/crypto.rs`), and REALITY XOR
 eight (`tls/src/reality/schedule.rs`); each follows its protocol, so one helper would need a mode per caller.
 `net::relay`'s `Half` asks its streams for `tcp` and `direct` at each use rather than once per turn:
 `PeekedStream::tcp` and `direct` (`common/src/stream.rs`) turn from `None` to `Some` once the replayed head has been
-read inside the same `Half::poll` loop, and `RecordIo::tcp` (`tls/src/record.rs`) follows record alignment, so a
-snapshot would hold back the switch to splice or direct I/O by a turn.
+read inside the same `Half::poll` loop, and `RecordIo`'s `RecordReader::tcp` (`tls/src/record.rs`) follows record
+alignment, so a snapshot would hold back the switch to splice or direct I/O by a turn.
 
 `proxy/src/lazy.rs` keeps two state machines on purpose. `HeadFirst` holds one enum for its own header (held,
 staged, open). `Kick` watches any inner stream that sends its header on a zero-length write, vmess, smux, shadowsocks

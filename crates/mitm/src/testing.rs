@@ -532,13 +532,3 @@ impl Client {
         self.send(request).await.unwrap()
     }
 }
-
-pub(crate) async fn eventually(mut check: impl FnMut() -> bool) {
-    for _ in 0..200 {
-        if check() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("the condition never held");
-}

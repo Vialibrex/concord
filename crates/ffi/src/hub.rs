@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use concord_api::Control;
-use concord_api::sync::lock;
+use concord_common::sync::lock;
 use concord_rpc::{Incoming, MessageChannel, MessageReader, MessageWriter, SendError, Server};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;

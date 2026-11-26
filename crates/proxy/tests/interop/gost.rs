@@ -70,7 +70,7 @@ async fn gost_plugin_round_trips_with_upstream_gost_and_mihomo() {
         (false, true, "wss"),
         (true, true, "mwss"),
     ] {
-        let port = free_port();
+        let port = port_to_bind_later();
         let listen = format!(
             "{transport}://127.0.0.1:{port}/127.0.0.1:{base_port}?path=/gost&cert={}&key={}",
             certs.cert.display(),

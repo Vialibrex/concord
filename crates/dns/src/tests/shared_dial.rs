@@ -225,17 +225,7 @@ impl crate::UpstreamDialer for CountingDialer {
 
 async fn serve_https(h2: bool, handler: Handler) -> SocketAddr {
     use base64::Engine;
-    let key = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![key.cert.der().clone()],
-            rustls::pki_types::PrivatePkcs8KeyDer::from(key.signing_key.serialize_der()).into(),
-        )
-        .unwrap();
+    let (mut tls, _) = concord_test_support::localhost_tls(rustls::DEFAULT_VERSIONS);
     tls.alpn_protocols = vec![if h2 {
         b"h2".to_vec()
     } else {

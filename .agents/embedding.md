@@ -107,6 +107,7 @@ events are gone, so the host change lands in the same commit as the core it embe
 |---|---|---|
 | `CONCORD_PRODUCT_NAME` | Build | The name end users see: the generated MITM CA's subject and organisation (`<name> CA XXXXXXXX`) and the Android TUN device. Default `Concord`. Read with `option_env!`, so changing it rebuilds |
 | `CONCORD_DEBUG` | Run | Any value also writes errors to standard error |
+| `TOKIO_WORKER_THREADS` | Run | The desktop binary's runtime worker count; unset, it is the number of CPUs the process may run on |
 | `BORING_BSSL_RUST_CPPLIB=c++_static` | Android build | Links BoringSSL against the NDK's static C++ runtime |
 | `AWS_LC_SYS_NO_JITTER_ENTROPY` | Build | Workspace default `1` disables AWS-LC's optional CPU jitter entropy collector; `0` restores the dependency default |
 | `CFLAGS_<target>`, `CXXFLAGS_<target>` with `-DNDEBUG` | Release build | Compiles the C dependencies without their `assert`s |

@@ -9,23 +9,16 @@
 
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use concord_test_support::port_to_bind_later;
 use serde_json::Value;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_concord");
 const SECRET: &str = "shape";
-
-fn free_port() -> u16 {
-    TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
 
 fn profile(controller: u16) -> String {
     format!(
@@ -44,7 +37,7 @@ rules:
   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
   - MATCH,G
 ",
-        mixed = free_port()
+        mixed = port_to_bind_later()
     )
 }
 
@@ -216,7 +209,7 @@ fn the_controller_answers_in_mihomos_shapes() {
         return;
     };
     let (their_dir, our_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let (their_port, our_port) = (free_port(), free_port());
+    let (their_port, our_port) = (port_to_bind_later(), port_to_bind_later());
     let _theirs = start(&mihomo, false, their_dir.path(), their_port);
     let _ours = start(BINARY, true, our_dir.path(), our_port);
 

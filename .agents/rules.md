@@ -16,7 +16,9 @@
   lifecycle and apply in `concord-engine`; wire types in `concord-proto`. Do not add a second source of truth
   elsewhere.
 - `clippy.toml` forbids `TcpStream::connect`, `UdpSocket::bind`, `lookup_host` and `to_socket_addrs`: every outbound
-  socket goes through `Sockets`, or Android skips `protect` and `getaddrinfo` loops back into the VPN.
+  socket goes through `Sockets`, or Android skips `protect` and `getaddrinfo` loops back into the VPN. It also
+  forbids `Mutex::lock`, `RwLock::read` and `RwLock::write`: `concord_common::sync` takes the guard back from a lock
+  a panicking holder poisoned, which `panic = "unwind"` makes a live case.
 - A `Stream` impl over another stream declares every capability once with `concord_common::stream_policy!`:
   `forward` hands it unchanged to the inner stream, `own` names the methods the impl writes, and `default` keeps the
   trait default, which copies through the type's own `AsyncRead`/`AsyncWrite` and exposes nothing beneath it. A
@@ -40,7 +42,7 @@
 - An error a caller branches on, or that reaches the host as a code, is a typed enum (`thiserror`) that keeps its
   cause as the source. An error that only joins a list of diagnostics shown to a person (a config line that does not
   parse, a script's message) may stay a `String`.
-- Non-test files stay within 800 lines and functions within 120. xtask's `ratchets` test holds `xtask/ratchets.txt`
+- Non-test files under `crates/`, `bins/` and `tools/` stay within 800 lines and functions within 120. xtask's `ratchets` test holds `xtask/ratchets.txt`
   to the code exactly, so every change in a listed size updates its line in the same commit. Nothing new joins the
   list. A listed file or function may grow when a change needs it, with `raised from <old>: <reason>` on its line
   saying why and when it comes back down (`raised from 809: GSO coalesced write, split in B1`); the reviewer weighs

@@ -15,9 +15,10 @@ use crate::script::{
 };
 use crate::task::ScriptRunError;
 use crate::testing::{
-    Client, Handler, Reply, Rig, TestServer, echo, eventually, flow, header_value, offer_on,
-    rig_for, start_server,
+    Client, Handler, Reply, Rig, TestServer, echo, flow, header_value, offer_on, rig_for,
+    start_server,
 };
+use concord_test_support::eventually;
 
 async fn scripted(programs: Vec<(&str, Arc<dyn ScriptProgram>)>) -> (TestServer, Rig) {
     let server = start_server(true, &["http/1.1", "h2"], echo()).await;
@@ -320,7 +321,7 @@ async fn sessions_past_the_limit_are_relayed() {
     let engine = rig.mitm.engine().unwrap();
     assert_eq!(engine.core.open_sessions(), 1);
     drop(first);
-    eventually(|| engine.core.open_sessions() == 0).await;
+    assert!(eventually(|| engine.core.open_sessions() == 0).await);
 }
 
 #[tokio::test]
@@ -402,7 +403,7 @@ async fn tasks_run_while_started_and_the_user_can_run_them() {
     ])));
     assert_eq!(runs.load(Ordering::SeqCst), 0);
     rig.mitm.set_running(true);
-    eventually(|| runs.load(Ordering::SeqCst) == 1).await;
+    assert!(eventually(|| runs.load(Ordering::SeqCst) == 1).await);
     let output = rig.mitm.run_script("Tool").await.unwrap();
     assert_eq!(
         (output.logs.as_slice(), output.result.as_str()),
@@ -713,7 +714,7 @@ async fn cron_scripts_run_while_started() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert!(lock(&runs).is_empty(), "a cron script ran while stopped");
     rig.mitm.set_running(true);
-    eventually(|| !lock(&runs).is_empty()).await;
+    assert!(eventually(|| !lock(&runs).is_empty()).await);
     assert_eq!(
         lock(&runs)[0],
         Run {
@@ -751,7 +752,7 @@ async fn event_scripts_run_on_their_event_while_started() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(lock(&runs).is_empty(), "ran on another event");
     rig.mitm.notify(EVENT_NETWORK_CHANGED);
-    eventually(|| !lock(&runs).is_empty()).await;
+    assert!(eventually(|| !lock(&runs).is_empty()).await);
     assert_eq!(lock(&runs)[0].event, EVENT_NETWORK_CHANGED);
 }
 

@@ -30,6 +30,7 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+concord-test-support = { workspace = true, features = ["tls"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 hmac = { workspace = true }
 sha1 = { workspace = true }
