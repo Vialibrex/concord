@@ -30,6 +30,10 @@ fn main() -> ExitCode {
         eprintln!("Arguments error");
         return ExitCode::FAILURE;
     };
+    if concord_platform::is_setuid_elevated() && (first == "-t" || first == "run") {
+        eprintln!("[ERROR] standalone modes are disabled when running setuid");
+        return ExitCode::FAILURE;
+    }
     if first == "-t" {
         return match check::parse(args) {
             Ok(options) => block_on(|| check::run(options)),

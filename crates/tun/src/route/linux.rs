@@ -418,6 +418,8 @@ mod netlink {
 
     async fn run(program: &str, args: &[&str]) -> io::Result<()> {
         let status = tokio::process::Command::new(program)
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
             .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -429,26 +431,41 @@ mod netlink {
         })
     }
 
-    fn resolvectl_present() -> bool {
-        std::env::var_os("PATH").is_some_and(|paths| {
-            std::env::split_paths(&paths).any(|dir| dir.join("resolvectl").is_file())
-        })
+    fn is_trusted_root_executable(path: &std::path::Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0)
+    }
+
+    fn resolvectl_path() -> Option<&'static str> {
+        [
+            "/usr/bin/resolvectl",
+            "/bin/resolvectl",
+            "/run/current-system/sw/bin/resolvectl",
+        ]
+        .into_iter()
+        .find(|path| is_trusted_root_executable(std::path::Path::new(path)))
     }
 
     async fn dns(op: Op, ifname: &str, servers: &[IpAddr]) -> io::Result<()> {
-        if !resolvectl_present() {
+        let Some(resolvectl) = resolvectl_path() else {
+            if matches!(op, Op::Add) {
+                tracing::warn!(
+                    "resolvectl not found in trusted system paths; skipping systemd-resolved DNS setup for {ifname}"
+                );
+            }
             return Ok(());
-        }
+        };
         match op {
             Op::Add => {
-                run("resolvectl", &["domain", ifname, "~."]).await?;
-                run("resolvectl", &["default-route", ifname, "true"]).await?;
+                run(resolvectl, &["domain", ifname, "~."]).await?;
+                run(resolvectl, &["default-route", ifname, "true"]).await?;
                 let mut args = vec!["dns".to_owned(), ifname.to_owned()];
                 args.extend(servers.iter().map(ToString::to_string));
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                run("resolvectl", &refs).await
+                run(resolvectl, &refs).await
             }
-            Op::Delete => run("resolvectl", &["revert", ifname]).await,
+            Op::Delete => run(resolvectl, &["revert", ifname]).await,
         }
     }
 

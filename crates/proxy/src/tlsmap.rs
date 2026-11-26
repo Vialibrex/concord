@@ -209,7 +209,6 @@ mod tests {
         BuildCtx::new(concord_tls::TrustStore::new(b"", Vec::new()))
     }
 
-    #[cfg(not(target_os = "android"))]
     #[test]
     fn a_client_certificate_path_resolves_inside_the_home_directory_only() {
         let dir = tempfile::tempdir().unwrap();
@@ -233,6 +232,7 @@ mod tests {
             err.to_string().contains("not subpath of home directory"),
             "{err}"
         );
+        assert!(tls_options(&tls("mitm/ca.key"), spec(), &ctx, None).is_err());
     }
 
     #[test]

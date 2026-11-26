@@ -34,6 +34,10 @@ impl AdoptedFds {
         lock(&self.held).remove(&handle)
     }
 
+    pub fn clear(&self) {
+        lock(&self.held).clear();
+    }
+
     pub fn len(&self) -> usize {
         lock(&self.held).len()
     }

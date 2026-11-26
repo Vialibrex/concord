@@ -120,7 +120,9 @@ mod manager {
 
     #[cfg(target_os = "macos")]
     async fn flush_dns_cache() {
-        let _ = tokio::process::Command::new("dscacheutil")
+        let _ = tokio::process::Command::new("/usr/bin/dscacheutil")
+            .env_clear()
+            .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
             .arg("-flushcache")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

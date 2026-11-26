@@ -1,4 +1,5 @@
-use std::io::{self, Write};
+use std::collections::VecDeque;
+use std::io::{self, BufRead, Read};
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
@@ -16,6 +17,13 @@ pub(crate) type Body = UnsyncBoxBody<Bytes, io::Error>;
 pub(crate) async fn file_body(path: &std::path::Path) -> io::Result<(Body, u64)> {
     use futures_util::TryStreamExt;
 
+    let meta = tokio::fs::symlink_metadata(path).await?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "not a regular file",
+        ));
+    }
     let file = tokio::fs::File::open(path).await?;
     let len = file.metadata().await?.len();
     let pieces = tokio_util::io::ReaderStream::with_capacity(file, LOCAL_PIECE).map_ok(Frame::data);
@@ -82,40 +90,99 @@ pub(crate) fn from_incoming(body: Incoming) -> Body {
     body.map_err(io::Error::other).boxed_unsync()
 }
 
+struct ChunkQueue {
+    buf: VecDeque<u8>,
+    eof: bool,
+}
+
+impl ChunkQueue {
+    fn new() -> Self {
+        ChunkQueue {
+            buf: VecDeque::new(),
+            eof: false,
+        }
+    }
+}
+
+impl Read for ChunkQueue {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.buf.is_empty() {
+            return if self.eof {
+                Ok(0)
+            } else {
+                Err(io::Error::from(io::ErrorKind::WouldBlock))
+            };
+        }
+        self.buf.read(out)
+    }
+}
+
+impl BufRead for ChunkQueue {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        let (front, _) = self.buf.as_slices();
+        if front.is_empty() && !self.eof {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        Ok(front)
+    }
+
+    fn consume(&mut self, amt: usize) {
+        drop(self.buf.drain(..amt));
+    }
+}
+
 enum Decoder {
-    Gzip(flate2::write::MultiGzDecoder<Vec<u8>>),
-    Zlib(flate2::write::ZlibDecoder<Vec<u8>>),
+    Gzip(flate2::bufread::MultiGzDecoder<ChunkQueue>),
+    Zlib(flate2::bufread::ZlibDecoder<ChunkQueue>),
 }
 
 impl Decoder {
     fn for_coding(coding: &str) -> Option<Decoder> {
         match coding {
-            "gzip" | "x-gzip" => Some(Decoder::Gzip(
-                flate2::write::MultiGzDecoder::new(Vec::new()),
-            )),
-            "deflate" => Some(Decoder::Zlib(flate2::write::ZlibDecoder::new(Vec::new()))),
+            "gzip" | "x-gzip" => Some(Decoder::Gzip(flate2::bufread::MultiGzDecoder::new(
+                ChunkQueue::new(),
+            ))),
+            "deflate" => Some(Decoder::Zlib(flate2::bufread::ZlibDecoder::new(
+                ChunkQueue::new(),
+            ))),
             _ => None,
         }
     }
 
-    fn push(&mut self, chunk: &[u8]) -> io::Result<Vec<u8>> {
+    fn feed(&mut self, chunk: &[u8]) {
         match self {
-            Decoder::Gzip(decoder) => {
-                decoder.write_all(chunk)?;
-                Ok(std::mem::take(decoder.get_mut()))
-            }
-            Decoder::Zlib(decoder) => {
-                decoder.write_all(chunk)?;
-                Ok(std::mem::take(decoder.get_mut()))
-            }
+            Decoder::Gzip(decoder) => decoder.get_mut().buf.extend(chunk),
+            Decoder::Zlib(decoder) => decoder.get_mut().buf.extend(chunk),
         }
     }
 
-    fn finish(self) -> io::Result<Vec<u8>> {
+    fn mark_eof(&mut self) {
         match self {
-            Decoder::Gzip(decoder) => decoder.finish(),
-            Decoder::Zlib(decoder) => decoder.finish(),
+            Decoder::Gzip(decoder) => decoder.get_mut().eof = true,
+            Decoder::Zlib(decoder) => decoder.get_mut().eof = true,
         }
+    }
+
+    fn pull_into(&mut self, out: &mut Vec<u8>, max_total: usize) -> io::Result<usize> {
+        let mut scratch = [0u8; 8192];
+        let mut added = 0usize;
+        while out.len() < max_total {
+            let want = (max_total - out.len()).min(scratch.len());
+            let res = match self {
+                Decoder::Gzip(decoder) => decoder.read(&mut scratch[..want]),
+                Decoder::Zlib(decoder) => decoder.read(&mut scratch[..want]),
+            };
+            match res {
+                Ok(0) => break,
+                Ok(n) => {
+                    out.extend_from_slice(&scratch[..n]);
+                    added += n;
+                }
+                Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(added)
     }
 }
 
@@ -125,6 +192,7 @@ struct Resumed {
     head: Option<Bytes>,
     body: Body,
     decoder: Option<Decoder>,
+    trailers: Option<HeaderMap>,
     done: bool,
 }
 
@@ -142,23 +210,40 @@ impl HttpBody for Resumed {
             return Poll::Ready(Some(Ok(Frame::data(head))));
         }
         loop {
+            if let Some(decoder) = self.decoder.as_mut() {
+                let mut piece = Vec::new();
+                match decoder.pull_into(&mut piece, LOCAL_PIECE) {
+                    Ok(n) if n > 0 => {
+                        return Poll::Ready(Some(Ok(Frame::data(Bytes::from(piece)))));
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        self.done = true;
+                        return Poll::Ready(Some(Err(err)));
+                    }
+                }
+            }
             if self.done {
-                return Poll::Ready(None);
+                return Poll::Ready(
+                    self.trailers
+                        .take()
+                        .map(|trailers| Ok(Frame::trailers(trailers))),
+                );
             }
             match ready!(Pin::new(&mut self.body).poll_frame(cx)) {
                 Some(Ok(frame)) => match frame.into_data() {
                     Ok(data) => match self.decoder.as_mut() {
                         None => return Poll::Ready(Some(Ok(Frame::data(data)))),
-                        Some(decoder) => match decoder.push(&data) {
-                            Ok(out) if out.is_empty() => continue,
-                            Ok(out) => return Poll::Ready(Some(Ok(Frame::data(Bytes::from(out))))),
-                            Err(err) => {
-                                self.done = true;
-                                return Poll::Ready(Some(Err(err)));
-                            }
-                        },
+                        Some(decoder) => decoder.feed(&data),
                     },
-                    Err(frame) => return Poll::Ready(Some(Ok(frame))),
+                    Err(frame) => {
+                        if let Ok(more) = frame.into_trailers() {
+                            self.trailers.get_or_insert_default().extend(more);
+                        }
+                        if let Some(decoder) = self.decoder.as_mut() {
+                            decoder.mark_eof();
+                        }
+                    }
                 },
                 Some(Err(err)) => {
                     self.done = true;
@@ -166,14 +251,9 @@ impl HttpBody for Resumed {
                 }
                 None => {
                     self.done = true;
-                    let Some(decoder) = self.decoder.take() else {
-                        return Poll::Ready(None);
-                    };
-                    return match decoder.finish() {
-                        Ok(out) if out.is_empty() => Poll::Ready(None),
-                        Ok(out) => Poll::Ready(Some(Ok(Frame::data(Bytes::from(out))))),
-                        Err(err) => Poll::Ready(Some(Err(err))),
-                    };
+                    if let Some(decoder) = self.decoder.as_mut() {
+                        decoder.mark_eof();
+                    }
                 }
             }
         }
@@ -236,8 +316,12 @@ pub(crate) async fn buffer_body(
                 continue;
             }
         };
+        let max_total = cap.saturating_add(1);
         match decoder.as_mut() {
-            Some(active) => out.extend(active.push(&data)?),
+            Some(active) => {
+                active.feed(&data);
+                active.pull_into(&mut out, max_total)?;
+            }
             None => out.extend_from_slice(&data),
         }
         if out.len() > cap {
@@ -245,6 +329,7 @@ pub(crate) async fn buffer_body(
                 head: Some(Bytes::from(out)),
                 body,
                 decoder,
+                trailers,
                 done: false,
             };
             return Ok(Buffered::Rest {
@@ -253,11 +338,20 @@ pub(crate) async fn buffer_body(
             });
         }
     }
-    if let Some(active) = decoder {
-        out.extend(active.finish()?);
+    if let Some(mut active) = decoder {
+        active.mark_eof();
+        let max_total = cap.saturating_add(1);
+        active.pull_into(&mut out, max_total)?;
         if out.len() > cap {
+            let rest = Resumed {
+                head: Some(Bytes::from(out)),
+                body: empty(),
+                decoder: Some(active),
+                trailers,
+                done: true,
+            };
             return Ok(Buffered::Rest {
-                body: full_with(out, trailers),
+                body: rest.boxed_unsync(),
                 length: None,
             });
         }
@@ -334,10 +428,21 @@ pub(crate) fn failing(error: io::Error) -> Body {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
+    use futures_util::StreamExt;
+
     use super::*;
 
     fn gzip(text: &[u8]) -> Vec<u8> {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(text).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn deflate(text: &[u8]) -> Vec<u8> {
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(text).unwrap();
         encoder.finish().unwrap()
     }
@@ -443,6 +548,65 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// Buffers a deflate body that ends in trailers past `cap`; returns whether the
+    /// trailers were read before `buffer_body` returned, the data it then yields, and
+    /// its trailers, which must come last.
+    async fn fallback_with_trailers(text: &[u8], cap: i64) -> (bool, Vec<u8>, HeaderMap) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut trailers = HeaderMap::new();
+        trailers.insert("x-trailer", http::HeaderValue::from_static("kept"));
+        let frames = [
+            Frame::data(Bytes::from(deflate(text))),
+            Frame::trailers(trailers),
+        ];
+        let read = Arc::new(AtomicBool::new(false));
+        let flag = read.clone();
+        let stream = futures_util::stream::iter(frames).map(move |frame| {
+            flag.fetch_or(frame.is_trailers(), Ordering::SeqCst);
+            Ok::<_, io::Error>(frame)
+        });
+        let body = http_body_util::StreamBody::new(stream).boxed_unsync();
+        let Buffered::Rest { mut body, .. } = buffer_body(&mut header("deflate"), body, None, cap)
+            .await
+            .unwrap()
+        else {
+            panic!("expected a fallback");
+        };
+        let read_early = read.load(Ordering::SeqCst);
+        let mut decoded = Vec::new();
+        let mut trailers = None;
+        while let Some(frame) = body.frame().await {
+            match frame.unwrap().into_data() {
+                Ok(data) => {
+                    assert!(trailers.is_none(), "data after the trailers");
+                    decoded.extend_from_slice(&data);
+                }
+                Err(frame) => trailers = frame.into_trailers().ok(),
+            }
+        }
+        (read_early, decoded, trailers.expect("no trailers"))
+    }
+
+    #[tokio::test]
+    async fn streaming_fallback_sends_trailers_after_the_decoded_data() {
+        let text = b"0123456789".repeat(6000);
+        let (read_early, decoded, trailers) = fallback_with_trailers(&text, 100).await;
+        assert!(!read_early);
+        assert_eq!(decoded, text);
+        assert_eq!(trailers["x-trailer"], "kept");
+    }
+
+    #[tokio::test]
+    async fn eof_fallback_keeps_the_collected_trailers() {
+        let text = b"abcdefghij".repeat(2000);
+        let (read_early, decoded, trailers) = fallback_with_trailers(&text, 8192).await;
+        assert!(read_early);
+        assert_eq!(decoded, text);
+        assert_eq!(trailers["x-trailer"], "kept");
     }
 
     #[tokio::test]

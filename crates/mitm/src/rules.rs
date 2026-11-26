@@ -310,7 +310,7 @@ fn is_local(name: &str) -> bool {
             _ => return false,
         }
     }
-    true
+    depth > 0
 }
 
 pub(crate) fn read_resource(dir: &Path, param: &str, name: &str) -> Result<Vec<u8>, LineError> {
@@ -333,16 +333,25 @@ fn resource_file(dir: &Path, param: &str, name: &str) -> Result<(PathBuf, u64), 
             quote(name)
         )));
     }
-    let path = dir.join(name);
-    let info = std::fs::symlink_metadata(&path).map_err(|err| {
+    let map_io = |err: std::io::Error| {
         let reason = match err.kind() {
             std::io::ErrorKind::NotFound => "no such file or directory".to_string(),
             std::io::ErrorKind::PermissionDenied => "permission denied".to_string(),
             _ => "cannot be read".to_string(),
         };
         LineError::resource(format!("{param} {}: {reason}", quote(name)))
-    })?;
-    if !info.file_type().is_file() {
+    };
+    let canonical_dir = std::fs::canonicalize(dir).map_err(map_io)?;
+    let path = dir.join(name);
+    let canonical_path = std::fs::canonicalize(&path).map_err(map_io)?;
+    if !canonical_path.starts_with(&canonical_dir) {
+        return Err(LineError::resource(format!(
+            "{param} {} is not a file in the resources directory",
+            quote(name)
+        )));
+    }
+    let info = std::fs::metadata(&canonical_path).map_err(map_io)?;
+    if !info.is_file() {
         return Err(LineError::resource(format!(
             "{param} {} is not a regular file",
             quote(name)
@@ -966,6 +975,32 @@ mod tests {
         .unwrap();
         assert_eq!(rule.body.bytes(), b"raw");
         assert_eq!(rule.header.get("content-type").unwrap(), "text/x");
+
+        let via_parent = local(
+            r#"^https://a\.test/x data-type=file data="sub/../a.json""#,
+            &resources,
+        )
+        .unwrap();
+        assert_eq!(via_parent.body.bytes(), br#"{"ok":1}"#);
+
+        #[cfg(unix)]
+        {
+            std::fs::hard_link(resources.join("a.json"), resources.join("hard.json")).unwrap();
+            let hard = local(
+                r#"^https://a\.test/x data-type=file data="hard.json""#,
+                &resources,
+            )
+            .unwrap();
+            assert_eq!(hard.body.bytes(), br#"{"ok":1}"#);
+
+            std::os::unix::fs::symlink(resources.join("sub"), resources.join("dirlink")).unwrap();
+            let via_link = local(
+                r#"^https://a\.test/x data-type=file data="dirlink/b""#,
+                &resources,
+            )
+            .unwrap();
+            assert_eq!(via_link.body.bytes(), b"raw");
+        }
 
         let secret = home.path().join("secret.txt").display().to_string();
         for data in [

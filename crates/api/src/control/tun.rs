@@ -19,9 +19,9 @@ fn tun_error(error: TunStartError) -> ApiError {
 
 impl Control {
     pub(super) async fn tun_start(&self, params: TunStartParams) -> Result<Empty, ApiError> {
-        self.require_initialized()?;
         match params.source {
             TunSource::Device { name } => {
+                self.require_initialized()?;
                 if !self.engine.named_tun_supported() {
                     return Err(ApiError::unsupported_capability(
                         "tun.device",
@@ -34,10 +34,9 @@ impl Control {
             TunSource::Inherited { handle } => {
                 #[cfg(unix)]
                 {
-                    let fd = self
-                        .fds
-                        .take(handle)
-                        .ok_or_else(|| ApiError::not_found("handle", handle.to_string()))?;
+                    let fd = self.fds.take(handle);
+                    self.require_initialized()?;
+                    let fd = fd.ok_or_else(|| ApiError::not_found("handle", handle.to_string()))?;
                     self.engine
                         .start_inherited_tun(
                             fd,
@@ -54,6 +53,7 @@ impl Control {
                 #[cfg(not(unix))]
                 {
                     let _ = handle;
+                    self.require_initialized()?;
                     return Err(ApiError::unsupported_capability(
                         "tun.inherited",
                         "this platform has no descriptors to inherit",
@@ -69,7 +69,10 @@ impl Control {
         self.require_initialized()?;
         if self.engine.is_android() {
             #[cfg(unix)]
-            self.engine.stop_vpn_tun().await;
+            {
+                self.fds.clear();
+                self.engine.stop_vpn_tun().await;
+            }
         } else {
             self.require_configured()?;
             self.engine.disable_tun().await.map_err(core_error)?;

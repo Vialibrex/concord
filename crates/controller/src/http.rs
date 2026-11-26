@@ -96,10 +96,16 @@ pub fn parse_body(bytes: &[u8]) -> Option<Value> {
     serde_json::from_slice(bytes).ok()
 }
 
-/// Constant-time comparison, so the secret cannot be found byte by byte.
 fn same(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    let max = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for i in 0..max {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        diff |= usize::from(x ^ y);
+    }
+    diff == 0
 }
 
 /// mihomo's `authentication`: a browser WebSocket cannot set headers, so it may

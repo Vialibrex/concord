@@ -3,7 +3,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, fchown};
+use std::os::unix::fs::{OpenOptionsExt, fchown};
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug)]
@@ -135,10 +135,10 @@ pub fn read_file(base: &Path, names: &[OsString]) -> io::Result<Vec<u8>> {
     let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK;
     let mut file = File::from(openat(dir.as_fd(), name, flags, 0)?);
     let meta = file.metadata()?;
-    if !meta.is_file() || meta.nlink() > 1 {
+    if !meta.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "not a plain file with a single link",
+            "not a regular file",
         ));
     }
     let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
@@ -154,7 +154,7 @@ pub fn remove_file(base: &Path, names: &[OsString]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{MetadataExt, symlink};
 
     use super::*;
     use crate::HomeDir;
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_refuse_links_and_special_files() {
+    fn reads_refuse_symlinks_and_special_files_but_allow_hard_links() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("secret"), "s").unwrap();
         std::fs::hard_link(dir.path().join("secret"), dir.path().join("alias")).unwrap();
@@ -261,7 +261,8 @@ mod tests {
         // SAFETY: `fifo` is NUL-terminated.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
 
-        for name in ["alias", "soft", "pipe"] {
+        assert_eq!(read_file(dir.path(), &names(&["alias"])).unwrap(), b"s");
+        for name in ["soft", "pipe"] {
             assert!(read_file(dir.path(), &names(&[name])).is_err(), "{name}");
         }
     }

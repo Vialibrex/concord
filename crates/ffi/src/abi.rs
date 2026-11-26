@@ -53,10 +53,13 @@ pub unsafe extern "C" fn concord_open_callback(
 /// `data` must point to `len` readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn concord_send(session: u64, data: *const u8, len: usize) -> i32 {
+    if len > 0 && (data.is_null() || len > isize::MAX as usize) {
+        return 0;
+    }
     let message = if len == 0 {
         Vec::new()
     } else {
-        // SAFETY: forwarded from this function's contract.
+        // SAFETY: `data` is non-null, `len <= isize::MAX`, and the caller guarantees `len` readable bytes.
         unsafe { std::slice::from_raw_parts(data, len) }.to_vec()
     };
     guarded(move || i32::from(hub().is_some_and(|hub| hub.send(session, message))))
@@ -78,7 +81,10 @@ pub extern "C" fn concord_close(session: u64) {
 pub extern "C" fn concord_adopt_fd(fd: i32) -> u64 {
     use std::os::fd::{FromRawFd, OwnedFd};
 
-    // SAFETY: the host passes the descriptor on; nothing else closes it.
+    if fd < 0 {
+        return 0;
+    }
+    // SAFETY: `fd >= 0`, the host passes the descriptor on, and nothing else closes it.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     guarded(move || hub().map_or(0, |hub| hub.adopt_fd(fd)))
 }

@@ -1,5 +1,4 @@
 use std::any::Any;
-use std::io;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 
@@ -155,13 +154,11 @@ pub(crate) fn clear_effect(home: &HomeDir, profile_id: i64) -> Result<(), Failur
     if profile_id <= 0 {
         return Err(Failure::core("invalid profile id"));
     }
-    let root = home.join("profiles").join("providers");
-    match std::fs::remove_dir_all(root.join(profile_id.to_string())) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err.into()),
+    let root = std::path::Path::new("profiles").join("providers");
+    home.remove_dir_confined(root.join(profile_id.to_string()))?;
+    if let Ok(confined) = home.confine(&root) {
+        let _ = std::fs::remove_dir(confined);
     }
-    let _ = std::fs::remove_dir(root);
     Ok(())
 }
 

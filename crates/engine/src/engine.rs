@@ -253,8 +253,10 @@ impl Engine {
     }
 
     pub fn init(&self, home_dir: &str, sdk_version: i32) -> Result<(), Failure> {
+        let mut home = HomeDir::new(home_dir);
+        home.validate_root()?;
+        let home = Arc::new(home);
         self.sdk_version.store(sdk_version, Ordering::SeqCst);
-        let home = Arc::new(HomeDir::new(home_dir));
         self.shared.geo.set_home(home.clone());
         self.shared.geo.reopen();
         self.shared.geo.store.set_dir(home.root());

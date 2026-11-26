@@ -47,16 +47,13 @@ impl BuildCtx {
     }
 
     /// mihomo's `C.Path.Resolve` and `IsSafePath`: a relative path joins the home
-    /// directory, and where the platform confines profile files the file must lie inside it,
-    /// so a profile cannot point a node at a key or certificate of the user's elsewhere.
+    /// directory, and the file must lie inside it, so a profile cannot point a node at a
+    /// key or certificate of the user's elsewhere.
     pub(crate) fn resolve_file(&self, path: &str) -> Result<PathBuf, BuildError> {
         let Some(home) = &self.home else {
             return Ok(PathBuf::from(path));
         };
-        if !HomeDir::CONFINES_PROFILE_FILES {
-            return Ok(home.join(path));
-        }
-        home.confine(path).map_err(|_| {
+        home.confine_profile_file(path).map_err(|_| {
             BuildError::invalid(format!("path is not subpath of home directory: {path}"))
         })
     }

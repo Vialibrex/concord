@@ -348,6 +348,7 @@ fn count_nodes(value: &Value) -> usize {
                 .map(|value| 1 + count_nodes(value))
                 .sum::<usize>()
         }
+        Value::String(text) => 1 + text.len() / 64,
         _ => 1,
     }
 }

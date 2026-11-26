@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Debug)]
 pub struct HomeDir {
     root: PathBuf,
+    alias: Option<PathBuf>,
     #[cfg(unix)]
     owner: Option<secure::Owner>,
     counter: AtomicU64,
@@ -51,24 +52,52 @@ fn normalize(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-impl HomeDir {
-    /// Whether a file a profile names must pass [`confine`](Self::confine); mihomo's Android
-    /// build lets it lie anywhere (`constant/path.go::IsSafePath`).
-    pub const CONFINES_PROFILE_FILES: bool = !cfg!(target_os = "android");
+pub fn is_setuid_elevated() -> bool {
+    #[cfg(unix)]
+    {
+        secure::Owner::detect().is_some()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
 
+impl HomeDir {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         HomeDir {
             root: root.into(),
+            alias: None,
             #[cfg(unix)]
             owner: secure::Owner::detect(),
             counter: AtomicU64::new(0),
         }
     }
 
+    pub fn validate_root(&mut self) -> io::Result<()> {
+        #[cfg(unix)]
+        if let Some(owner) = self.owner {
+            use std::os::unix::fs::MetadataExt;
+            let not_owned = || invalid("home directory is not owned by the invoking user");
+            let link = std::fs::symlink_metadata(&self.root).map_err(|_| not_owned())?;
+            let resolved = std::fs::canonicalize(&self.root).map_err(|_| not_owned())?;
+            let target = std::fs::metadata(&resolved).map_err(|_| not_owned())?;
+            if link.uid() != owner.uid || !target.is_dir() || target.uid() != owner.uid {
+                return Err(not_owned());
+            }
+            if link.file_type().is_symlink() {
+                self.alias = normalize(&self.root);
+                self.root = resolved;
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(unix)]
     pub fn with_owner(root: impl Into<PathBuf>, uid: u32, gid: u32) -> Self {
         HomeDir {
             root: root.into(),
+            alias: None,
             owner: Some(secure::Owner { uid, gid }),
             counter: AtomicU64::new(0),
         }
@@ -93,6 +122,29 @@ impl HomeDir {
         self.root.join(relative)
     }
 
+    fn strip_home_prefix<'a>(&self, normalized: &'a Path) -> io::Result<(PathBuf, &'a Path)> {
+        let lexical_root =
+            normalize(&self.root).ok_or_else(|| invalid("invalid home directory"))?;
+        let real_root = std::fs::canonicalize(&self.root).ok();
+        if let Some((base, rel)) = std::iter::once(&lexical_root)
+            .chain(real_root.as_ref())
+            .find_map(|base| {
+                normalized
+                    .strip_prefix(base)
+                    .ok()
+                    .map(|rel| (base.clone(), rel))
+            })
+        {
+            return Ok((base, rel));
+        }
+        if let Some(alias) = self.alias.as_ref()
+            && let Ok(rel) = normalized.strip_prefix(alias)
+        {
+            return Ok((real_root.unwrap_or(lexical_root), rel));
+        }
+        Err(invalid("path is outside the home directory"))
+    }
+
     /// The path made absolute and normalized, if it stays inside the home directory
     /// and no existing component below the root is a symlink.
     pub fn confine(&self, path: impl AsRef<Path>) -> io::Result<PathBuf> {
@@ -103,13 +155,7 @@ impl HomeDir {
         };
         let normalized =
             normalize(&candidate).ok_or_else(|| invalid("path escapes the home directory"))?;
-        let lexical_root =
-            normalize(&self.root).ok_or_else(|| invalid("invalid home directory"))?;
-        let real_root = std::fs::canonicalize(&self.root).ok();
-        let (base, relative) = std::iter::once(&lexical_root)
-            .chain(real_root.as_ref())
-            .find_map(|base| normalized.strip_prefix(base).ok().map(|rel| (base, rel)))
-            .ok_or_else(|| invalid("path is outside the home directory"))?;
+        let (base, relative) = self.strip_home_prefix(&normalized)?;
 
         let mut walked = base.clone();
         for component in relative.components() {
@@ -126,19 +172,33 @@ impl HomeDir {
         Ok(base.join(relative))
     }
 
+    pub fn confine_profile_file(&self, path: impl AsRef<Path>) -> io::Result<PathBuf> {
+        let confined = self.confine(path)?;
+        let (_, relative) = self.strip_home_prefix(&confined)?;
+        if let Some(first) = relative.components().next() {
+            let text = first.as_os_str().to_string_lossy();
+            let lower = text.to_ascii_lowercase();
+            if lower == "mitm"
+                || lower.starts_with("database.sqlite")
+                || lower == "shared_preferences.json"
+            {
+                return Err(invalid("profile cannot access protected host state"));
+            }
+        }
+        Ok(confined)
+    }
+
+    /// `remove_dir_all` removes a link it meets instead of following it.
+    pub fn remove_dir_confined(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        match std::fs::remove_dir_all(self.confine(path)?) {
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+            result => result,
+        }
+    }
+
     #[cfg(unix)]
     fn relative_components(&self, confined: &Path) -> io::Result<(PathBuf, Vec<OsString>)> {
-        let lexical = normalize(&self.root).ok_or_else(|| invalid("invalid home directory"))?;
-        let real = std::fs::canonicalize(&self.root).ok();
-        let (base, rel) = std::iter::once(&lexical)
-            .chain(real.as_ref())
-            .find_map(|base| {
-                confined
-                    .strip_prefix(base)
-                    .ok()
-                    .map(|rel| (base.clone(), rel))
-            })
-            .ok_or_else(|| invalid("path is outside the home directory"))?;
+        let (base, rel) = self.strip_home_prefix(confined)?;
         let names = rel
             .components()
             .map(|c| c.as_os_str().to_os_string())
@@ -339,5 +399,37 @@ mod tests {
         home.remove_file("a/b/c/f").unwrap();
         assert!(!dir.path().join("a/b/c/f").exists());
         assert!(home.create_dir_all("../x").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn elevated_validate_root_accepts_owned_symlink_and_resolves_it() {
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let real = tempfile::tempdir().unwrap();
+        let holder = tempfile::tempdir().unwrap();
+        let link = holder.path().join("home-link");
+        symlink(real.path(), &link).unwrap();
+        let meta = std::fs::metadata(real.path()).unwrap();
+        let (uid, gid) = (meta.uid(), meta.gid());
+
+        let mut home = HomeDir::with_owner(&link, uid, gid);
+        home.validate_root().unwrap();
+        let canonical = std::fs::canonicalize(real.path()).unwrap();
+        assert_eq!(home.root(), canonical.as_path());
+
+        home.write_atomic("profiles/1.yaml", b"proxies: []")
+            .unwrap();
+        assert_eq!(
+            home.confine(link.join("profiles/1.yaml")).unwrap(),
+            canonical.join("profiles/1.yaml")
+        );
+        assert_eq!(
+            home.read(link.join("profiles/1.yaml")).unwrap(),
+            b"proxies: []"
+        );
+
+        let mut wrong_owner = HomeDir::with_owner(&link, uid + 1, gid);
+        assert!(wrong_owner.validate_root().is_err());
     }
 }

@@ -21,7 +21,12 @@ impl ClockOffset {
         let nanos = self.nanos();
         let now = SystemTime::now();
         let shift = Duration::from_nanos(nanos.unsigned_abs());
-        if nanos >= 0 { now + shift } else { now - shift }
+        let shifted = if nanos >= 0 {
+            now.checked_add(shift).unwrap_or(now)
+        } else {
+            now.checked_sub(shift).unwrap_or(SystemTime::UNIX_EPOCH)
+        };
+        shifted.max(SystemTime::UNIX_EPOCH)
     }
 }
 

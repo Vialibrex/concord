@@ -297,7 +297,7 @@ async fn answer(client: &Client, json: &str) -> String {
         Ok(request) => request,
         Err(err) => return failed(err.to_string()),
     };
-    let timeout = if request.timeout > 0.0 {
+    let timeout = if request.timeout.is_finite() && request.timeout > 0.0 {
         request.timeout
     } else {
         DEFAULT_REQUEST_TIMEOUT_MS
@@ -307,7 +307,8 @@ async fn answer(client: &Client, json: &str) -> String {
         url: request.url,
         headers: request.headers,
         body: request.body.as_ref().and_then(BodyJson::bytes),
-        timeout: Duration::from_secs_f64(timeout / 1000.0),
+        timeout: Duration::try_from_secs_f64(timeout / 1000.0)
+            .unwrap_or_else(|_| Duration::from_secs_f64(DEFAULT_REQUEST_TIMEOUT_MS / 1000.0)),
         redirect: request.redirect,
         insecure: request.insecure,
     };
@@ -347,11 +348,14 @@ fn install(ctx: &Ctx<'_>, state: &Rc<State>, setup: &Rc<Setup>) -> rquickjs::Res
     native.set(
         "timer",
         Function::new(ctx.clone(), move |id: u32, ms: f64| {
-            let delay = Duration::from_secs_f64(ms.max(0.0) / 1000.0);
-            timers
-                .timers
-                .borrow_mut()
-                .insert(id, Instant::now() + delay);
+            let delay = if ms.is_finite() && ms > 0.0 {
+                Duration::try_from_secs_f64(ms / 1000.0).unwrap_or(Duration::MAX)
+            } else {
+                Duration::ZERO
+            };
+            if let Some(due) = Instant::now().checked_add(delay) {
+                timers.timers.borrow_mut().insert(id, due);
+            }
         })?,
     )?;
     let timers = state.clone();
