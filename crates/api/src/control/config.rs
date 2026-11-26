@@ -201,7 +201,6 @@ impl Control {
             tun: params.tun.map(|tun| EngineTunPatch {
                 enable: tun.enable,
                 device: tun.device,
-                stack: tun.stack,
                 auto_route: tun.auto_route,
             }),
             allow_lan: params.allow_lan,

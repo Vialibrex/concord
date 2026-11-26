@@ -533,7 +533,7 @@ mod tests {
             get("dns.nameserver"),
             serde_json::json!(["https://doh.pub/dns-query", "tls://223.5.5.5:853"])
         );
-        assert_eq!(get("tun.stack"), "Mips");
+        assert_eq!(get("tun.stack"), "");
         assert_eq!(get("tun.dns-hijack"), serde_json::json!(["0.0.0.0:53"]));
         assert_eq!(get("tun.auto-route"), true);
         assert_eq!(get("ntp.server"), "time.apple.com");

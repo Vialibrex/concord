@@ -40,8 +40,6 @@ dto! {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub tun_device: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub tun_stack: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         pub tun_auto_route: Option<bool>,
     }
 
@@ -53,7 +51,6 @@ dto! {
     pub struct TunState {
         pub enable: bool,
         pub device: String,
-        pub stack: String,
         pub auto_route: bool,
         pub auto_detect_interface: bool,
         pub dns_hijack: Vec<String>,

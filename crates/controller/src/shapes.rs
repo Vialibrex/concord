@@ -329,7 +329,7 @@ pub fn configs(state: &GeneralState) -> Value {
         "tun": {
             "enable": state.tun.enable,
             "device": state.tun.device,
-            "stack": state.tun.stack,
+            "stack": "",
             "dns-hijack": state.tun.dns_hijack,
             "auto-route": state.tun.auto_route,
             "auto-detect-interface": state.tun.auto_detect_interface,

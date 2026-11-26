@@ -1,6 +1,6 @@
-//! The tiers in `keys.rs` are claims about behaviour: a T0 or T1 key changes what loads, a T2 key
-//! is warned about, an inert key does neither, and anything else is unknown. A key added to a
-//! tier without a sample here fails the test.
+//! The tiers in `keys.rs` are claims about behaviour: a T0 or T1 key changes what loads, or refuses
+//! what it cannot take, a T2 key is warned about, an inert key does neither, and anything else is
+//! unknown. A key added to a tier without a sample here fails the test.
 
 use concord_config::keys::{SECTIONS, Tier};
 use concord_config::{LoadOptions, Profile, load_str};
@@ -284,6 +284,9 @@ fn nested(path: &str, value: &str) -> String {
     text
 }
 
+/// Keys every accepted value of which loads the same, with a value each refuses.
+const REFUSALS: &[(&str, &str)] = &[("tun.stack", "tun: {stack: bogus}")];
+
 type Loaded = (String, Vec<(String, &'static str)>);
 
 /// What loads, without the report, and the report's codes by path.
@@ -321,8 +324,16 @@ fn every_applied_key_changes_what_loads() {
                     continue;
                 }
             };
-            if applied == empty {
-                failures.push(format!("{path}: loads the same as without it"));
+            let refusal = REFUSALS.iter().find(|(name, _)| *name == path);
+            match refusal {
+                Some((_, text)) if loaded(text).is_ok() => {
+                    failures.push(format!("{path}: loads {text}"));
+                }
+                Some(_) => {}
+                None if applied == empty => {
+                    failures.push(format!("{path}: loads the same as without it"));
+                }
+                None => {}
             }
             if let Some((_, code)) = warnings
                 .iter()

@@ -29,10 +29,7 @@ impl Control {
                     ));
                 }
                 self.require_configured()?;
-                self.engine
-                    .start_named_tun(name, params.stack)
-                    .await
-                    .map_err(tun_error)?;
+                self.engine.start_named_tun(name).await.map_err(tun_error)?;
             }
             TunSource::Inherited { handle } => {
                 #[cfg(unix)]

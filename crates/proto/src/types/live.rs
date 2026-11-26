@@ -337,8 +337,6 @@ dto! {
     pub struct TunStartParams {
         pub source: TunSource,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub stack: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         pub mtu: Option<u32>,
         #[serde(default)]
         pub address: Vec<String>,

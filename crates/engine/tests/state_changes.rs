@@ -328,7 +328,6 @@ async fn every_setting_the_general_view_reports_is_part_of_a_change() {
     request.tun = Some(TunPatch {
         enable: false,
         device: Some("utun-k".into()),
-        stack: None,
         auto_route: Some(false),
     });
     request.authentication = Some(vec!["user:pass".into()]);

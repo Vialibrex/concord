@@ -1,3 +1,5 @@
+use concord_common::options::is_tun_stack;
+
 use crate::Map;
 use crate::error::{ConfigError, Result};
 use crate::lenient::Fields;
@@ -7,7 +9,6 @@ use crate::net::{IpCidr, parse_cidr};
 pub struct TunConfig {
     pub enable: bool,
     pub device: String,
-    pub stack_name: String,
     pub auto_route: bool,
     pub auto_detect_interface: bool,
     pub dns_hijack: Vec<String>,
@@ -53,25 +54,15 @@ fn narrow<T: TryFrom<i128>>(values: Vec<i128>) -> Vec<T> {
         .collect()
 }
 
-pub const TUN_STACKS: [&str; 2] = ["gvisor", "mips"];
-/// Accepted, but run as the userspace stack.
-pub const TUN_STACK_FALLBACKS: [&str; 2] = ["mixed", "system"];
-
 impl TunConfig {
     pub fn from_map(map: &Map) -> Result<TunConfig> {
         let mut f = Fields::new(map, "tun", false);
-        let stack_name = f.string("stack")?;
-        let lowered = stack_name.to_ascii_lowercase();
-        if !(lowered.is_empty()
-            || TUN_STACKS.contains(&lowered.as_str())
-            || TUN_STACK_FALLBACKS.contains(&lowered.as_str()))
-        {
+        if !is_tun_stack(&f.string("stack")?) {
             return Err(ConfigError::new("invalid tun stack"));
         }
         Ok(TunConfig {
             enable: f.boolean("enable")?,
             device: f.string("device")?,
-            stack_name,
             auto_route: f.boolean("auto-route")?,
             auto_detect_interface: f.boolean("auto-detect-interface")?,
             dns_hijack: f.strings("dns-hijack")?,
@@ -110,13 +101,15 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn defaults_and_stack_names() {
+    fn a_stack_name_is_checked_and_reads_as_the_same_tun() {
         let tun = TunConfig::from_map(&tun_defaults()).unwrap();
         assert!(!tun.enable && tun.auto_route && tun.auto_detect_interface);
         assert_eq!(tun.dns_hijack, ["0.0.0.0:53"]);
         let mut map = tun_defaults();
-        map.insert("stack".into(), json!("System"));
-        assert_eq!(TunConfig::from_map(&map).unwrap().stack_name, "System");
+        for stack in ["System", "gvisor", "MIXED", "mips"] {
+            map.insert("stack".into(), json!(stack));
+            assert_eq!(TunConfig::from_map(&map).unwrap(), tun, "{stack}");
+        }
         map.insert("stack".into(), json!("bogus"));
         assert!(TunConfig::from_map(&map).is_err());
     }

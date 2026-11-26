@@ -81,7 +81,6 @@ pub struct SetupRequest {
 pub struct TunPatch {
     pub enable: bool,
     pub device: Option<String>,
-    pub stack: Option<String>,
     pub auto_route: Option<bool>,
 }
 

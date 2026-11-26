@@ -1656,12 +1656,6 @@
             "null"
           ]
         },
-        "stack": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "autoRoute": {
           "type": [
             "boolean",
@@ -1880,9 +1874,6 @@
         "device": {
           "type": "string"
         },
-        "stack": {
-          "type": "string"
-        },
         "autoRoute": {
           "type": "boolean"
         },
@@ -1904,7 +1895,6 @@
       "required": [
         "enable",
         "device",
-        "stack",
         "autoRoute",
         "autoDetectInterface",
         "dnsHijack",
@@ -4488,12 +4478,6 @@
             "null"
           ]
         },
-        "tunStack": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "tunAutoRoute": {
           "type": [
             "boolean",
@@ -4541,12 +4525,6 @@
       "properties": {
         "source": {
           "$ref": "#/$defs/TunSource"
-        },
-        "stack": {
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "mtu": {
           "type": [

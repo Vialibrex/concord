@@ -109,7 +109,6 @@ impl Engine {
             tun: TunView {
                 enable: applied.tun.enable,
                 device: applied.tun.device.clone(),
-                stack: applied.tun.stack_name.clone(),
                 auto_route: applied.tun.auto_route,
                 auto_detect_interface: applied.tun.auto_detect_interface,
                 dns_hijack: applied.tun.dns_hijack.clone(),

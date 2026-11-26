@@ -412,22 +412,18 @@ fn resolve_groups(
     Ok((groups, refused))
 }
 
-fn warn_tun_settings(tun: &TunConfig, report: &mut LoadReport) {
-    if !tun.enable {
-        return;
-    }
-    match tun.stack_name.to_ascii_lowercase().as_str() {
-        "mixed" => report.warn(
+fn warn_tun_stack(tun: &Map, enabled: bool, report: &mut LoadReport) {
+    let stack = tun.get("stack").and_then(Value::as_str).unwrap_or_default();
+    if enabled
+        && ["mixed", "system"]
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(stack))
+    {
+        report.warn(
             "tun_stack_fallback",
             "tun.stack",
-            "mixed runs as the userspace stack",
-        ),
-        "system" => report.warn(
-            "tun_stack_fallback",
-            "tun.stack",
-            "the system stack is not available, so the userspace stack runs instead",
-        ),
-        _ => {}
+            format!("Concord has one TUN stack, its own userspace stack, so {stack} runs on it"),
+        );
     }
 }
 
@@ -482,7 +478,7 @@ pub fn load_raw(mut raw: RawConfig, options: &LoadOptions) -> Result<Profile> {
     let hosts = parse_hosts(&raw.hosts, &mut report)?;
 
     if !options.android {
-        warn_tun_settings(&tun, &mut report);
+        warn_tun_stack(&raw.tun, tun.enable, &mut report);
     }
     warn_ignored_sections(&raw, &mut report);
     if dns.enable {

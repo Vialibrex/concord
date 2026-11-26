@@ -85,9 +85,6 @@ impl Engine {
             if let Some(device) = patch.device {
                 applied.tun.device = device;
             }
-            if let Some(stack) = patch.stack {
-                applied.tun.stack_name = stack;
-            }
         }
         self.patch_credentials(
             &mut applied.general,
@@ -177,7 +174,6 @@ struct Settled {
     geox_url: BTreeMap<String, String>,
     tun_enable: bool,
     tun_device: String,
-    tun_stack: String,
     tun_auto_route: bool,
 }
 
@@ -199,7 +195,6 @@ impl Settled {
             geox_url: geox_url_of(urls),
             tun_enable: applied.tun.enable,
             tun_device: applied.tun.device.clone(),
-            tun_stack: applied.tun.stack_name.clone(),
             tun_auto_route: applied.tun.auto_route,
         }
     }
@@ -223,7 +218,6 @@ impl Settled {
             geox_url: moved(&self.geox_url, &after.geox_url),
             tun_enable: moved(&self.tun_enable, &after.tun_enable),
             tun_device: moved(&self.tun_device, &after.tun_device),
-            tun_stack: moved(&self.tun_stack, &after.tun_stack),
             tun_auto_route: moved(&self.tun_auto_route, &after.tun_auto_route),
         }
     }

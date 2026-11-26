@@ -414,7 +414,7 @@ pub fn tun_defaults() -> Map {
     into_map(json!({
         "enable": false,
         "device": "",
-        "stack": "Mips",
+        "stack": "",
         "dns-mode": "",
         "dns-hijack": ["0.0.0.0:53"],
         "auto-route": true,

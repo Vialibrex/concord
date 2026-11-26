@@ -172,7 +172,6 @@ pub struct GeneralChange {
     pub geox_url: Option<BTreeMap<String, String>>,
     pub tun_enable: Option<bool>,
     pub tun_device: Option<String>,
-    pub tun_stack: Option<String>,
     pub tun_auto_route: Option<bool>,
 }
 

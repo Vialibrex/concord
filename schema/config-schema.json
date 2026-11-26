@@ -314,7 +314,7 @@
     "defaults": {
       "enable": false,
       "device": "",
-      "stack": "Mips",
+      "stack": "",
       "dns-mode": "",
       "dns-hijack": [
         "0.0.0.0:53"
@@ -323,10 +323,6 @@
       "auto-detect-interface": true
     },
     "values": {
-      "stack": [
-        "gvisor",
-        "mips"
-      ],
       "congestion-controller": [
         "cubic",
         "reno",
@@ -421,11 +417,6 @@
     }
   },
   "proxy-values": {
-    "ip-stack.mode": [
-      "auto",
-      "gvisor",
-      "mips"
-    ],
     "ip-stack.congestion-controller": [
       "cubic",
       "reno",

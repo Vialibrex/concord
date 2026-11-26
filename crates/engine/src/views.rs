@@ -51,7 +51,6 @@ pub struct Selected {
 pub struct TunView {
     pub enable: bool,
     pub device: String,
-    pub stack: String,
     pub auto_route: bool,
     pub auto_detect_interface: bool,
     pub dns_hijack: Vec<String>,

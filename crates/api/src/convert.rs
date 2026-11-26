@@ -328,7 +328,6 @@ fn general_change(change: EngineChange) -> GeneralChange {
         geox_url: change.geox_url,
         tun_enable: change.tun_enable,
         tun_device: change.tun_device,
-        tun_stack: change.tun_stack,
         tun_auto_route: change.tun_auto_route,
     }
 }
@@ -370,7 +369,6 @@ pub fn general_state(view: GeneralView) -> GeneralState {
         tun: TunState {
             enable: view.tun.enable,
             device: view.tun.device,
-            stack: view.tun.stack,
             auto_route: view.tun.auto_route,
             auto_detect_interface: view.tun.auto_detect_interface,
             dns_hijack: view.tun.dns_hijack,

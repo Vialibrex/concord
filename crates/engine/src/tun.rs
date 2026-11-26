@@ -316,17 +316,12 @@ impl Engine {
         !self.is_android()
     }
 
-    /// Turns TUN on with this device and stack, and off again if it did not come up.
-    pub async fn start_named_tun(
-        &self,
-        device: Option<String>,
-        stack: Option<String>,
-    ) -> Result<(), TunStartError> {
+    /// Turns TUN on with this device, and off again if it did not come up.
+    pub async fn start_named_tun(&self, device: Option<String>) -> Result<(), TunStartError> {
         self.update(UpdateRequest {
             tun: Some(TunPatch {
                 enable: true,
                 device,
-                stack,
                 auto_route: None,
             }),
             ..UpdateRequest::default()
@@ -345,7 +340,6 @@ impl Engine {
             tun: Some(TunPatch {
                 enable: false,
                 device: None,
-                stack: None,
                 auto_route: None,
             }),
             ..UpdateRequest::default()

@@ -12,6 +12,7 @@ mod watch;
 
 pub use bus::EventBus;
 pub use concord_common::Origin;
+pub use concord_common::options::is_tun_stack;
 pub use concord_common::sync;
 pub use concord_engine::ControllerCors;
 pub use concord_engine::local_utc_offset;

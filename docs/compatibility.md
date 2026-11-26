@@ -140,8 +140,9 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   offer a core update; the update itself answers 501.
 - `/rules` has no hit counters (`extra`), and `size` is always -1.
 - The `tun` object of `GET /configs` carries `enable`, `device`, `stack`, `dns-hijack`, `auto-route`,
-  `auto-detect-interface` and `mtu`; settings Concord does not have keep mihomo's zero values, and mihomo's defaults
-  for the TUN addresses, `recvmsgx` and `processors-per-channel` are not reported.
+  `auto-detect-interface` and `mtu`; `stack` is always empty, since Concord has one TUN stack (see TUN below), and
+  a `PATCH /configs` that names one of mihomo's stacks changes nothing. Settings Concord does not have keep mihomo's
+  zero values, and mihomo's defaults for the TUN addresses, `recvmsgx` and `processors-per-channel` are not reported.
 - An empty list is `[]` where mihomo writes `null` (`authentication`, `skip-auth-prefixes`, `lan-disallowed-ips`,
   `dns-hijack`, and `connections` with none open).
 
@@ -190,7 +191,8 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   a live WARP enrollment is not part of those tests. `remote-dns-resolve` currently accepts literal UDP/TCP
   nameservers (L4 requires `tcp://`); encrypted or hostname nameservers are rejected when building the node.
   The native IP stack implements Cubic, Reno and BBR (BBR v1 with pacing, as in the TUN); `bbr3` selects Cubic
-  with a warning, and stack mode names use the same native stack. The IP stack keeps the configured MTU; each H3 packet is checked against the current
+  with a warning, and every `ip-stack.mode` (`auto`, `gvisor`, `mips`) runs the same native stack, for WireGuard
+  too. The IP stack keeps the configured MTU; each H3 packet is checked against the current
   QUIC datagram capacity and oversized packets are dropped without retiring the tunnel or returning PMTU ICMP.
   H2 drops received capsules larger than the configured MTU. The `masque-l4` benchmark uses a local H3
   CONNECT peer and covers TCP.
@@ -221,7 +223,9 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   the device supports it, whatever `tun.gso` says (mihomo uses it only with `gso: true`); `gso: false` gets a warning
   that offload stays on. Other platforms have no offload in either core. `tun.congestion-controller` takes `cubic`
   (the default), `reno` and `bbr`; `bbr` is BBR v1 with pacing, ported from sing-tun's Go stack as that ports Linux
-  `tcp_bbr.c`. `bbr3` runs as CUBIC with a warning. On Windows
+  `tcp_bbr.c`. `bbr3` runs as CUBIC with a warning. `tun.stack` takes mihomo's `gvisor`, `system`, `mixed` and
+  `mips`, and each runs Concord's own userspace stack; `system` and `mixed` get a warning on the desktop, as they
+  would leave TCP to the kernel. On Windows
   the interface's forwarding, router-discovery, DAD and DNS-registration options are not set. `tun.dns-mode` is not
   read: with `auto-route` the TUN becomes the system resolver on every desktop platform, macOS included, where mihomo
   leaves it off unless `dns-mode` asks; the macOS entry lives in the dynamic store and goes away with the process.

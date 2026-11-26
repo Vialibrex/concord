@@ -2342,7 +2342,6 @@ async fn a_service_with_a_capability_it_lacks_answers_unsupported() {
         .control
         .tun_start(TunStartParams {
             source: TunSource::Inherited { handle: 9 },
-            stack: None,
             mtu: None,
             address: vec![],
             dns: vec![],
@@ -2367,7 +2366,6 @@ async fn an_inherited_tun_that_cannot_start_tells_the_host_why() {
         .control
         .tun_start(TunStartParams {
             source: TunSource::Inherited { handle },
-            stack: None,
             mtu: None,
             address: vec!["nonsense".to_string()],
             dns: vec![],

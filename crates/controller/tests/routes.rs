@@ -536,6 +536,20 @@ async fn a_core_on_its_own_takes_the_controller_from_its_profile_and_reloads_a_p
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tun_stack_is_reported_empty_whatever_the_profile_or_a_patch_names() {
+    let rig = Rig::with_profile(true, &format!("{PROFILE}tun: {{stack: system}}\n")).await;
+    let stack = rig.call("GET", "/configs", None).await.json()["tun"]["stack"].clone();
+    assert_eq!(stack, "");
+    let patch = json!({ "tun": { "enable": false, "stack": "gvisor" } });
+    assert_eq!(rig.call("PATCH", "/configs", Some(patch)).await.status, 204);
+    let stack = rig.call("GET", "/configs", None).await.json()["tun"]["stack"].clone();
+    assert_eq!(stack, "");
+    let bogus = json!({ "tun": { "enable": false, "stack": "bogus" } });
+    assert_eq!(rig.call("PATCH", "/configs", Some(bogus)).await.status, 400);
+    rig.control.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rules_connections_and_providers_have_mihomos_shape() {
     let rig = Rig::new(false).await;
     let rules = rig.call("GET", "/rules", None).await.json();

@@ -4,9 +4,8 @@ use concord_common::options::{CONGESTION_CONTROLLERS, FindProcessMode, LogLevel,
 
 use crate::dns::{CacheAlgorithm, EnhancedMode, FakeIpFilterMode};
 use crate::keys;
-use crate::proxy::{IP_STACK_MODES, T0_PROXY_TYPES, T1_PROXY_TYPES, T2_PROXY_TYPES};
+use crate::proxy::{T0_PROXY_TYPES, T1_PROXY_TYPES, T2_PROXY_TYPES};
 use crate::rule::{T0_RULE_TYPES, T1_RULE_TYPES};
-use crate::tun::TUN_STACKS;
 
 fn tiers(t0: &[&str], t1: &[&str], t2: &[&str]) -> Value {
     json!({"t0": t0, "t1": t1, "t2": t2})
@@ -16,7 +15,8 @@ fn key_tiers(tiers: &keys::Tiers, defaults: Value) -> Value {
     json!({"t0": tiers.t0, "t1": tiers.t1, "t2": tiers.t2, "inert": tiers.inert, "defaults": defaults})
 }
 
-/// What a profile that leaves a key out gets, which is mihomo's default.
+/// What a profile that leaves a key out gets: mihomo's default,
+/// or empty for `tun.stack`, a choice Concord does not have.
 fn section_defaults(section: &str) -> Value {
     let dns = keys::dns_defaults();
     Value::Object(match section {
@@ -52,7 +52,6 @@ fn section_values(section: &str) -> Value {
             "cache-algorithm": names(&CacheAlgorithm::ALL, CacheAlgorithm::as_str),
         }),
         "tun" => json!({
-            "stack": TUN_STACKS,
             "congestion-controller": CONGESTION_CONTROLLERS,
         }),
         _ => json!({}),
@@ -76,7 +75,6 @@ pub fn config_schema() -> Value {
     schema.insert(
         "proxy-values".into(),
         json!({
-            "ip-stack.mode": IP_STACK_MODES,
             "ip-stack.congestion-controller": CONGESTION_CONTROLLERS,
         }),
     );
@@ -154,13 +152,7 @@ mod tests {
     #[test]
     fn every_listed_value_is_accepted_by_its_parser() {
         use crate::dns::{DnsConfig, parse_enhanced, parse_filter_mode};
-        use crate::tun::TunConfig;
 
-        for stack in listed("tun", "stack") {
-            let mut map = keys::tun_defaults();
-            map.insert("stack".into(), json!(stack));
-            assert!(TunConfig::from_map(&map).is_ok(), "{stack}");
-        }
         for mode in listed("dns", "enhanced-mode") {
             assert_eq!(parse_enhanced(&mode).unwrap().as_str(), mode);
             let mut map = keys::dns_defaults();
@@ -191,11 +183,21 @@ mod tests {
                 Some(mode.as_str())
             );
         }
+    }
+
+    #[test]
+    fn a_stack_name_is_never_offered_because_every_name_runs_the_same_stack() {
         let schema = config_schema();
-        assert!(
-            schema["proxy-values"]["ip-stack.mode"]
-                .as_array()
-                .is_some_and(|a| !a.is_empty())
+        assert_eq!(schema["tun"]["defaults"]["stack"], "");
+        assert!(schema["tun"]["values"].get("stack").is_none());
+        assert!(schema["proxy-values"].get("ip-stack.mode").is_none());
+        assert_eq!(
+            listed("tun", "congestion-controller"),
+            CONGESTION_CONTROLLERS
+        );
+        assert_eq!(
+            schema["proxy-values"]["ip-stack.congestion-controller"],
+            json!(CONGESTION_CONTROLLERS)
         );
     }
 }
