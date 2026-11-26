@@ -48,6 +48,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | shadowsocks | `set_clock`; split halves; owned in-place writes | None | Last, as one design discussion: the largest and most Concord-specific |
 | tokio | Notify peer workers only after `transition_from_parked` removes self from `idle.sleepers` | None | Bug-fix PR |
 | tokio | Check pending queues in `transition_worker_from_searching` before waking a parked worker | None | Bug-fix PR |
+| tokio | Notify peer workers on `yield_now` only when `should_notify_others()` is true | None | Bug-fix PR |
 | tun-rs | `AsyncDevice::into_sync` keeps the owned device | None | PR to tun-rs |
 
 ## boring 5.4.0
@@ -273,9 +274,21 @@ The package archive checksum is `b52fd3255258d26fac7264ab5a76b53c13367136dc011d3
     (returning `bool`, reusing the same `SeqCst` RMW Dekker ordering as `transition_to_parked`) instead of
     unconditionally calling `notify_parked_local` when no stealable or injected tasks exist. `TimerFlavor::Alternative`
     retains the unconditional notify because `notify_if_work_pending` does not inspect `inject_timers`.
+  - Fix spurious wakeup on single-task `yield_now`: `Handle::schedule_local` splits `is_yield` from
+    `!core.lifo_enabled` and checks `core.should_notify_others()` (`!is_searching && lifo_slot.is_some() +
+    run_queue.len() > 1`) instead of unconditionally waking a parked worker when the yielded task is the only
+    runnable task on the worker. `Schedule::yield_now` is only called from `Harness::poll` after `poll_future`
+    has already returned `Pending`, so the current worker immediately returns to `Context::run` to poll the
+    task; waking a `PARKED_DRIVER` peer for a lone yielded task produced ~24 `eventfd` writes/MB on Linux TUN
+    UDP. Unlike earlier reverted TUN workarounds—arming the queue `AsyncFd` wait at park (`6997a798`, which
+    added `epoll_ctl` churn and park waits) and suppressing local driver wakes in `TxPool` (`6f4210f8`, which
+    regressed Shadowsocks download and multi-flow throughput)—this fixes the scheduler wakeup directly with no
+    extra `epoll_ctl` and still wakes a peer worker whenever >=2 local tasks are runnable.
   - Unit tests (`concord_tests` in `worker.rs`, with `Idle::is_searching_any` test helper in `idle.rs`, plus workspace
-    stable-API regressions in `crates/platform/tests/tokio_scheduler.rs`) reproduce both bugs before the fix and assert
-    zero self-notify noop parks, zero mis-set `is_searching`, and single-worker wakeup on single remote task spawns.
+    stable-API regressions in `crates/platform/tests/tokio_scheduler.rs`) reproduce all three bugs before the fixes
+    and assert zero self-notify noop parks, zero mis-set `is_searching`, single-worker wakeup on single remote task
+    spawns and single-task self-yields, two-task LIFO+yield peer wakeups, and bounded I/O latency on a parked
+    driver worker while a peer self-yields.
     Tokio's upstream `rt_metrics`, `rt_threaded`, `rt_unstable_metrics`, and `rt_unstable_eager_driver_handoff` suites
     were also verified against the full upstream package before trimming `tests/`.
 - `Cargo.toml`, `tests/`: the `[[test]]` targets are removed with their sources.
