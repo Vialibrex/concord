@@ -283,18 +283,17 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for Chunked<W> {
         if this.finished {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
-        let take = data.len().min(64 * 1024);
-        let Some(chunk) = data.get(..take).filter(|c| !c.is_empty()) else {
+        if data.is_empty() {
             return Poll::Ready(Ok(0));
-        };
+        }
         this.out
-            .extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
-        this.out.extend_from_slice(chunk);
+            .extend_from_slice(format!("{:x}\r\n", data.len()).as_bytes());
+        this.out.extend_from_slice(data);
         this.out.extend_from_slice(b"\r\n");
-        this.inflight = Some(take);
+        this.inflight = Some(data.len());
         ready!(this.poll_drain(cx))?;
         this.inflight = None;
-        Poll::Ready(Ok(take))
+        Poll::Ready(Ok(data.len()))
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -572,6 +571,25 @@ mod tests {
         ));
         assert_eq!(seen[0].1, b"one");
         assert_eq!(seen[1].1, b"two!");
+    }
+
+    #[tokio::test]
+    async fn a_large_write_is_one_chunk() {
+        let (near, mut far) = duplex(1 << 18);
+        let mut chunked = Chunked {
+            inner: near,
+            out: Vec::new(),
+            out_off: 0,
+            inflight: None,
+            finished: false,
+        };
+        let payload = vec![9u8; 100_000];
+        assert_eq!(chunked.write(&payload).await.unwrap(), payload.len());
+        let mut wire = vec![0u8; 7 + payload.len() + 2];
+        far.read_exact(&mut wire).await.unwrap();
+        assert_eq!(&wire[..7], b"186a0\r\n");
+        assert_eq!(&wire[7..7 + payload.len()], &payload[..]);
+        assert_eq!(&wire[7 + payload.len()..], b"\r\n");
     }
 
     #[tokio::test]

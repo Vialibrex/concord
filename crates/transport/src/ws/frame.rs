@@ -14,7 +14,6 @@ const OP_BINARY: u8 = 0x2;
 const OP_CLOSE: u8 = 0x8;
 const OP_PING: u8 = 0x9;
 const OP_PONG: u8 = 0xA;
-const MAX_DATA_FRAME: usize = 32 * 1024;
 const MAX_CONTROL: usize = 125;
 
 pub(crate) fn apply_mask(key: [u8; 4], offset: usize, data: &mut [u8]) {
@@ -353,18 +352,14 @@ impl WriteSide {
             return Poll::Ready(Ok(done));
         }
         ready!(self.poll_drain_ctrl(io, cx))?;
-        let take = data.len().min(MAX_DATA_FRAME);
-        if take == 0 {
+        if data.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let Some(chunk) = data.get(..take) else {
-            return Poll::Ready(Ok(0));
-        };
-        encode_frame(&mut self.out, OP_BINARY, chunk, self.client);
-        self.inflight = Some(take);
+        encode_frame(&mut self.out, OP_BINARY, data, self.client);
+        self.inflight = Some(data.len());
         ready!(self.poll_drain(io, cx))?;
         self.inflight = None;
-        Poll::Ready(Ok(take))
+        Poll::Ready(Ok(data.len()))
     }
 
     fn poll_flush<W: AsyncWrite + Unpin + ?Sized>(
@@ -627,7 +622,7 @@ impl<S: Stream> Stream for WsStream<S> {
 #[cfg(test)]
 mod tests {
     use concord_common::BoxStream;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
 
     use super::*;
 
@@ -672,6 +667,33 @@ mod tests {
         server.read_to_end(&mut got).await.unwrap();
         writer.await.unwrap();
         assert_eq!(got, payload);
+    }
+
+    async fn read_one_masked_frame(raw: &mut DuplexStream, payload: &[u8]) {
+        let mut head = [0u8; 14];
+        raw.read_exact(&mut head).await.unwrap();
+        assert_eq!(head[0], 0x80 | OP_BINARY);
+        assert_eq!(head[1], 0x80 | 127);
+        let len = u64::from_be_bytes(head[2..10].try_into().unwrap());
+        assert_eq!(len, payload.len() as u64);
+        let mut body = vec![0u8; payload.len()];
+        raw.read_exact(&mut body).await.unwrap();
+        apply_mask([head[10], head[11], head[12], head[13]], 0, &mut body);
+        assert_eq!(body, payload);
+    }
+
+    #[tokio::test]
+    async fn a_write_larger_than_a_relay_buffer_is_one_message() {
+        let payload: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        let (a, mut raw) = duplex(1 << 18);
+        let mut whole = WsStream::new(a, true);
+        assert_eq!(whole.write(&payload).await.unwrap(), payload.len());
+        read_one_masked_frame(&mut raw, &payload).await;
+
+        let (a, mut raw) = duplex(1 << 18);
+        let (_read, mut write) = (Box::new(WsStream::new(a, true)) as BoxStream).into_split();
+        assert_eq!(write.write(&payload).await.unwrap(), payload.len());
+        read_one_masked_frame(&mut raw, &payload).await;
     }
 
     #[tokio::test]

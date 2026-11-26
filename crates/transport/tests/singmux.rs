@@ -588,23 +588,82 @@ async fn smux_shutdown_closes_the_stream() {
     assert!(result.is_err() || got.is_empty());
 }
 
+fn packet(payload: &[u8], to: Option<&Address>) -> Vec<u8> {
+    let mut out = Vec::new();
+    match to {
+        Some(Address::Socket(SocketAddr::V4(addr))) => {
+            out.push(1);
+            out.extend_from_slice(&addr.ip().octets());
+        }
+        Some(Address::Socket(SocketAddr::V6(addr))) => {
+            out.push(4);
+            out.extend_from_slice(&addr.ip().octets());
+        }
+        Some(Address::Domain(host, _)) => {
+            out.push(3);
+            out.push(u8::try_from(host.len()).unwrap());
+            out.extend_from_slice(host.as_bytes());
+        }
+        None => {}
+    }
+    if let Some(to) = to {
+        out.extend_from_slice(&to.port().to_be_bytes());
+    }
+    out.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+async fn recv_packet(io: &mut BoxStream, with_addr: bool) -> (Vec<u8>, Option<Address>) {
+    let from = if with_addr {
+        let host = match io.read_u8().await.unwrap() {
+            1 => {
+                let mut octets = [0u8; 4];
+                io.read_exact(&mut octets).await.unwrap();
+                IpAddr::from(octets).to_string()
+            }
+            3 => {
+                let mut name = vec![0u8; usize::from(io.read_u8().await.unwrap())];
+                io.read_exact(&mut name).await.unwrap();
+                String::from_utf8(name).unwrap()
+            }
+            other => panic!("unexpected address family {other}"),
+        };
+        Some(Address::new(&host, io.read_u16().await.unwrap()))
+    } else {
+        None
+    };
+    let mut payload = vec![0u8; usize::from(io.read_u16().await.unwrap())];
+    io.read_exact(&mut payload).await.unwrap();
+    (payload, from)
+}
+
 #[tokio::test]
 async fn udp_with_a_fixed_destination_and_per_packet_addresses() {
     for protocol in PROTOCOLS {
         let h = harness(options(protocol, false));
         let dns = Address::Socket(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53));
-        let (mut rx, mut tx) = h.client.connect_udp(&dns).await.unwrap();
-        tx.send(b"one", None).await.unwrap();
-        tx.send(b"second packet", None).await.unwrap();
-        assert_eq!(rx.recv().await.unwrap(), (b"one".to_vec(), None));
-        assert_eq!(rx.recv().await.unwrap(), (b"second packet".to_vec(), None));
+        let mut io = h.client.connect_udp(&dns).await.unwrap();
+        io.write_all(&packet(b"one", None)).await.unwrap();
+        io.write_all(&packet(b"second packet", None)).await.unwrap();
+        assert_eq!(recv_packet(&mut io, false).await, (b"one".to_vec(), None));
+        assert_eq!(
+            recv_packet(&mut io, false).await,
+            (b"second packet".to_vec(), None)
+        );
 
         let peer = Address::new("peer.test", 9000);
-        let (mut rx, mut tx) = h.client.listen_packet(Some(&dns)).await.unwrap();
-        tx.send(b"x", Some(&peer)).await.unwrap();
-        tx.send(b"y", Some(&dns)).await.unwrap();
-        assert_eq!(rx.recv().await.unwrap(), (b"x".to_vec(), Some(peer)));
-        assert_eq!(rx.recv().await.unwrap(), (b"y".to_vec(), Some(dns.clone())));
+        let mut io = h.client.listen_packet(Some(&dns)).await.unwrap();
+        io.write_all(&packet(b"x", Some(&peer))).await.unwrap();
+        io.write_all(&packet(b"y", Some(&dns))).await.unwrap();
+        assert_eq!(
+            recv_packet(&mut io, true).await,
+            (b"x".to_vec(), Some(peer))
+        );
+        assert_eq!(
+            recv_packet(&mut io, true).await,
+            (b"y".to_vec(), Some(dns.clone()))
+        );
 
         let seen = lock(&h.log).clone();
         assert_eq!(seen[0].flags, 1, "{protocol:?}");

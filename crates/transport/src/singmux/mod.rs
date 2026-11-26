@@ -20,11 +20,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use self::h2mux::H2MuxSession;
 use self::padding::{encode_request, padding_conn, protocol_conn};
 use self::smux::SmuxSession;
-use self::wire::{Kind, client_stream, mux_destination, packet_pair};
+use self::wire::{Kind, client_stream, mux_destination};
 use self::yamux::YamuxSession;
 use crate::http1::invalid;
-
-pub use self::wire::{PacketReader, PacketWriter};
 
 trait MuxSession: Send + Sync {
     fn open(&self) -> BoxFuture<'_, io::Result<BoxStream>>;
@@ -130,25 +128,21 @@ impl SingMuxClient {
         Ok(Box::new(client_stream(stream, Kind::Tcp, destination)?))
     }
 
-    /// A UDP flow to one fixed destination.
-    pub async fn connect_udp(
-        &self,
-        destination: &Address,
-    ) -> io::Result<(PacketReader, PacketWriter)> {
+    /// A UDP flow to one fixed destination: each packet is a 2-byte length and its payload.
+    pub async fn connect_udp(&self, destination: &Address) -> io::Result<BoxStream> {
         let stream = self.open_stream().await?;
-        let stream = client_stream(stream, Kind::Udp, destination)?;
-        Ok(packet_pair(stream, false))
+        Ok(Box::new(client_stream(stream, Kind::Udp, destination)?))
     }
 
-    /// A UDP socket whose every packet names its own address.
-    pub async fn listen_packet(
-        &self,
-        first: Option<&Address>,
-    ) -> io::Result<(PacketReader, PacketWriter)> {
+    /// A UDP socket whose every packet is a SOCKS address, a 2-byte length and its payload.
+    pub async fn listen_packet(&self, first: Option<&Address>) -> io::Result<BoxStream> {
         let stream = self.open_stream().await?;
         let destination = first.cloned().unwrap_or_else(mux_destination);
-        let stream = client_stream(stream, Kind::UdpAddr, &destination)?;
-        Ok(packet_pair(stream, true))
+        Ok(Box::new(client_stream(
+            stream,
+            Kind::UdpAddr,
+            &destination,
+        )?))
     }
 
     /// Closes every session; the next stream dials a new one. sing-mux's `Close` is its

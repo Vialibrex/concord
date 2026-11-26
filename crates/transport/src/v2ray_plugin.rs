@@ -14,7 +14,7 @@ const STATUS_END: u8 = 0x03;
 const STATUS_KEEP_ALIVE: u8 = 0x04;
 const OPTION_DATA: u8 = 0x01;
 const MAX_META: usize = 512;
-const MAX_DATA: usize = 32 * 1024;
+const MAX_DATA: usize = u16::MAX as usize;
 
 #[derive(Clone, Debug, Default)]
 pub struct V2rayPluginOptions {
@@ -267,6 +267,27 @@ mod tests {
         want.extend_from_slice(&[0, 4, 0, 0, 2, 1, 0, 2, b'y', b'o']);
         want.extend_from_slice(&[0, 4, 0, 0, 3, 0]);
         assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn a_write_fills_the_two_byte_length_before_starting_another_frame() {
+        let (client, mut server) = duplex(1 << 18);
+        let mut conn = mux(Box::new(client));
+        let payload: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8).collect();
+        conn.write_all(&payload).await.unwrap();
+        conn.flush().await.unwrap();
+        let mut wire = vec![0u8; 14 + 8 + 65_535 + 8 + (70_000 - 65_535)];
+        server.read_exact(&mut wire).await.unwrap();
+        let first = &wire[14..];
+        assert_eq!(
+            first[..8],
+            [0, 4, 0, 0, STATUS_KEEP, OPTION_DATA, 0xff, 0xff]
+        );
+        assert_eq!(first[8..8 + 65_535], payload[..65_535]);
+        let second = &first[8 + 65_535..];
+        assert_eq!(second[..6], [0, 4, 0, 0, STATUS_KEEP, OPTION_DATA]);
+        assert_eq!(second[6..8], 4_465u16.to_be_bytes());
+        assert_eq!(second[8..], payload[65_535..]);
     }
 
     #[tokio::test]

@@ -1,13 +1,48 @@
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 use concord_common::sync::lock;
 use concord_common::{Address, BoxStream};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, duplex};
 
 use super::h2mux::client_builder;
 use super::padding::{encode_request, padding_conn, protocol_conn};
-use super::wire::{Kind, client_stream, encode_stream_request, put_address, read_address};
+use super::wire::{Kind, client_stream, encode_stream_request, put_address};
 use super::{MuxDialFn, MuxProtocol, SingMuxClient, SingMuxOptions};
+use crate::http1::invalid;
+
+async fn read_address<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Address> {
+    let family = reader.read_u8().await?;
+    let host = match family {
+        0x01 => {
+            let mut octets = [0u8; 4];
+            reader.read_exact(&mut octets).await?;
+            Some(IpAddr::V4(Ipv4Addr::from(octets)))
+        }
+        0x04 => {
+            let mut octets = [0u8; 16];
+            reader.read_exact(&mut octets).await?;
+            Some(IpAddr::V6(Ipv6Addr::from(octets)))
+        }
+        0x03 => None,
+        other => return Err(invalid(format!("unknown address family: {other}"))),
+    };
+    let name = if host.is_none() {
+        let len = reader.read_u8().await?;
+        let mut name = vec![0u8; usize::from(len)];
+        reader.read_exact(&mut name).await?;
+        Some(String::from_utf8(name).map_err(|_| invalid("domain name is not utf-8"))?)
+    } else {
+        None
+    };
+    let port = reader.read_u16().await?;
+    Ok(match (host, name) {
+        (Some(ip), _) => Address::Socket(SocketAddr::new(ip, port)),
+        (None, Some(name)) => Address::new(&name, port),
+        (None, None) => return Err(invalid("empty address")),
+    })
+}
 
 #[tokio::test]
 async fn addresses_round_trip_in_all_three_families() {
@@ -183,6 +218,24 @@ async fn a_read_before_any_write_gets_the_request_out_with_a_zero_length_write()
     let mut rest = Vec::new();
     far.read_to_end(&mut rest).await.unwrap();
     assert_eq!(rest, b"EHLO");
+}
+
+#[tokio::test]
+async fn the_first_write_carries_all_its_data_and_later_writes_pass_through() {
+    let (a, mut far) = duplex(1 << 20);
+    let destination = Address::new("1.2.3.4", 80);
+    let mut stream = client_stream(Box::new(a), Kind::Tcp, &destination).unwrap();
+    let first: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+    assert_eq!(stream.write(&first).await.unwrap(), first.len());
+    let second = vec![5u8; 100_000];
+    assert_eq!(stream.write(&second).await.unwrap(), second.len());
+    let request = encode_stream_request(Kind::Tcp, &destination).unwrap();
+    let mut wire = vec![0u8; request.len() + first.len() + second.len()];
+    far.read_exact(&mut wire).await.unwrap();
+    let (head, rest) = wire.split_at(request.len());
+    assert_eq!(head, request);
+    assert_eq!(&rest[..first.len()], &first[..]);
+    assert_eq!(&rest[first.len()..], &second[..]);
 }
 
 #[tokio::test]

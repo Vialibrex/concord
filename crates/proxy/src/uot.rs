@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use concord_common::{Address, BoxStream, PacketBuf, PacketSession, Tasks};
 
-use crate::addr_codec::{MAX_ADDR_LEN, SOCKS, UOT};
+use crate::addr_codec::{AddrFormat, MAX_ADDR_LEN, SOCKS, UOT};
 use crate::dgram::{Decoded, Decoder, Encoder, StreamSession};
 use crate::lazy::HeadFirst;
 
@@ -35,16 +35,19 @@ pub(crate) fn session(
     }
     Ok(Arc::new(StreamSession::new(
         Box::new(HeadFirst::new(stream, request)),
-        UotFrames,
-        UotFrames,
+        AddrFrames(UOT),
+        AddrFrames(UOT),
         hint.clone(),
         tasks,
     )))
 }
 
-struct UotFrames;
+/// `[address][2-byte length][payload]`, as sing's UoT and sing-mux packet streams frame
+/// a datagram; the two differ only in the address format.
+#[derive(Clone, Copy)]
+pub(crate) struct AddrFrames(pub(crate) AddrFormat);
 
-impl Encoder for UotFrames {
+impl Encoder for AddrFrames {
     fn headroom(&self) -> usize {
         MAX_ADDR_LEN + 2
     }
@@ -52,15 +55,15 @@ impl Encoder for UotFrames {
     fn encode(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
         let len = u16::try_from(pkt.len()).map_err(|_| io::Error::other("datagram too long"))?;
         pkt.prepend(2).copy_from_slice(&len.to_be_bytes());
-        let addr_len = UOT.len(dst);
-        UOT.write_into(dst, pkt.prepend(addr_len))?;
+        let addr_len = self.0.len(dst);
+        self.0.write_into(dst, pkt.prepend(addr_len))?;
         Ok(())
     }
 }
 
-impl Decoder for UotFrames {
+impl Decoder for AddrFrames {
     fn decode(&mut self, input: &mut [u8]) -> io::Result<Decoded> {
-        let Some((addr, used)) = UOT.parse(input)? else {
+        let Some((addr, used)) = self.0.parse(input)? else {
             return Ok(Decoded::NeedMore);
         };
         let Some(&[hi, lo]) = input.get(used..used + 2) else {
@@ -86,12 +89,13 @@ mod tests {
     #[test]
     fn frames_round_trip() {
         let dst = Address::new("example.com", 5353);
-        let mut pkt = PacketBuf::with_headroom(UotFrames.headroom());
+        let mut frames = AddrFrames(UOT);
+        let mut pkt = PacketBuf::with_headroom(frames.headroom());
         pkt.extend_from_slice(b"abc");
-        UotFrames.encode(&mut pkt, &dst).unwrap();
+        frames.encode(&mut pkt, &dst).unwrap();
         let mut wire = pkt.as_slice().to_vec();
         assert_eq!(wire.first(), Some(&2));
-        let Decoded::Packet { addr, payload, .. } = UotFrames.decode(&mut wire).unwrap() else {
+        let Decoded::Packet { addr, payload, .. } = frames.decode(&mut wire).unwrap() else {
             panic!("expected a packet");
         };
         assert_eq!(addr, Some(dst));

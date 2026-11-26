@@ -27,9 +27,7 @@ pub use h2_transport::H2Options;
 pub use http_obfs::HttpOptions;
 pub use shadowtls::{DEFAULT_ALPN, ShadowTlsClient, ShadowTlsOptions, WS_ALPN};
 pub use simple_obfs::{ObfsMode, ObfsOptions};
-pub use singmux::{
-    Brutal, MuxDialFn, MuxProtocol, PacketReader, PacketWriter, SingMuxClient, SingMuxOptions,
-};
+pub use singmux::{Brutal, MuxDialFn, MuxProtocol, SingMuxClient, SingMuxOptions};
 pub use v2ray_plugin::V2rayPluginOptions;
 pub use ws::WsOptions;
 pub use xhttp::{QuicDialFn, XhttpClient, XhttpDial, XhttpDownload, XhttpOptions, XhttpReuse};

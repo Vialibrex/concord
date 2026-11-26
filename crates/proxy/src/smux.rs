@@ -1,29 +1,24 @@
 use std::io;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
-use concord_common::sync::lock;
 use concord_common::{
-    Address, BoxStream, DialCx, DialEnv, Initiator, Outbound, OutboundInfo, PacketBuf,
-    PacketSession, Tasks,
+    Address, BoxStream, DialCx, DialEnv, Initiator, Outbound, OutboundInfo, PacketSession, Tasks,
 };
 use concord_config::proxy::SmuxOpts;
-use concord_transport::{
-    Brutal, MuxDialFn, MuxProtocol, PacketReader, PacketWriter, SingMuxClient, SingMuxOptions,
-};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use concord_transport::{Brutal, MuxDialFn, MuxProtocol, SingMuxClient, SingMuxOptions};
 
+use crate::addr_codec::SOCKS;
 use crate::ctx::BuildError;
+use crate::dgram::StreamSession;
 use crate::lazy::Kick;
 use crate::link::EnvSlot;
+use crate::uot::AddrFrames;
 use crate::util::parse_bps;
 
 const TCP_TIMEOUT: Duration = Duration::from_secs(5);
-const QUEUE: usize = 128;
 
 struct Muxed {
     info: OutboundInfo,
@@ -60,10 +55,11 @@ impl Outbound for Muxed {
             return self.inner.associate(cx, hint).await;
         }
         self.remember(cx);
-        let (reader, writer) = self.client.listen_packet(Some(hint)).await?;
-        Ok(Arc::new(MuxPackets::new(
-            reader,
-            writer,
+        let stream = self.client.listen_packet(Some(hint)).await?;
+        Ok(Arc::new(StreamSession::new(
+            stream,
+            AddrFrames(SOCKS),
+            AddrFrames(SOCKS),
             hint.clone(),
             &self.tasks,
         )))
@@ -78,91 +74,6 @@ impl Outbound for Muxed {
         let client = self.client.clone();
         self.tasks
             .spawn_detached(async move { client.close().await });
-    }
-}
-
-struct MuxPackets {
-    outgoing: mpsc::Sender<(Vec<u8>, Address)>,
-    incoming: Mutex<mpsc::Receiver<(Vec<u8>, Option<Address>)>>,
-    hint: Address,
-    tasks: [JoinHandle<()>; 2],
-}
-
-impl MuxPackets {
-    fn new(
-        mut reader: PacketReader,
-        mut writer: PacketWriter,
-        hint: Address,
-        tasks: &Tasks,
-    ) -> Self {
-        let (outgoing, mut queue) = mpsc::channel::<(Vec<u8>, Address)>(QUEUE);
-        let (feed, incoming) = mpsc::channel(QUEUE);
-        let write = tasks.spawn(async move {
-            while let Some((payload, to)) = queue.recv().await {
-                if writer.send(&payload, Some(&to)).await.is_err() {
-                    break;
-                }
-            }
-            let _ = writer.shutdown().await;
-        });
-        let read = tasks.spawn(async move {
-            while let Ok(packet) = reader.recv().await {
-                if feed.send(packet).await.is_err() {
-                    break;
-                }
-            }
-        });
-        MuxPackets {
-            outgoing,
-            incoming: Mutex::new(incoming),
-            hint,
-            tasks: [write, read],
-        }
-    }
-}
-
-impl Drop for MuxPackets {
-    fn drop(&mut self) {
-        for task in &self.tasks {
-            task.abort();
-        }
-    }
-}
-
-impl PacketSession for MuxPackets {
-    fn poll_send(
-        &self,
-        _cx: &mut Context<'_>,
-        pkt: &mut PacketBuf,
-        dst: &Address,
-    ) -> Poll<io::Result<()>> {
-        match self
-            .outgoing
-            .try_send((pkt.as_slice().to_vec(), dst.clone()))
-        {
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()))
-            }
-            _ => Poll::Ready(Ok(())),
-        }
-    }
-
-    fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut PacketBuf) -> Poll<io::Result<Address>> {
-        let received = lock(&self.incoming).poll_recv(cx);
-        match received {
-            Poll::Ready(Some((payload, from))) => {
-                buf.extend_from_slice(&payload);
-                Poll::Ready(Ok(from.unwrap_or_else(|| self.hint.clone())))
-            }
-            Poll::Ready(None) => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn close(&self) {
-        for task in &self.tasks {
-            task.abort();
-        }
     }
 }
 

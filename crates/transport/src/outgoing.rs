@@ -43,6 +43,17 @@ impl Outgoing {
         Poll::Ready(Ok(()))
     }
 
+    /// Sends what is queued; `Some(n)` is a record [`Self::poll_write_record`] accepted as
+    /// `n` bytes that has only now left, which the caller reports for its pending write.
+    pub(crate) fn poll_settle<S: AsyncWrite + Unpin + ?Sized>(
+        &mut self,
+        inner: &mut S,
+        cx: &mut Context<'_>,
+    ) -> Poll<io::Result<Option<usize>>> {
+        ready!(self.poll_drain(inner, cx))?;
+        Poll::Ready(Ok(self.inflight.take()))
+    }
+
     /// Returns `Ready` only once the record has been handed to `inner`, so a
     /// caller that never flushes still sees its data leave.
     pub(crate) fn poll_write_record<S: AsyncWrite + Unpin + ?Sized>(
