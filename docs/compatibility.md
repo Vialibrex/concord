@@ -47,6 +47,7 @@ mihomo; a key that only uses one, such as `copy: *domain`, is still unknown.
 | A provider `path` outside the home directory, or one that passes through a symlink | Read when `SAFE_PATHS` lists the directory; a symlink is followed | Refused: the apply fails, naming the provider and the path |
 | A `hosts` entry that maps a name to itself, such as `a.example: a.example` | Loaded; an address lookup of the name never returns, nor does loading a later entry that points at the name | Loaded; the entry is skipped with a warning and the name is resolved by DNS. A cycle through two or more entries is refused, as in mihomo |
 | A regular expression with .NET-only syntax, such as `\p{IsCJKUnifiedIdeographs}`, in a group `filter`, `DOMAIN-REGEX`, `PROCESS-NAME-REGEX` or `override.proxy-name` | Accepted | Refused when loading |
+| An OpenVPN node without `ping` or `ping-restart` whose server pushes them | The pushed values are ignored, so a tunnel left idle past the server's timeout is not noticed and the next dial waits for its timeout | The pushed values apply where the node sets none, as in OpenVPN 2.6 |
 | A number too wide for its field in a rule or group, such as `DST-PORT,70000`, `DSCP,300` or `tolerance: -1` | Cut to the field's width without a warning | Refused when loading |
 | The replacement text of `override.proxy-name` | .NET rules: `$1x` is group 1 followed by `x` | Rust `regex` rules: `$1x` names a group called `1x`, so write `${1}x` |
 | The TUN keys that choose what is captured: `route-address-set`, `route-exclude-address-set`, `include-uid-range`, `exclude-uid-range`, `exclude-src-port-range`, `exclude-dst-port-range`, `include-android-user`, `include-package`, `exclude-package`, `include-mac-address` and `exclude-mac-address` | Applied | Ignored with a warning that the TUN captures other traffic than the profile says; an app that embeds Concord picks the apps itself |
@@ -149,7 +150,7 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
 ## Not Supported
 
 - Outbound types, networks, TLS options and Shadowsocks plugins outside Concord's scope (among them tailscale,
-  easytier, zerotier, openvpn, sudoku, kcp, restls and kcptun): the node is set aside with a warning,
+  easytier, zerotier, sudoku, kcp, restls and kcptun): the node is set aside with a warning,
   also when the TLS option is given in xhttp `download-settings`. The full lists are the `T2_*` constants in
   `crates/config/src/proxy/parse.rs`.
 - A provider's `override.override-expr`: the provider gets no proxies and a warning, because its nodes must not run
@@ -197,6 +198,16 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   QUIC datagram capacity and oversized packets are dropped without retiring the tunnel or returning PMTU ICMP.
   H2 drops received capsules larger than the configured MTU. The `masque-l4` benchmark uses a local H3
   CONNECT peer and covers TCP.
+- **OpenVPN:** a client for OpenVPN 2.6 servers over UDP or TCP: key method 2 over TLS 1.2 or 1.3, `tls-auth`,
+  `tls-crypt` or `tls-crypt-v2`, a client certificate and/or `username` and `password` (a pushed `auth-token`
+  replaces the password), AEAD (`AES-128/192/256-GCM`, `CHACHA20-POLY1305`) and CBC (`AES-128/192/256-CBC` with
+  `auth`) data channels, cipher negotiation over `data-ciphers`, rekeys the server starts, `ping`, `ping-restart` and
+  `comp-lzo`, which takes LZO-compressed packets in and sends packets uncompressed. As in mihomo, the server
+  certificate is checked against `ca` alone, with no host name and no SNI; the client starts no rekey of its own;
+  pushed routes, `redirect-gateway` and DNS servers are not applied, since the rules decide what the tunnel
+  carries and `dns` with `remote-dns-resolve` resolves through it; `ca`, `cert`, `key` and the static keys are
+  inline PEM. The tunnel runs on the native IP stack with an MTU of 1500 unless `mtu` says otherwise, kept within
+  1280–65495 as for WireGuard, and `ip-stack.mode` is ignored as it is there.
 - **mieru:** both transports work against mihomo's mieru listener; the UDP transport with a `dialer-proxy` is
   rejected when the node is built, and padding statistics are approximated.
 - **Hysteria2 `realm-opts`:** works against mihomo's `hysteria2-realm` listener, including through two NATs; it speaks

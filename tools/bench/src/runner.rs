@@ -41,6 +41,7 @@ pub struct Rig {
     pub cores: Vec<CoreSpec>,
     pub mihomo: PathBuf,
     pub sing_box: Option<PathBuf>,
+    pub openvpn: Option<PathBuf>,
     pub cpus: Option<CpuPlan>,
     pub netns: Option<Netns>,
     pub dir: PathBuf,
@@ -57,6 +58,7 @@ struct Far {
     xray: Option<Child>,
     gost: Vec<(String, Child)>,
     masque: Option<Child>,
+    openvpn: Vec<(String, Child)>,
     cases: Vec<Case>,
     /// Cases whose listener the server refused, with its reason.
     refused: Vec<(String, String)>,
@@ -111,6 +113,26 @@ impl Rig {
             .map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |n| n.far_ip)
     }
 
+    fn build_cases(&self, ip: IpAddr, certs: &Path) -> Vec<Case> {
+        let mut port = 21_000 + (std::process::id() % 2000) as u16 * 10;
+        let host = if ip.is_loopback() {
+            "127.0.0.1".to_string()
+        } else {
+            ip.to_string()
+        };
+        let mut built = Vec::new();
+        for spec in &self.plan.cases {
+            let main = free_port_from(&mut port, ip);
+            let decoy = if cases::needs_decoy(*spec) {
+                free_port_from(&mut port, ip)
+            } else {
+                0
+            };
+            built.push(cases::build(*spec, &host, main, decoy, certs));
+        }
+        built
+    }
+
     async fn start_far(&self) -> Result<Far, String> {
         let ip = self.far_ip();
         let (ports, _, origin, authority) = self.start_origin(ip).await?;
@@ -120,22 +142,7 @@ impl Rig {
         let certs = self.dir.join("server/certs");
         std::fs::create_dir_all(&certs).map_err(|e| e.to_string())?;
         cases::write_certs(&certs).map_err(|e| e.to_string())?;
-        let mut port = 21_000 + (std::process::id() % 2000) as u16 * 10;
-        let mut built = Vec::new();
-        for spec in &self.plan.cases {
-            let host = if ip.is_loopback() {
-                "127.0.0.1".to_string()
-            } else {
-                ip.to_string()
-            };
-            let main = free_port_from(&mut port, ip);
-            let decoy = if cases::needs_decoy(*spec) {
-                free_port_from(&mut port, ip)
-            } else {
-                0
-            };
-            built.push(cases::build(*spec, &host, main, decoy, &certs));
-        }
+        let built = self.build_cases(ip, &certs);
         let server = if built.iter().any(|c| c.listener.is_some()) {
             let home = self.dir.join("server");
             std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
@@ -210,6 +217,10 @@ impl Rig {
         };
         let gost = crate::gost::start(&built, &self.dir, &self.placement(Role::Server))?;
         let masque = self.start_masque_peer(&built)?;
+        let server_side = self.placement(Role::Server);
+        let openvpn =
+            crate::openvpn::start(&built, ip, self.openvpn.as_deref(), &self.dir, &server_side);
+        let openvpn = openvpn.await.map_err(|error| error.to_string())?;
         tokio::time::sleep(Duration::from_millis(800)).await;
         let log = std::fs::read_to_string(self.dir.join("logs/server.log")).unwrap_or_default();
         let refused = built
@@ -237,6 +248,7 @@ impl Rig {
             xray,
             gost,
             masque,
+            openvpn,
             cases: built,
             refused,
         })
@@ -441,6 +453,7 @@ impl Rig {
         drop(far.xray.take());
         drop(std::mem::take(&mut far.gost));
         drop(far.masque.take());
+        drop(std::mem::take(&mut far.openvpn));
         drop(far.origin);
         Ok(())
     }
@@ -466,9 +479,10 @@ impl Rig {
             core,
             server: if case.xray_listener.is_some() {
                 far.xray.as_ref().and_then(Child::id)
-            } else if case.gost.is_some() {
+            } else if case.gost.is_some() || case.openvpn.is_some() {
                 far.gost
                     .iter()
+                    .chain(&far.openvpn)
                     .find(|(name, _)| name == case.name())
                     .and_then(|(_, child)| child.id())
             } else if case.name() == "masque-l4" {
@@ -792,6 +806,9 @@ fn check_far(far: &mut Far) -> Result<(), String> {
         return Err(format!(
             "the Xray server exited: {status}; see logs/xray.log"
         ));
+    }
+    if let Some(exited) = crate::openvpn::exited(&mut far.openvpn) {
+        return Err(exited);
     }
     if let Some(server) = far.masque.as_mut()
         && let Ok(Some(status)) = server.try_wait()

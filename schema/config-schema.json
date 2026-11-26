@@ -486,6 +486,7 @@
     "t1": [
       "wireguard",
       "masque",
+      "openvpn",
       "hysteria",
       "ssr",
       "snell",
@@ -500,7 +501,6 @@
       "tailscale",
       "easytier",
       "zerotier",
-      "openvpn",
       "sudoku",
       "trusttunnel"
     ]

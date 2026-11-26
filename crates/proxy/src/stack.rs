@@ -258,6 +258,17 @@ impl IpSend for StackSend {
     }
 }
 
+impl StackRecv {
+    /// Waits for the stack's next packet and takes up to `max` in all into `out`, for a
+    /// carrier that seals and sends a batch at a time.
+    pub(crate) async fn recv_many(&mut self, out: &mut Vec<Packet>, max: usize) -> io::Result<()> {
+        if self.rx.recv_many(out, max).await == 0 {
+            return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+        }
+        Ok(())
+    }
+}
+
 impl IpRecv for StackRecv {
     async fn recv<'a>(
         &'a mut self,

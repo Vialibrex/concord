@@ -188,6 +188,16 @@ pub const ALL: &[Spec] = &[
         "snell v6 without encryption or shaping",
     ),
     spec("mieru-tcp", false, "mieru over TCP"),
+    spec(
+        "openvpn",
+        true,
+        "OpenVPN over UDP, tls-crypt, AES-256-GCM (needs --openvpn and --link)",
+    ),
+    spec(
+        "openvpn-tcp",
+        true,
+        "OpenVPN over TCP, tls-crypt, AES-256-GCM (needs --openvpn and --link)",
+    ),
 ];
 
 pub const QUICK: &[&str] = &[
@@ -224,9 +234,23 @@ pub struct Case {
     pub xray_listener: Option<Value>,
     pub proxy: Option<Value>,
     pub gost: Option<(&'static str, String)>,
+    /// The OpenVPN server's configuration, for `openvpn.rs` to run.
+    pub openvpn: Option<String>,
 }
 
 impl Case {
+    pub fn bare(spec: Spec) -> Case {
+        Case {
+            spec,
+            listener: None,
+            singbox_listener: None,
+            xray_listener: None,
+            proxy: None,
+            gost: None,
+            openvpn: None,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         self.spec.name
     }
@@ -238,6 +262,13 @@ impl Case {
             "DIRECT"
         }
     }
+}
+
+pub fn needs_mihomo(spec: Spec) -> bool {
+    !matches!(
+        spec.name,
+        "direct" | "rematch" | "hysteria-brutal" | "masque-l4" | "openvpn" | "openvpn-tcp"
+    ) && !is_mitm(spec)
 }
 
 /// The case needs a second listener: the TLS server its handshake is relayed to.
@@ -254,10 +285,6 @@ pub fn build(spec: Spec, host: &str, port: u16, decoy: u16, certs: &Path) -> Cas
     let insecure = json!({"sni": "localhost", "skip-cert-verify": true});
     if let Some(mode) = spec.name.strip_prefix("vless-xhttp-h3-") {
         return Case {
-            spec,
-            listener: None,
-            gost: None,
-            singbox_listener: None,
             xray_listener: Some(json!({
                 "listen": host, "port": port, "protocol": "vless",
                 "settings": {"clients": [{"id": UUID}], "decryption": "none"},
@@ -270,41 +297,30 @@ pub fn build(spec: Spec, host: &str, port: u16, decoy: u16, certs: &Path) -> Cas
                 "uuid": UUID, "tls": true, "servername": "localhost", "skip-cert-verify": true,
                 "network": "xhttp", "alpn": ["h3"], "xhttp-opts": {"path": "/xh", "mode": mode}}),
             ),
+            ..Case::bare(spec)
         };
     }
     if spec.name == "rematch" {
         return Case {
-            spec,
-            listener: None,
-            gost: None,
-            singbox_listener: None,
-            xray_listener: None,
             proxy: Some(
                 json!({"name": spec.name, "type": "rematch", "target-rematch-name": "bench", "target-sub-rule": "bench-rematch"}),
             ),
+            ..Case::bare(spec)
         };
     }
     if spec.name == "masque-l4" {
         // Public test keys; the local benchmark peer does not request client authentication.
         return Case {
-            spec,
-            listener: None,
-            gost: None,
-            singbox_listener: None,
-            xray_listener: None,
             proxy: Some(
                 json!({"name":spec.name,"type":"masque","server":host,"port":port,
                 "network":"h3-l4proxy", "private-key":"MHcCAQEEIIv8E335vR4FW1LFLLzFZYMueRGUm5fHUPlx0KCzPu23oAoGCCqGSM49AwEHoUQDQgAEd3X4sHYlzsLE8QDt31G5xCXnaY4+1L7dHARLSuUbcuFTRwyFFmwAnH5A2jwjs1A/HHd1yP28nuFTMXWKdgQh2A==",
                 "public-key":"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEd3X4sHYlzsLE8QDt31G5xCXnaY4+1L7dHARLSuUbcuFTRwyFFmwAnH5A2jwjs1A/HHd1yP28nuFTMXWKdgQh2A==", "skip-cert-verify":true, "sni":"localhost"}),
             ),
+            ..Case::bare(spec)
         };
     }
     if spec.name == "hysteria-brutal" {
         return Case {
-            spec,
-            listener: None,
-            xray_listener: None,
-            gost: None,
             singbox_listener: Some(json!({
                 "type": "hysteria", "tag": spec.name, "listen": host, "listen_port": port,
                 "up_mbps": 100, "down_mbps": 100,
@@ -317,14 +333,14 @@ pub fn build(spec: Spec, host: &str, port: u16, decoy: u16, certs: &Path) -> Cas
                 "udp": true, "auth-str": "hy1-pw", "up": "100", "down": "100",
                 "sni": "localhost", "skip-cert-verify": true
             })),
+            ..Case::bare(spec)
         };
+    }
+    if let Some(case) = crate::openvpn::case(spec, host, port, certs) {
+        return case;
     }
     if spec.name == "gost-relay" {
         return Case {
-            spec,
-            listener: None,
-            xray_listener: None,
-            singbox_listener: None,
             gost: Some((
                 "CONCORD_GOST3",
                 format!("relay://user:password@{host}:{port}?nodelay=true"),
@@ -333,14 +349,11 @@ pub fn build(spec: Spec, host: &str, port: u16, decoy: u16, certs: &Path) -> Cas
                 json!({"name":spec.name, "type":"gost-relay", "server":host, "port":port,
                 "username":"user", "password":"password", "udp":true}),
             ),
+            ..Case::bare(spec)
         };
     }
     if spec.name == "ss-gost" {
         return Case {
-            spec,
-            listener: None,
-            xray_listener: None,
-            singbox_listener: None,
             gost: Some((
                 "CONCORD_GOST2",
                 format!("ss+mws://aes-128-gcm:pw@{host}:{port}?path=/gost"),
@@ -350,6 +363,7 @@ pub fn build(spec: Spec, host: &str, port: u16, decoy: u16, certs: &Path) -> Cas
                 "cipher":"aes-128-gcm", "password":"pw", "plugin":"gost-plugin",
                 "plugin-opts":{"mode":"websocket", "host":"localhost", "path":"/gost"}}),
             ),
+            ..Case::bare(spec)
         };
     }
     let ss = |cipher: &str, password: &str| {
@@ -545,14 +559,7 @@ pub fn build(spec: Spec, host: &str, port: u16, decoy: u16, certs: &Path) -> Cas
             json!({"transport": "TCP", "username": "mu", "password": "mp"}),
         ),
         _ => {
-            return Case {
-                spec,
-                listener: None,
-                singbox_listener: None,
-                xray_listener: None,
-                gost: None,
-                proxy: None,
-            };
+            return Case::bare(spec);
         }
     };
     let listener = format!(
@@ -562,12 +569,9 @@ pub fn build(spec: Spec, host: &str, port: u16, decoy: u16, certs: &Path) -> Cas
     let base =
         json!({"name": spec.name, "type": kind, "server": host, "port": port, "udp": spec.udp});
     Case {
-        spec,
         listener: Some(listener),
-        singbox_listener: None,
-        xray_listener: None,
-        gost: None,
         proxy: Some(merge(base, &extra)),
+        ..Case::bare(spec)
     }
 }
 
@@ -584,7 +588,8 @@ pub fn write_certs(dir: &Path) -> std::io::Result<()> {
     let made = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
         .map_err(std::io::Error::other)?;
     std::fs::write(dir.join("cert.pem"), made.cert.pem())?;
-    std::fs::write(dir.join("key.pem"), made.signing_key.serialize_pem())
+    std::fs::write(dir.join("key.pem"), made.signing_key.serialize_pem())?;
+    crate::openvpn::write_pki(dir)
 }
 
 /// Both clients get the same profile, including rematch's second rule walk.

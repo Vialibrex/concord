@@ -101,7 +101,10 @@ impl Plan {
                 cases: cases::ALL
                     .iter()
                     .filter(|case| {
-                        !matches!(case.name, "ss-gost" | "gost-relay") && !cases::is_mitm(**case)
+                        !matches!(
+                            case.name,
+                            "ss-gost" | "gost-relay" | "openvpn" | "openvpn-tcp"
+                        ) && !cases::is_mitm(**case)
                     })
                     .copied()
                     .collect(),

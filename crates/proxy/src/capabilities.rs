@@ -48,6 +48,7 @@ mod tests {
             "masque" => {
                 json!({"private-key": "invalid", "public-key": "invalid", "ip": "10.0.0.2"})
             }
+            "openvpn" => json!({"ca": "invalid", "username": "u"}),
             "wireguard" => json!({
                 "private-key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
                 "public-key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",

@@ -82,6 +82,7 @@ fn unavailable_congestion(kind: &ProxyKind) -> Option<&str> {
     let name = match kind {
         ProxyKind::WireGuard(o) => &o.ip_stack_congestion_controller,
         ProxyKind::Masque(o) => &o.ip_stack_congestion_controller,
+        ProxyKind::OpenVpn(o) => &o.ip_stack_congestion_controller,
         _ => return None,
     };
     name.eq_ignore_ascii_case("bbr3").then_some(name.as_str())
@@ -136,16 +137,18 @@ pub fn proxy_warnings(def: &ProxyDef) -> Vec<String> {
             );
         }
     }
-    if let ProxyKind::WireGuard(wg) = &def.kind
-        && wg.remote_dns_resolve
-    {
-        let skipped: Vec<&str> = wg
-            .dns
+    let remote_dns = match &def.kind {
+        ProxyKind::WireGuard(wg) if wg.remote_dns_resolve => Some(&wg.dns),
+        ProxyKind::OpenVpn(ovpn) if ovpn.remote_dns_resolve => Some(&ovpn.dns),
+        _ => None,
+    };
+    if let Some(dns) = remote_dns {
+        let skipped: Vec<&str> = dns
             .iter()
             .map(String::as_str)
             .filter(|text| wireguard_dns(text).is_none())
             .collect();
-        if !skipped.is_empty() && skipped.len() < wg.dns.len() {
+        if !skipped.is_empty() && skipped.len() < dns.len() {
             out.push(format!(
                 "dns {} is skipped: only plain UDP and TCP servers are used",
                 skipped.join(", ")

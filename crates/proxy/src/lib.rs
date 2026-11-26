@@ -18,6 +18,7 @@ mod link;
 mod masque;
 mod mieru;
 mod node;
+mod openvpn;
 mod quic;
 mod reject;
 mod rematch;

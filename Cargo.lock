@@ -1404,6 +1404,7 @@ dependencies = [
  "http",
  "indexmap",
  "ipnetwork",
+ "lzokay-native",
  "md-5 0.10.6",
  "num-bigint 0.4.8",
  "quinn",
@@ -3430,6 +3431,16 @@ name = "lru_time_cache"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9106e1d747ffd48e6be5bb2d97fa706ed25b144fbee4d5c02eae110cd8d6badd"
+
+[[package]]
+name = "lzokay-native"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c83fc518c5874790cff277720d646a859d5c88fb2a58c7d7c45782384658ddd"
+dependencies = [
+ "byteorder",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "managed"

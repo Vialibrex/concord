@@ -35,6 +35,7 @@ pub const T0_PROXY_TYPES: &[&str] = &[
 pub const T1_PROXY_TYPES: &[&str] = &[
     "wireguard",
     "masque",
+    "openvpn",
     "hysteria",
     "ssr",
     "snell",
@@ -45,14 +46,7 @@ pub const T1_PROXY_TYPES: &[&str] = &[
     "rematch",
     "gost-relay",
 ];
-pub const T2_PROXY_TYPES: &[&str] = &[
-    "tailscale",
-    "easytier",
-    "zerotier",
-    "openvpn",
-    "sudoku",
-    "trusttunnel",
-];
+pub const T2_PROXY_TYPES: &[&str] = &["tailscale", "easytier", "zerotier", "sudoku", "trusttunnel"];
 
 const T2_NETWORKS: &[&str] = &["mkcp", "kcp", "mekya"];
 const T2_TLS_KEYS: &[&str] = &["restls-opts", "tlsmirror-opts"];
@@ -191,6 +185,7 @@ fn parse_typed(
         "http" => ProxyKind::Http(parse_http(f)?),
         "wireguard" => ProxyKind::WireGuard(Box::new(parse_wireguard(f)?)),
         "masque" => ProxyKind::Masque(Box::new(masque::parse(f)?)),
+        "openvpn" => ProxyKind::OpenVpn(Box::new(super::openvpn::parse(f)?)),
         "hysteria" => ProxyKind::Hysteria(Box::new(parse_hysteria(f, caps)?)),
         "ssr" => ProxyKind::Ssr(parse_ssr(f)?),
         "snell" => ProxyKind::Snell(parse_snell(f)?),
@@ -1198,14 +1193,7 @@ mod tests {
 
     #[test]
     fn unsupported_things_are_quarantined_not_rejected() {
-        for kind in [
-            "tailscale",
-            "easytier",
-            "zerotier",
-            "openvpn",
-            "sudoku",
-            "trusttunnel",
-        ] {
+        for kind in ["tailscale", "easytier", "zerotier", "sudoku", "trusttunnel"] {
             let reason = quarantined(json!({"name": "n", "type": kind}));
             assert!(reason.contains(kind), "{reason}");
         }
@@ -1292,6 +1280,8 @@ mod tests {
             "private-key": "k", "public-key": "p", "ip": "10.0.0.2"});
         let masque = json!({"name": "m", "type": "masque", "server": "x", "port": 443,
             "private-key": "k", "public-key": "p", "ip": "10.0.0.2"});
+        let openvpn = json!({"name": "o", "type": "openvpn", "server": "x", "port": 1194,
+            "ca": "c", "username": "u"});
         let values = [
             json!("gvisor"),
             json!("bogus"),
@@ -1303,6 +1293,7 @@ mod tests {
             (&wireguard, "ip-stack"),
             (&wireguard, "workers"),
             (&masque, "ip-stack"),
+            (&openvpn, "ip-stack"),
         ] {
             let without = def(base.clone());
             for value in &values {

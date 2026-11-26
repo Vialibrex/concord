@@ -572,6 +572,16 @@ forward mode, TLS, smux, TCP and destination-bound UDP against upstream gost v3.
 CI's interop job runs both tests against gost v2.12.0 and v3.3.3, the releases they were written against
 (`.github/actions/gost`).
 
+## OpenVPN peers
+
+The `openvpn` (UDP) and `openvpn-tcp` cases run a real OpenVPN 2.6 server (`--openvpn` or `CONCORD_OPENVPN`, the `openvpn`
+binary) with tls-crypt, certificate authentication and AES-256-GCM, in the server's CPU and network placement; its
+CPU counts as the server's. The PKI and tls-crypt key are generated per run under `server/certs/`. The tunnel ends in
+the far namespace, so the load reaches the origin's own address through it: both cases need `--link` and root, and
+refuse loopback. The server is single-threaded, so when `server_cores` reaches one CPU for both arms, throughput is
+the server's limit and the comparison rests on core CPU and memory. Both cases are excluded from both tiers; select
+them with `--only openvpn,openvpn-tcp`.
+
 ## Group faults
 
 `concord-bench group-faults --scenario NAME --concord PATH --mihomo PATH --out DIR` runs one proxy group under one

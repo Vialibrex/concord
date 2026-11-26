@@ -23,6 +23,7 @@ mod load;
 mod masque;
 mod mitm;
 mod netstat;
+mod openvpn;
 mod origin;
 mod plan;
 mod probe;
@@ -118,6 +119,12 @@ struct RunArgs {
         help = "sing-box with QUIC support, serving the Hysteria v1 Brutal case."
     )]
     sing_box: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "CONCORD_OPENVPN",
+        help = "OpenVPN 2.6 `openvpn` binary, serving the openvpn and openvpn-tcp cases."
+    )]
+    openvpn: Option<PathBuf>,
     #[arg(help = "Comma-separated case names; replaces the tier's list.")]
     #[arg(long, value_delimiter = ',')]
     cases: Vec<String>,
@@ -566,13 +573,7 @@ fn run(args: RunArgs) -> Result<bool, String> {
     {
         return Err("hysteria-brutal needs --sing-box with QUIC support".into());
     }
-    let needs_server = attached.is_empty()
-        && plan.cases.iter().any(|c| {
-            !matches!(
-                c.name,
-                "direct" | "rematch" | "hysteria-brutal" | "masque-l4"
-            ) && !cases::is_mitm(*c)
-        });
+    let needs_server = attached.is_empty() && plan.cases.iter().any(|c| cases::needs_mihomo(*c));
     let mihomo = match mihomo {
         Some(m) => m,
         None if !needs_server => cores
@@ -708,6 +709,7 @@ fn run(args: RunArgs) -> Result<bool, String> {
         cores,
         mihomo,
         sing_box: args.sing_box,
+        openvpn: args.openvpn,
         cpus,
         netns,
         dir: out.clone(),

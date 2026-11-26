@@ -650,6 +650,7 @@ pub enum ProxyKind {
     Http(HttpProxyOpts),
     WireGuard(Box<WireGuardOpts>),
     Masque(Box<MasqueOpts>),
+    OpenVpn(Box<super::OpenVpnOpts>),
     Hysteria(Box<HysteriaOpts>),
     Ssr(SsrOpts),
     Snell(SnellOpts),
@@ -677,6 +678,7 @@ impl ProxyKind {
             ProxyKind::Http(_) => "http",
             ProxyKind::WireGuard(_) => "wireguard",
             ProxyKind::Masque(_) => "masque",
+            ProxyKind::OpenVpn(_) => "openvpn",
             ProxyKind::Hysteria(_) => "hysteria",
             ProxyKind::Ssr(_) => "ssr",
             ProxyKind::Snell(_) => "snell",
@@ -694,6 +696,7 @@ impl ProxyKind {
             | ProxyKind::Rematch(_)
             | ProxyKind::WireGuard(_) => None,
             ProxyKind::Masque(o) => Some((&o.server, o.port)),
+            ProxyKind::OpenVpn(o) => Some((&o.server, o.port)),
 
             ProxyKind::Ss(o) => Some((&o.server, o.port)),
             ProxyKind::Vmess(o) => Some((&o.server, o.port)),
