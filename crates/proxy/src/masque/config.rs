@@ -2,7 +2,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use concord_config::proxy::{IP_STACK_MODES, MasqueOpts};
+use concord_config::proxy::MasqueOpts;
 use concord_netstack::Congestion;
 use concord_quic::ObfsSpec;
 use ipnetwork::IpNetwork;
@@ -122,13 +122,6 @@ fn local_addrs(opts: &MasqueOpts, l4: bool) -> Result<Vec<IpAddr>, BuildError> {
 }
 
 fn stack_congestion(opts: &MasqueOpts) -> Result<Congestion, BuildError> {
-    if !opts.ip_stack_mode.is_empty()
-        && !IP_STACK_MODES
-            .iter()
-            .any(|mode| mode.eq_ignore_ascii_case(&opts.ip_stack_mode))
-    {
-        return Err(BuildError::invalid("invalid MASQUE IP stack mode"));
-    }
     let name = opts.ip_stack_congestion_controller.to_ascii_lowercase();
     let (congestion, implemented) = Congestion::parse(&name);
     if !implemented {

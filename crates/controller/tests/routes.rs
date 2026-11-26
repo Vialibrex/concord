@@ -536,16 +536,21 @@ async fn a_core_on_its_own_takes_the_controller_from_its_profile_and_reloads_a_p
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_tun_stack_is_reported_empty_whatever_the_profile_or_a_patch_names() {
+async fn a_tun_stack_is_neither_reported_nor_refused() {
     let rig = Rig::with_profile(true, &format!("{PROFILE}tun: {{stack: system}}\n")).await;
-    let stack = rig.call("GET", "/configs", None).await.json()["tun"]["stack"].clone();
-    assert_eq!(stack, "");
-    let patch = json!({ "tun": { "enable": false, "stack": "gvisor" } });
-    assert_eq!(rig.call("PATCH", "/configs", Some(patch)).await.status, 204);
-    let stack = rig.call("GET", "/configs", None).await.json()["tun"]["stack"].clone();
-    assert_eq!(stack, "");
-    let bogus = json!({ "tun": { "enable": false, "stack": "bogus" } });
-    assert_eq!(rig.call("PATCH", "/configs", Some(bogus)).await.status, 400);
+    let reported = |configs: Value| configs["tun"].get("stack").cloned();
+    assert_eq!(
+        reported(rig.call("GET", "/configs", None).await.json()),
+        None
+    );
+    for stack in [json!("gvisor"), json!("bogus"), json!(1)] {
+        let patch = json!({ "tun": { "enable": false, "stack": stack } });
+        assert_eq!(rig.call("PATCH", "/configs", Some(patch)).await.status, 204);
+    }
+    assert_eq!(
+        reported(rig.call("GET", "/configs", None).await.json()),
+        None
+    );
     rig.control.shutdown().await;
 }
 

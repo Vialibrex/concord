@@ -50,7 +50,6 @@
       "lan-disallowed-ips"
     ],
     "t2": [
-      "geodata-mode",
       "listeners",
       "tunnels",
       "ss-config",
@@ -68,15 +67,16 @@
       "external-ui-url",
       "external-ui-name",
       "external-doh-server",
-      "geosite-matcher",
-      "etag-support",
       "global-client-fingerprint",
       "lgbm-auto-update",
       "lgbm-update-interval",
       "lgbm-url"
     ],
     "inert": [
-      "geodata-loader"
+      "geodata-mode",
+      "geodata-loader",
+      "geosite-matcher",
+      "etag-support"
     ],
     "defaults": {
       "port": 0,
@@ -103,7 +103,6 @@
       "routing-mark": 0,
       "geo-auto-update": false,
       "geo-update-interval": 24,
-      "geodata-loader": "memconservative",
       "tcp-concurrent": false,
       "find-process-mode": "strict",
       "global-ua": "clash.meta/1.10.0",
@@ -256,7 +255,6 @@
     "t0": [
       "enable",
       "device",
-      "stack",
       "auto-route",
       "auto-detect-interface",
       "dns-hijack",
@@ -283,7 +281,6 @@
     ],
     "t2": [
       "dns-mode",
-      "gso-max-size",
       "inet6-address",
       "iproute2-table-index",
       "iproute2-rule-index",
@@ -305,16 +302,18 @@
       "exclude-mac-address",
       "endpoint-independent-nat",
       "icmp-timeout",
-      "file-descriptor",
+      "file-descriptor"
+    ],
+    "inert": [
+      "stack",
+      "gso-max-size",
       "recvmsgx",
       "sendmsgx",
       "processors-per-channel"
     ],
-    "inert": [],
     "defaults": {
       "enable": false,
       "device": "",
-      "stack": "",
       "dns-mode": "",
       "dns-hijack": [
         "0.0.0.0:53"
@@ -390,10 +389,10 @@
       "geosite"
     ],
     "t1": [],
-    "t2": [
+    "t2": [],
+    "inert": [
       "geoip"
     ],
-    "inert": [],
     "defaults": {
       "mmdb": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb",
       "asn": "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/GeoLite2-ASN.mmdb",

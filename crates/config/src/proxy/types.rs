@@ -491,8 +491,6 @@ pub struct AmneziaWgOpts {
     pub disable_cookies: bool,
 }
 
-pub const IP_STACK_MODES: [&str; 3] = ["auto", "gvisor", "mips"];
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MasqueOpts {
     pub server: String,
@@ -510,7 +508,6 @@ pub struct MasqueOpts {
     pub congestion_controller: String,
     pub cwnd: u32,
     pub bbr_profile: String,
-    pub ip_stack_mode: String,
     pub ip_stack_congestion_controller: String,
     pub remote_dns_resolve: bool,
     pub dns: Vec<String>,
@@ -521,10 +518,8 @@ pub struct WireGuardOpts {
     pub ip: String,
     pub ipv6: String,
     pub private_key: String,
-    pub workers: u32,
     pub mtu: u32,
     pub persistent_keepalive: u32,
-    pub ip_stack_mode: String,
     pub ip_stack_congestion_controller: String,
     pub amnezia: Option<AmneziaWgOpts>,
     pub peers: Vec<WgPeer>,

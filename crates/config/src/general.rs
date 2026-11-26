@@ -197,7 +197,6 @@ impl General {
         general.geo_auto_update = f.boolean("geo-auto-update")?;
         general.geo_update_interval =
             f.loose("geo-update-interval", general.geo_update_interval)?;
-        f.string("geodata-loader")?;
         general.external_controller = f.string("external-controller")?;
         general.secret = f.string("secret")?;
         if let Some(mut cors) = f.sub("external-controller-cors")? {

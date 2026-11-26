@@ -1,7 +1,5 @@
-use concord_common::options::is_tun_stack;
-
 use crate::Map;
-use crate::error::{ConfigError, Result};
+use crate::error::Result;
 use crate::lenient::Fields;
 use crate::net::{IpCidr, parse_cidr};
 
@@ -57,9 +55,6 @@ fn narrow<T: TryFrom<i128>>(values: Vec<i128>) -> Vec<T> {
 impl TunConfig {
     pub fn from_map(map: &Map) -> Result<TunConfig> {
         let mut f = Fields::new(map, "tun", false);
-        if !is_tun_stack(&f.string("stack")?) {
-            return Err(ConfigError::new("invalid tun stack"));
-        }
         Ok(TunConfig {
             enable: f.boolean("enable")?,
             device: f.string("device")?,
@@ -101,17 +96,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn a_stack_name_is_checked_and_reads_as_the_same_tun() {
+    fn the_defaults_route_and_hijack_dns() {
         let tun = TunConfig::from_map(&tun_defaults()).unwrap();
         assert!(!tun.enable && tun.auto_route && tun.auto_detect_interface);
         assert_eq!(tun.dns_hijack, ["0.0.0.0:53"]);
-        let mut map = tun_defaults();
-        for stack in ["System", "gvisor", "MIXED", "mips"] {
-            map.insert("stack".into(), json!(stack));
-            assert_eq!(TunConfig::from_map(&map).unwrap(), tun, "{stack}");
-        }
-        map.insert("stack".into(), json!("bogus"));
-        assert!(TunConfig::from_map(&map).is_err());
     }
 
     #[test]

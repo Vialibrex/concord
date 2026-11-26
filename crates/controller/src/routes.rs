@@ -2,9 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use concord_api::{
-    Control, ControlService, Delivery, Origin, Reload, is_tun_stack, valid_status_ranges,
-};
+use concord_api::{Control, ControlService, Delivery, Origin, Reload, valid_status_ranges};
 use concord_proto::types::{
     ConfigPatchParams, ConnectionCloseParams, CoreEvent, DelayRunEvent, DelayRunParams,
     DelayTestParams, DnsQueryParams, Empty, EventsWatchParams, GeoUpdateParams, ProviderKind,
@@ -701,11 +699,6 @@ fn patch_params(body: &Map<String, Value>, host_owned: bool) -> Result<ConfigPat
                     .filter(|(key, value)| !value.is_null() && !TUN_KEYS.contains(&key.as_str()))
                     .map(|(key, _)| format!("tun.{key}")),
             );
-            match tun.get("stack") {
-                None | Some(Value::Null) => {}
-                Some(Value::String(stack)) if is_tun_stack(stack) => {}
-                Some(_) => return Err(Refusal::Invalid),
-            }
             params.tun = Some(TunPatch {
                 enable: tun.get("enable").and_then(Value::as_bool).unwrap_or(false),
                 device: tun
@@ -852,15 +845,17 @@ mod tests {
     }
 
     #[test]
-    fn a_tun_stack_is_checked_and_patches_nothing() {
+    fn a_tun_stack_patches_nothing() {
         let without = patch_params(&object(json!({ "tun": { "enable": true } })), false).ok();
-        for stack in ["System", "gvisor", "mixed", "Mips", ""] {
+        for stack in [
+            json!("System"),
+            json!("bogus"),
+            json!(""),
+            json!(1),
+            json!({}),
+        ] {
             let body = object(json!({ "tun": { "enable": true, "stack": stack } }));
             assert_eq!(patch_params(&body, false).ok(), without, "{stack}");
-        }
-        for stack in [json!("bogus"), json!(1)] {
-            let body = object(json!({ "tun": { "enable": true, "stack": stack } }));
-            assert!(matches!(patch_params(&body, false), Err(Refusal::Invalid)));
         }
     }
 

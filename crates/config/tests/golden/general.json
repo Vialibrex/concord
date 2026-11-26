@@ -28,7 +28,6 @@
   "routing-mark": 6666,
   "geo-auto-update": true,
   "geo-update-interval": 12,
-  "geodata-loader": "memconservative",
   "tcp-concurrent": true,
   "find-process-mode": "always",
   "global-ua": "clash.meta/1.10.0",
@@ -38,6 +37,7 @@
   "proxy-providers": null,
   "rule-providers": null,
   "sub-rules": null,
+  "geodata-mode": false,
   "proxies": [],
   "proxy-groups": [],
   "rule": [],
@@ -92,7 +92,6 @@
   "tun": {
     "enable": false,
     "device": "",
-    "stack": "",
     "dns-mode": "",
     "dns-hijack": [
       "0.0.0.0:53"
@@ -131,9 +130,6 @@
     "store-fake-ip": false
   },
   "experimental": {
-    "fingerprints": null,
-    "quic-go-disable-gso": false,
-    "quic-go-disable-ecn": true,
     "dialer-ip4p-convert": false
   },
   "tls": {
@@ -156,6 +152,5 @@
     "h2": false,
     "limits": {}
   },
-  "global-client-fingerprint": "chrome",
-  "geodata-mode": false
+  "global-client-fingerprint": "chrome"
 }

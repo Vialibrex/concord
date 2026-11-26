@@ -1,6 +1,6 @@
-//! The tiers in `keys.rs` are claims about behaviour: a T0 or T1 key changes what loads, or refuses
-//! what it cannot take, a T2 key is warned about, an inert key does neither, and anything else is
-//! unknown. A key added to a tier without a sample here fails the test.
+//! The tiers in `keys.rs` are claims about behaviour: a T0 or T1 key changes what loads, a T2 key
+//! is warned about, an inert key does neither, and anything else is unknown. A key added to a
+//! tier without a sample here fails the test.
 
 use concord_config::keys::{SECTIONS, Tier};
 use concord_config::{LoadOptions, Profile, load_str};
@@ -150,7 +150,6 @@ const SAMPLES: &[(&str, &str)] = &[
     ),
     ("tun.enable", "tun: {enable: true}"),
     ("tun.device", "tun: {device: utun9}"),
-    ("tun.stack", "tun: {stack: gvisor}"),
     ("tun.auto-route", "tun: {auto-route: false}"),
     (
         "tun.auto-detect-interface",
@@ -238,8 +237,6 @@ const SAMPLES: &[(&str, &str)] = &[
         "geox-url: {geosite: \"https://a.test/s.dat\"}",
     ),
     ("profile.store-fake-ip", "profile: {store-fake-ip: true}"),
-    ("geodata-loader", "geodata-loader: standard"),
-    ("profile.store-selected", "profile: {store-selected: false}"),
 ];
 
 /// What a sample is compared with when its key is read only beside another, which the sample
@@ -284,15 +281,16 @@ fn nested(path: &str, value: &str) -> String {
     text
 }
 
-/// Keys every accepted value of which loads the same, with a value each refuses.
-const REFUSALS: &[(&str, &str)] = &[("tun.stack", "tun: {stack: bogus}")];
-
 type Loaded = (String, Vec<(String, &'static str)>);
 
-/// What loads, without the report, and the report's codes by path.
 fn loaded(text: &str) -> Result<Loaded, String> {
+    loaded_with(text, &LoadOptions::default())
+}
+
+/// What loads, without the report, and the report's codes by path.
+fn loaded_with(text: &str, options: &LoadOptions) -> Result<Loaded, String> {
     let mut profile: Profile =
-        load_str(text, &LoadOptions::default()).map_err(|err| format!("does not load: {err}"))?;
+        load_str(text, options).map_err(|err| format!("does not load: {err}"))?;
     let report = std::mem::take(&mut profile.report);
     let warnings = report
         .warnings
@@ -324,16 +322,8 @@ fn every_applied_key_changes_what_loads() {
                     continue;
                 }
             };
-            let refusal = REFUSALS.iter().find(|(name, _)| *name == path);
-            match refusal {
-                Some((_, text)) if loaded(text).is_ok() => {
-                    failures.push(format!("{path}: loads {text}"));
-                }
-                Some(_) => {}
-                None if applied == empty => {
-                    failures.push(format!("{path}: loads the same as without it"));
-                }
-                None => {}
+            if applied == empty {
+                failures.push(format!("{path}: loads the same as without it"));
             }
             if let Some((_, code)) = warnings
                 .iter()
@@ -347,8 +337,7 @@ fn every_applied_key_changes_what_loads() {
 }
 
 #[test]
-fn every_unsupported_key_is_warned_and_every_inert_key_is_not() {
-    let (empty, _) = loaded("").unwrap();
+fn every_unsupported_key_is_warned() {
     let mut failures = Vec::new();
     for (section, tiers) in SECTIONS {
         for key in tiers.t2 {
@@ -358,17 +347,36 @@ fn every_unsupported_key_is_warned_and_every_inert_key_is_not() {
                 other => failures.push(format!("{path}: not warned ({other:?})")),
             }
         }
-        for key in tiers.inert {
-            let path = path(section, key);
-            match sample(&path).and_then(loaded) {
-                Ok((applied, warnings)) if applied == empty && warnings.is_empty() => {}
-                other => failures.push(format!("{path}: has an effect or a warning ({other:?})")),
-            }
-        }
         let path = path(section, "no-such-key");
         match loaded(&nested(&path, "true")) {
             Ok((_, warnings)) if warnings.contains(&(path.clone(), "unknown_key")) => {}
             other => failures.push(format!("{path}: not reported unknown ({other:?})")),
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn an_inert_key_takes_any_value_without_an_effect_or_a_warning() {
+    let mut failures = Vec::new();
+    for android in [false, true] {
+        let options = LoadOptions {
+            android,
+            ..LoadOptions::default()
+        };
+        let (empty, _) = loaded_with("", &options).unwrap();
+        for (section, tiers) in SECTIONS {
+            for key in tiers.inert {
+                let path = path(section, key);
+                for value in ["true", "bogus", "1", "[a]", "{a: 1}", "null"] {
+                    match loaded_with(&nested(&path, value), &options) {
+                        Ok((applied, warnings)) if applied == empty && warnings.is_empty() => {}
+                        other => {
+                            failures.push(format!("{path}: {value}, android {android}: {other:?}"))
+                        }
+                    }
+                }
+            }
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");

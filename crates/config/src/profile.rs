@@ -412,36 +412,7 @@ fn resolve_groups(
     Ok((groups, refused))
 }
 
-fn warn_tun_stack(tun: &Map, enabled: bool, report: &mut LoadReport) {
-    let stack = tun.get("stack").and_then(Value::as_str).unwrap_or_default();
-    if enabled
-        && ["mixed", "system"]
-            .iter()
-            .any(|name| name.eq_ignore_ascii_case(stack))
-    {
-        report.warn(
-            "tun_stack_fallback",
-            "tun.stack",
-            format!("Concord has one TUN stack, its own userspace stack, so {stack} runs on it"),
-        );
-    }
-}
-
 fn warn_ignored_sections(raw: &RawConfig, report: &mut LoadReport) {
-    let differs = |map: &Map, key: &str, default: bool| {
-        map.get(key)
-            .and_then(crate::lenient::to_bool)
-            .is_some_and(|value| value != default)
-    };
-    if differs(&raw.experimental, "quic-go-disable-gso", false)
-        || differs(&raw.experimental, "quic-go-disable-ecn", true)
-    {
-        report.warn(
-            "not_applied",
-            "experimental",
-            "quic-go-disable-gso and quic-go-disable-ecn are not applied by this core",
-        );
-    }
     for key in [
         "certificate",
         "private-key",
@@ -477,9 +448,6 @@ pub fn load_raw(mut raw: RawConfig, options: &LoadOptions) -> Result<Profile> {
     let geo = GeoConfig::from_map(&raw.geox_url)?;
     let hosts = parse_hosts(&raw.hosts, &mut report)?;
 
-    if !options.android {
-        warn_tun_stack(&raw.tun, tun.enable, &mut report);
-    }
     warn_ignored_sections(&raw, &mut report);
     if dns.enable {
         for (key, iface) in dns.dhcp_interfaces() {
@@ -908,18 +876,6 @@ proxy-groups:
     }
 
     #[test]
-    fn a_tun_stack_that_is_not_run_as_named_is_warned() {
-        for stack in ["mixed", "System"] {
-            let text = format!("tun:\n  enable: true\n  stack: {stack}\n");
-            assert_eq!(warned_paths(&text, false), ["tun.stack"], "{stack}");
-            assert!(warned_paths(&text, true).is_empty(), "{stack} on android");
-        }
-        assert!(warned_paths("tun:\n  enable: true\n  stack: mips\n", false).is_empty());
-        assert!(warned_paths("tun:\n  enable: false\n  stack: system\n", false).is_empty());
-        assert!(warned_paths("tun:\n  enable: true\n  gso: true\n", false).is_empty());
-    }
-
-    #[test]
     fn a_rule_provider_path_in_bundle_is_warned_and_the_provider_kept() {
         let text = "rule-providers:\n  cn: {type: http, behavior: domain, format: mrs, url: \"https://a.test/cn.mrs\", path: ./cn.mrs, path-in-bundle: geo/geosite/cn.mrs}\n  \
                     own: {type: inline, behavior: domain, payload: [a.test], path-in-bundle: x}\n\
@@ -1149,17 +1105,29 @@ proxy-groups:
     }
 
     #[test]
+    fn experimental_keys_for_quic_go_take_any_value_without_an_effect_or_a_warning() {
+        let loaded = |text: &str| {
+            let mut profile = load_text(text).unwrap();
+            let report = std::mem::take(&mut profile.report);
+            (format!("{profile:?}"), report.warnings)
+        };
+        let empty = loaded("");
+        for key in ["quic-go-disable-gso", "quic-go-disable-ecn", "fingerprints"] {
+            for value in ["true", "false", "bogus", "[a]", "{a: 1}", "null"] {
+                let text = format!("experimental:\n  {key}: {value}\n");
+                assert_eq!(loaded(&text), empty, "{key}: {value}");
+            }
+        }
+    }
+
+    #[test]
     fn settings_that_are_not_applied_are_warned_unless_they_are_the_defaults() {
         assert!(
             warned_paths(
-                "experimental:\n  quic-go-disable-gso: false\n  quic-go-disable-ecn: true\ntls:\n  certificate: \"\"\n  custom-certifactes: []\n",
+                "tls:\n  certificate: \"\"\n  custom-certifactes: []\n",
                 false
             )
             .is_empty()
-        );
-        assert_eq!(
-            warned_paths("experimental:\n  quic-go-disable-ecn: false\n", false),
-            ["experimental"]
         );
         assert_eq!(
             warned_paths("tls:\n  certificate: server.crt\n  ech-key: k\n", false),
@@ -1205,25 +1173,6 @@ proxy-groups:
         let text = "allow-lan: true\nbind-address: 192.168.1.2\nlan-allowed-ips: [192.168.0.0/16]\nlan-disallowed-ips: [192.168.1.1/32]\n";
         assert!(warned_paths(text, false).is_empty());
         assert_eq!(load_text(text).unwrap().general.lan_allowed_ips.len(), 1);
-    }
-
-    #[test]
-    fn asking_for_geoip_dat_warns() {
-        let warned = |text: &str| -> Vec<String> {
-            load_text(text)
-                .unwrap()
-                .report
-                .warnings
-                .iter()
-                .map(|warning| warning.path.clone())
-                .collect()
-        };
-        assert_eq!(warned("geodata-mode: true\n"), ["geodata-mode"]);
-        assert!(warned("geodata-mode: false\n").is_empty());
-        assert_eq!(
-            warned("geox-url:\n  geoip: http://x/geoip.dat\n"),
-            ["geox-url.geoip"]
-        );
     }
 
     #[test]

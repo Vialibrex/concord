@@ -116,14 +116,3 @@ impl FindProcessMode {
 }
 
 pub const CONGESTION_CONTROLLERS: [&str; 3] = ["cubic", "reno", "bbr"];
-
-/// mihomo's TUN stack names (`constant/tun.go`). Each is accepted and runs as Concord's one
-/// userspace stack.
-pub const TUN_STACKS: [&str; 4] = ["gvisor", "system", "mixed", "mips"];
-
-pub fn is_tun_stack(name: &str) -> bool {
-    name.is_empty()
-        || TUN_STACKS
-            .iter()
-            .any(|stack| stack.eq_ignore_ascii_case(name))
-}

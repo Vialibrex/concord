@@ -702,7 +702,6 @@ fn parse_wireguard(f: &mut Fields<'_>) -> R<WireGuardOpts> {
         ip: f.string("ip")?,
         ipv6: f.string("ipv6")?,
         private_key,
-        workers: f.loose("workers", 0)?,
         mtu: f.loose("mtu", 0)?,
         persistent_keepalive: f.loose("persistent-keepalive", 0)?,
         remote_dns_resolve: f.boolean("remote-dns-resolve")?,
@@ -711,7 +710,6 @@ fn parse_wireguard(f: &mut Fields<'_>) -> R<WireGuardOpts> {
         ..WireGuardOpts::default()
     };
     if let Some(mut stack) = f.sub("ip-stack")? {
-        out.ip_stack_mode = stack.string("mode")?;
         out.ip_stack_congestion_controller = stack.string("congestion-controller")?;
     }
     if let Some(mut a) = f.sub("amnezia-wg-option")? {
@@ -1286,6 +1284,39 @@ mod tests {
             )
             .contains("short ID")
         );
+    }
+
+    #[test]
+    fn a_go_stack_choice_takes_any_value_without_an_effect_or_a_warning() {
+        let wireguard = json!({"name": "w", "type": "wireguard", "server": "x", "port": 51820,
+            "private-key": "k", "public-key": "p", "ip": "10.0.0.2"});
+        let masque = json!({"name": "m", "type": "masque", "server": "x", "port": 443,
+            "private-key": "k", "public-key": "p", "ip": "10.0.0.2"});
+        let values = [
+            json!("gvisor"),
+            json!("bogus"),
+            json!(1),
+            json!([1]),
+            json!({}),
+        ];
+        for (base, key) in [
+            (&wireguard, "ip-stack"),
+            (&wireguard, "workers"),
+            (&masque, "ip-stack"),
+        ] {
+            let without = def(base.clone());
+            for value in &values {
+                let mut node = base.clone();
+                node[key] = if key == "ip-stack" {
+                    json!({"mode": value})
+                } else {
+                    value.clone()
+                };
+                let with = def(node);
+                assert!(with.ignored.is_empty(), "{key}: {value}");
+                assert_eq!(with.kind, without.kind, "{key}: {value}");
+            }
+        }
     }
 
     #[test]

@@ -240,7 +240,7 @@ mod tests {
         let path = dir.path().join("config.yaml");
         std::fs::write(
             &path,
-            "geodata-mode: true\ntun: {enable: true, congestion-controller: bbr3}\n",
+            "inbound-tfo: true\ntun: {enable: true, congestion-controller: bbr3}\n",
         )
         .unwrap();
         let path = path.to_string_lossy().into_owned();
@@ -248,7 +248,7 @@ mod tests {
             warnings.into_iter().map(|w| (w.path, w.code)).collect()
         };
         let desktop = codes(check_config(path.clone(), false).await.unwrap());
-        assert!(desktop.contains(&("geodata-mode".into(), "unsupported_key")));
+        assert!(desktop.contains(&("inbound-tfo".into(), "unsupported_key")));
         assert!(desktop.contains(&("tun.congestion-controller".into(), "not_applied")));
         let android = codes(check_config(path, true).await.unwrap());
         assert!(!android.iter().any(|(path, _)| path.starts_with("tun.")));

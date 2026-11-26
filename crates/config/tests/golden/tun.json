@@ -23,7 +23,6 @@
   "routing-mark": 0,
   "geo-auto-update": false,
   "geo-update-interval": 24,
-  "geodata-loader": "memconservative",
   "tcp-concurrent": false,
   "find-process-mode": "strict",
   "global-ua": "clash.meta/1.10.0",
@@ -87,13 +86,13 @@
   "tun": {
     "enable": true,
     "device": "utun9",
-    "stack": "mixed",
     "dns-mode": "",
     "dns-hijack": [
       "any:53"
     ],
     "auto-route": true,
     "auto-detect-interface": true,
+    "stack": "mixed",
     "strict-route": true,
     "mtu": 1500,
     "gso": true,
@@ -145,9 +144,6 @@
     "store-fake-ip": false
   },
   "experimental": {
-    "fingerprints": null,
-    "quic-go-disable-gso": false,
-    "quic-go-disable-ecn": true,
     "dialer-ip4p-convert": false
   },
   "tls": {

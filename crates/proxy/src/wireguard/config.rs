@@ -6,7 +6,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use concord_common::Address;
-use concord_config::proxy::{IP_STACK_MODES, WgPeer, WireGuardOpts, wireguard_dns};
+use concord_config::proxy::{WgPeer, WireGuardOpts, wireguard_dns};
 use ipnetwork::{IpNetwork, Ipv4Network, Ipv6Network};
 
 use super::amnezia::Settings;
@@ -182,12 +182,6 @@ pub(super) fn parse(opts: &WireGuardOpts) -> Result<WgConfig, BuildError> {
             )));
         }
         tracing::warn!("wireguard congestion-controller {name} is not available, using cubic");
-    }
-    let mode = opts.ip_stack_mode.to_ascii_lowercase();
-    if !mode.is_empty() && !IP_STACK_MODES.contains(&mode.as_str()) {
-        return Err(BuildError::invalid(format!(
-            "invalid IP stack mode {mode:?}; expected auto, gvisor, or mips"
-        )));
     }
     let remote_dns = if opts.remote_dns_resolve && !opts.dns.is_empty() {
         let servers: Vec<DnsServer> = opts

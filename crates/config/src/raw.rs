@@ -259,8 +259,7 @@ impl RawConfig {
                         scalars.insert(key, value);
                     }
                     Some(Tier::T2) => {
-                        let geodata_off = other == "geodata-mode" && value == Value::Bool(false);
-                        if asks_for_something(&value) && !geodata_off {
+                        if asks_for_something(&value) {
                             raw.report.warn(
                                 "unsupported_key",
                                 other,
@@ -514,7 +513,7 @@ mod tests {
         assert_eq!(get("ipv6"), true);
         assert_eq!(get("find-process-mode"), "strict");
         assert_eq!(get("geo-update-interval"), 24);
-        assert_eq!(get("geodata-loader"), "memconservative");
+        assert_eq!(get("geodata-loader"), Value::Null);
         assert_eq!(get("authentication"), serde_json::json!([]));
         assert_eq!(get("skip-auth-prefixes"), Value::Null);
         assert_eq!(get("dns.enhanced-mode"), "redir-host");
@@ -533,7 +532,7 @@ mod tests {
             get("dns.nameserver"),
             serde_json::json!(["https://doh.pub/dns-query", "tls://223.5.5.5:853"])
         );
-        assert_eq!(get("tun.stack"), "");
+        assert_eq!(get("tun.stack"), Value::Null);
         assert_eq!(get("tun.dns-hijack"), serde_json::json!(["0.0.0.0:53"]));
         assert_eq!(get("tun.auto-route"), true);
         assert_eq!(get("ntp.server"), "time.apple.com");
@@ -547,7 +546,7 @@ mod tests {
             get("geox-url.mmdb"),
             "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb"
         );
-        assert_eq!(get("experimental.quic-go-disable-ecn"), true);
+        assert_eq!(get("experimental.quic-go-disable-ecn"), Value::Null);
         assert_eq!(get("hosts"), serde_json::json!({}));
         assert_eq!(get("rule"), serde_json::json!([]));
         assert_eq!(get("proxies"), serde_json::json!([]));
@@ -623,11 +622,11 @@ mod tests {
 
     #[test]
     fn unknown_and_t2_keys_are_kept_and_reported() {
-        let raw = parse_raw(b"listeners:\n  - {name: a, type: mixed, port: 1}\nfoo: bar\ntun:\n  enable: true\n  gso-max-size: 4\n").unwrap();
+        let raw = parse_raw(b"listeners:\n  - {name: a, type: mixed, port: 1}\nfoo: bar\ntun:\n  enable: true\n  icmp-timeout: 4\n").unwrap();
         let json = raw.to_json();
         assert_eq!(json["foo"], "bar");
         assert_eq!(json["listeners"][0]["name"], "a");
-        assert_eq!(json["tun"]["gso-max-size"], 4);
+        assert_eq!(json["tun"]["icmp-timeout"], 4);
         let paths: Vec<&str> = raw
             .report
             .warnings
@@ -636,7 +635,7 @@ mod tests {
             .collect();
         assert!(paths.contains(&"listeners"));
         assert!(paths.contains(&"foo"));
-        assert!(paths.contains(&"tun.gso-max-size"));
+        assert!(paths.contains(&"tun.icmp-timeout"));
     }
 
     #[test]

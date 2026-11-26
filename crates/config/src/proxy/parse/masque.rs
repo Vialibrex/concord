@@ -33,7 +33,6 @@ pub(super) fn parse(f: &mut Fields<'_>) -> R<MasqueOpts> {
     // mihomo accepts this placeholder but pins the endpoint key instead of its name.
     f.string("name-cert-verify")?;
     if let Some(mut stack) = f.sub("ip-stack")? {
-        out.ip_stack_mode = stack.string("mode")?;
         out.ip_stack_congestion_controller = stack.string("congestion-controller")?;
     }
     Ok(out)

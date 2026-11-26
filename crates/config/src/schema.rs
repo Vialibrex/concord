@@ -15,8 +15,7 @@ fn key_tiers(tiers: &keys::Tiers, defaults: Value) -> Value {
     json!({"t0": tiers.t0, "t1": tiers.t1, "t2": tiers.t2, "inert": tiers.inert, "defaults": defaults})
 }
 
-/// What a profile that leaves a key out gets: mihomo's default,
-/// or empty for `tun.stack`, a choice Concord does not have.
+/// What a profile that leaves a key out gets, which is mihomo's default.
 fn section_defaults(section: &str) -> Value {
     let dns = keys::dns_defaults();
     Value::Object(match section {
@@ -128,7 +127,8 @@ mod tests {
             schema["keys"]["t0"].as_array().map(Vec::len),
             Some(keys::TOP_T0.len())
         );
-        assert_eq!(schema["keys"]["inert"], json!(["geodata-loader"]));
+        assert_eq!(schema["keys"]["inert"], json!(keys::TOP.inert));
+        assert_eq!(schema["geox-url"]["inert"], json!(["geoip"]));
         assert_eq!(
             schema["rule-types"]["t0"].as_array().map(Vec::len),
             Some(30)
@@ -188,8 +188,10 @@ mod tests {
     #[test]
     fn a_stack_name_is_never_offered_because_every_name_runs_the_same_stack() {
         let schema = config_schema();
-        assert_eq!(schema["tun"]["defaults"]["stack"], "");
+        assert!(schema["tun"]["defaults"].get("stack").is_none());
         assert!(schema["tun"]["values"].get("stack").is_none());
+        assert_eq!(schema["tun"]["inert"], json!(keys::TUN.inert));
+        assert!(keys::TUN.inert.contains(&"stack"));
         assert!(schema["proxy-values"].get("ip-stack.mode").is_none());
         assert_eq!(
             listed("tun", "congestion-controller"),

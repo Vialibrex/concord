@@ -10,7 +10,7 @@ deliberate differences, what is left out, and what is supported only in part.
 | The profile is rejected, and the built-in empty config runs instead, routing everything direct | The profile is wrong: an unknown or malformed rule, an illegal field, a reference to something that does not exist |
 | The node is set aside with a warning | The node uses something Concord does not support, or its options cannot be built into a working node (a certificate that cannot be read, a malformed fingerprint pin, REALITY over `ws`). A group left empty by this, or whose selected node was set aside, refuses connections instead of falling back to another member; `empty-fallback` applies when given |
 | The key is ignored with a warning | It does not change where traffic goes |
-| The key is accepted with no effect and no warning | It changes nothing mihomo's results depend on either, or the host owns it: `geodata-loader` (how much of a `.dat` file mihomo keeps in memory while reading it) and `profile.store-selected` (see Not Supported) |
+| The key is accepted with no effect and no warning | It only picks how mihomo does something that Concord does its own way, such as `geodata-mode`, `geox-url.geoip`, `geodata-loader`, `geosite-matcher`, `etag-support`, `tun.stack` and the TUN's `gso-max-size`, `recvmsgx`, `sendmsgx` and `processors-per-channel`, or the host owns it, such as `profile.store-selected` (see Not Supported) |
 
 A key that a node's type does not have in mihomo, such as `reality-opts` on `hysteria2` or `alpn` on `socks5`, is
 ignored with a warning, as is a `smux` that is not a map. A number mihomo keeps without checking its range, such as
@@ -37,7 +37,7 @@ mihomo; a key that only uses one, such as `copy: *domain`, is still unknown.
 | Dashboard changes in an app that embeds Concord | mihomo's embedded builds refuse `PUT`/`PATCH /configs` and the geo update | Allowed, except `PUT /configs` and `tun` in `PATCH /configs`, which belong to the app; the app is told of every change so it stays in step |
 | Dial retries | Up to 10 per connection within 5 s | None: one dial per connection, as sing-box does; a failed dial fails the connection. A smart group is the exception: after a node-level failure it redials up to two more of its members within the same 5 s, unless a selection holds it on one member |
 | UDP routing | The first packet from a source decides the route for all its destinations | Each destination is routed by the rules; flows that reach one outbound share its session, so the external mapping stays endpoint-independent. Single-destination protocols such as plain VMess are the exception |
-| `GEOIP` | Reads the mmdb or `GeoIP.dat` | Reads the mmdb only; `geodata-mode: true` and `geox-url.geoip` are ignored with a warning, and a code that only a custom `GeoIP.dat` held does not match. `GEOIP,!cn` negates against the mmdb |
+| `GEOIP` | Reads the mmdb or `GeoIP.dat` | Reads the mmdb only; `geodata-mode` and `geox-url.geoip` are ignored, and a code that only a custom `GeoIP.dat` held does not match. `GEOIP,!cn` negates against the mmdb |
 | `IP-ASN` and `SRC-IP-ASN` without `ASN.mmdb` | The apply downloads the file and fails if the download does | The apply goes ahead; the rules match nothing until the file, fetched in the background and retried, loads, and a `NOT` around one does not turn that into a match |
 | `dns.fake-ip-filter` left out | `dns.msftnsci.com`, `www.msftnsci.com` and `www.msftconnecttest.com`; the first two misspell the domain of Windows' connectivity check, so they never match it | `dns.msftncsi.com`, `www.msftncsi.com` and `www.msftconnecttest.com`, so the check gets a real address |
 | `dns.fallback-filter` left out | `geoip: true`, `geoip-code: CN` | `geoip: false` and no code, so no region is singled out; `geoip: true` without a `geoip-code` skips the GeoIP filter with a warning |
@@ -139,10 +139,10 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
 - `/version` reports Concord's version with `meta: true`. Dashboards compare it with mihomo's releases, so they may
   offer a core update; the update itself answers 501.
 - `/rules` has no hit counters (`extra`), and `size` is always -1.
-- The `tun` object of `GET /configs` carries `enable`, `device`, `stack`, `dns-hijack`, `auto-route`,
-  `auto-detect-interface` and `mtu`; `stack` is always empty, since Concord has one TUN stack (see TUN below), and
-  a `PATCH /configs` that names one of mihomo's stacks changes nothing. Settings Concord does not have keep mihomo's
-  zero values, and mihomo's defaults for the TUN addresses, `recvmsgx` and `processors-per-channel` are not reported.
+- The `tun` object of `GET /configs` carries `enable`, `device`, `dns-hijack`, `auto-route`,
+  `auto-detect-interface` and `mtu`, and no `stack`, since Concord has one TUN stack (see TUN below); a
+  `PATCH /configs` ignores any `tun.stack`. Settings Concord does not have keep mihomo's
+  zero values, and mihomo's defaults for the TUN addresses are not reported.
 - An empty list is `[]` where mihomo writes `null` (`authentication`, `skip-auth-prefixes`, `lan-disallowed-ips`,
   `dns-hijack`, and `connections` with none open).
 
@@ -191,8 +191,9 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   a live WARP enrollment is not part of those tests. `remote-dns-resolve` currently accepts literal UDP/TCP
   nameservers (L4 requires `tcp://`); encrypted or hostname nameservers are rejected when building the node.
   The native IP stack implements Cubic, Reno and BBR (BBR v1 with pacing, as in the TUN); `bbr3` selects Cubic
-  with a warning, and every `ip-stack.mode` (`auto`, `gvisor`, `mips`) runs the same native stack, for WireGuard
-  too. The IP stack keeps the configured MTU; each H3 packet is checked against the current
+  with a warning. `ip-stack.mode`, which picks one of mihomo's Go stacks, is ignored without a warning, whatever
+  its value, as is WireGuard's `workers`, the goroutine count of wireguard-go; WireGuard runs on the same native
+  stack. The IP stack keeps the configured MTU; each H3 packet is checked against the current
   QUIC datagram capacity and oversized packets are dropped without retiring the tunnel or returning PMTU ICMP.
   H2 drops received capsules larger than the configured MTU. The `masque-l4` benchmark uses a local H3
   CONNECT peer and covers TCP.
@@ -223,9 +224,8 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   the device supports it, whatever `tun.gso` says (mihomo uses it only with `gso: true`); `gso: false` gets a warning
   that offload stays on. Other platforms have no offload in either core. `tun.congestion-controller` takes `cubic`
   (the default), `reno` and `bbr`; `bbr` is BBR v1 with pacing, ported from sing-tun's Go stack as that ports Linux
-  `tcp_bbr.c`. `bbr3` runs as CUBIC with a warning. `tun.stack` takes mihomo's `gvisor`, `system`, `mixed` and
-  `mips`, and each runs Concord's own userspace stack; `system` and `mixed` get a warning on the desktop, as they
-  would leave TCP to the kernel. On Windows
+  `tcp_bbr.c`. `bbr3` runs as CUBIC with a warning. `tun.stack` is ignored without a warning, whatever its
+  value: Concord has one TUN stack, its own userspace stack. On Windows
   the interface's forwarding, router-discovery, DAD and DNS-registration options are not set. `tun.dns-mode` is not
   read: with `auto-route` the TUN becomes the system resolver on every desktop platform, macOS included, where mihomo
   leaves it off unless `dns-mode` asks; the macOS entry lives in the dynamic store and goes away with the process.

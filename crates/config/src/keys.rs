@@ -40,19 +40,40 @@ const fn tiers(
     Tiers { t0, t1, t2, inert }
 }
 
-/// mihomo's `geodata.SetLoader` only picks how much of a `.dat` file stays in memory.
-const TOP_INERT: &[&str] = &["geodata-loader"];
+/// What each picks in mihomo has no counterpart here: whether GEOIP reads `GeoIP.dat` instead of the
+/// mmdb, how much of a `.dat` file stays in memory, how a geosite list is matched, and whether a
+/// download is skipped on an unchanged ETag.
+const TOP_INERT: &[&str] = &[
+    "geodata-mode",
+    "geodata-loader",
+    "geosite-matcher",
+    "etag-support",
+];
+
+/// Where mihomo fetches `GeoIP.dat` for `geodata-mode`.
+const GEOX_INERT: &[&str] = &["geoip"];
 
 /// The host saves the selected nodes and hands them back with each profile it applies.
 const PROFILE_INERT: &[&str] = &["store-selected"];
 
+/// How mihomo's stacks run: which stack, gVisor's goroutines per channel, the most it hands the
+/// kernel in one GSO write, and which darwin syscalls move packets. Concord has one stack of its
+/// own.
+const TUN_INERT: &[&str] = &[
+    "stack",
+    "gso-max-size",
+    "recvmsgx",
+    "sendmsgx",
+    "processors-per-channel",
+];
+
 pub const TOP: Tiers = tiers(TOP_T0, TOP_T1, TOP_T2, TOP_INERT);
 pub const DNS: Tiers = tiers(DNS_T0, DNS_T1, &[], &[]);
 pub const FALLBACK_FILTER_TIERS: Tiers = tiers(FALLBACK_FILTER, &[], &[], &[]);
-pub const TUN: Tiers = tiers(TUN_T0, TUN_T1, TUN_T2, &[]);
+pub const TUN: Tiers = tiers(TUN_T0, TUN_T1, TUN_T2, TUN_INERT);
 pub const SNIFFER: Tiers = tiers(SNIFFER_T0, SNIFFER_T1, SNIFFER_T2, &[]);
 pub const NTP: Tiers = tiers(NTP_KEYS, &[], &[], &[]);
-pub const GEOX: Tiers = tiers(GEOX_KEYS, &[], GEOX_T2, &[]);
+pub const GEOX: Tiers = tiers(GEOX_KEYS, &[], &[], GEOX_INERT);
 pub const PROFILE: Tiers = tiers(
     &["store-fake-ip"],
     &[],
@@ -165,7 +186,6 @@ pub const TOP_T1: &[&str] = &[
 ];
 
 pub const TOP_T2: &[&str] = &[
-    "geodata-mode",
     "listeners",
     "tunnels",
     "ss-config",
@@ -183,8 +203,6 @@ pub const TOP_T2: &[&str] = &[
     "external-ui-url",
     "external-ui-name",
     "external-doh-server",
-    "geosite-matcher",
-    "etag-support",
     "global-client-fingerprint",
     "lgbm-auto-update",
     "lgbm-update-interval",
@@ -230,7 +248,6 @@ pub const FALLBACK_FILTER: &[&str] = &["geoip", "geoip-code", "geosite", "ipcidr
 pub const TUN_T0: &[&str] = &[
     "enable",
     "device",
-    "stack",
     "auto-route",
     "auto-detect-interface",
     "dns-hijack",
@@ -259,7 +276,6 @@ pub const TUN_T1: &[&str] = &[
 
 pub const TUN_T2: &[&str] = &[
     "dns-mode",
-    "gso-max-size",
     "inet6-address",
     "iproute2-table-index",
     "iproute2-rule-index",
@@ -282,9 +298,6 @@ pub const TUN_T2: &[&str] = &[
     "endpoint-independent-nat",
     "icmp-timeout",
     "file-descriptor",
-    "recvmsgx",
-    "sendmsgx",
-    "processors-per-channel",
 ];
 
 /// TUN_T2 keys that narrow or widen what the TUN captures.
@@ -331,7 +344,6 @@ pub const NTP_KEYS: &[&str] = &[
 ];
 
 pub const GEOX_KEYS: &[&str] = &["mmdb", "asn", "geosite"];
-pub const GEOX_T2: &[&str] = &["geoip"];
 
 pub const DEFAULT_GLOBAL_UA: &str = "clash.meta/1.10.0";
 
@@ -358,7 +370,6 @@ pub fn general_defaults() -> Map {
         "routing-mark": 0,
         "geo-auto-update": false,
         "geo-update-interval": 24,
-        "geodata-loader": "memconservative",
         "tcp-concurrent": false,
         "find-process-mode": "strict",
         "global-ua": DEFAULT_GLOBAL_UA,
@@ -414,7 +425,6 @@ pub fn tun_defaults() -> Map {
     into_map(json!({
         "enable": false,
         "device": "",
-        "stack": "",
         "dns-mode": "",
         "dns-hijack": ["0.0.0.0:53"],
         "auto-route": true,
@@ -473,11 +483,9 @@ pub fn profile_defaults() -> Map {
     }))
 }
 
+/// mihomo's other experimental keys tune quic-go, or, as `fingerprints`, are read by nothing.
 pub fn experimental_defaults() -> Map {
     into_map(json!({
-        "fingerprints": null,
-        "quic-go-disable-gso": false,
-        "quic-go-disable-ecn": true,
         "dialer-ip4p-convert": false,
     }))
 }
