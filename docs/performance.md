@@ -69,6 +69,34 @@ Higher is better for rates, lower for CPU, latency and memory. "tie" means no si
 
 `direct` has no proxy server, and `vmess-grpc-tls` has no UDP workload in this set.
 
+### OpenVPN
+
+The `openvpn` (UDP) and `openvpn-tcp` cases are measured on their own terms, so their figures are not comparable with
+the table above. The server is a real OpenVPN 2.6.19 rather than mihomo, with tls-crypt, certificate authentication,
+AES-256-GCM and data channel offload disabled. It runs in the far namespace of an unshaped veth link
+(`--link ts=usec`) with the same CPU pinning as above, and its tunnel ends there, so the load reaches the origin
+through the tunnel. Each workload runs eight rounds of 20 s, with fresh processes and alternating order. The OpenVPN
+server is single-threaded. Where both arms keep it at one full CPU, marked "server-bound", throughput shows the
+server's limit; where Concord still leads there, the server spends less CPU per byte on Concord's traffic.
+
+| Metric | `openvpn` | `openvpn-tcp` |
+|---|---|---|
+| Download, Gbit/s | +111% | +45.7% (server-bound) |
+| Download, CPU per GB | -67% | -49.0% |
+| Upload, Gbit/s | +72% | tie (+21.4%, server-bound) |
+| Upload, CPU per GB | -83% | -23.8% |
+| Several flows, Gbit/s | +100% | +29.6% (server-bound) |
+| Request/response, transactions/s | +15.4% | +14.7% |
+| Request/response, CPU per transaction | -58.6% | -54.2% |
+| Request/response, p99 latency | -35.3% | -23.0% |
+| New connections/s | +79.3% | +60.1% |
+| CPU per connection | -42.9% | -25.2% |
+| Connection p99 latency | -49.7% | tie (-45.2%) |
+| UDP, Mbit/s | +64.3% | +36.9% |
+| UDP, CPU per GB | -53.0% | -33.4% |
+| UDP, round-trip p99 | -53.7% | -45.0% |
+| Peak memory during download | -55% | -51.8% |
+
 ## macOS
 
 The last column is the resolution for `direct` and for the proxied cases (measured on `ss-aes128`). "not judged"
