@@ -117,6 +117,7 @@ pub fn encode_share_link(proxy: &Map) -> String {
         "socks5" => socks(f, "socks5"),
         "http" => socks(f, if f.flag("tls") { "https" } else { "http" }),
         "anytls" => anytls(f),
+        "naive" => naive(f),
         "mieru" => mieru(f),
         _ => String::new(),
     }
@@ -514,6 +515,31 @@ fn anytls(f: Fields<'_>) -> String {
         &query,
         &f.str("name"),
     )
+}
+
+fn naive(f: Fields<'_>) -> String {
+    let scheme = if f.flag("quic") {
+        "naive+quic"
+    } else {
+        "naive+https"
+    };
+    let username = f.str("username");
+    let user = (!username.is_empty()).then(|| user_text(&username, Some(&f.str("password"))));
+    let lines: Vec<String> = f
+        .sub("headers")
+        .0
+        .into_iter()
+        .flatten()
+        .map(|(name, value)| format!("{name}: {}", scalar_text(value).unwrap_or_default()))
+        .collect();
+    let mut query = Query::new();
+    set_if(&mut query, "extra-headers", lines.join("\r\n"));
+    set_if(&mut query, "sni", f.str("sni"));
+    let concurrency = f.str("insecure-concurrency");
+    if concurrency.parse::<u32>().is_ok_and(|count| count > 1) {
+        set(&mut query, "insecure-concurrency", &concurrency);
+    }
+    share_url(scheme, user, &host_port(f), &query, &f.str("name"))
 }
 
 fn mieru(f: Fields<'_>) -> String {

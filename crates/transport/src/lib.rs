@@ -1,5 +1,6 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
+mod ended;
 mod gost_plugin;
 mod gun;
 mod h2_transport;

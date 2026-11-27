@@ -1533,6 +1533,20 @@ impl<B> StreamRef<B> {
         me.actions.send.poll_reset(cx, &mut stream, mode)
     }
 
+    // Concord: `SendStream::poll_drained`; `Prioritize::pop_frame` wakes it.
+    pub fn poll_drained(&mut self, cx: &Context) -> Poll<()> {
+        let mut me = self.opaque.inner.lock().unwrap();
+        let me = &mut *me;
+
+        let mut stream = me.store.resolve(self.opaque.key);
+
+        if stream.buffered_send_data == 0 || stream.state.is_closed() {
+            return Poll::Ready(());
+        }
+        stream.wait_send(cx);
+        Poll::Pending
+    }
+
     pub fn clone_to_opaque(&self) -> OpaqueStreamRef {
         self.opaque.clone()
     }

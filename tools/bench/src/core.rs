@@ -181,11 +181,12 @@ fn ssrust_profile(proxy: Option<&Value>, mixed: u16) -> Result<Value, String> {
 
 /// The case's node as a sing-box client: a mixed inbound for the readiness probe and the SOCKS entry, and
 /// with `tun` a TUN inbound. That inbound names no `stack`, so sing-box runs sing-tun's default, its Go stack.
-fn singbox_profile(
-    proxy: Option<&Value>,
-    mixed: u16,
-    tun: Option<&Value>,
-) -> Result<Value, String> {
+fn singbox_profile(launch: &Launch<'_>) -> Result<Value, String> {
+    let (proxy, tun, trust) = (
+        launch.proxy.as_ref(),
+        launch.tun.as_ref(),
+        launch.trust.as_deref(),
+    );
     let outbound = match proxy {
         None => json!({"type": "direct", "tag": "out"}),
         Some(node)
@@ -219,15 +220,30 @@ fn singbox_profile(
                 "password": node["password"],
             })
         }
+        Some(node) if node["type"].as_str() == Some("naive") => {
+            let trust =
+                trust.ok_or("sing-box's naive client needs the bench server's certificate")?;
+            json!({
+                "type": "naive",
+                "tag": "out",
+                "server": node["server"],
+                "server_port": node["port"],
+                "username": node["username"],
+                "password": node["password"],
+                "quic": node["quic"],
+                "udp_over_tcp": node["udp-over-tcp"],
+                "tls": {"enabled": true, "server_name": node["sni"], "certificate_path": trust},
+            })
+        }
         Some(_) => {
             return Err(
-                "a sing-box core runs the direct, trojan-tls and plain Shadowsocks cases only"
+                "a sing-box core runs the direct, trojan-tls, plain Shadowsocks and naive cases only"
                     .into(),
             );
         }
     };
     let mut inbounds = vec![json!({
-        "type": "mixed", "tag": "mixed", "listen": "127.0.0.1", "listen_port": mixed,
+        "type": "mixed", "tag": "mixed", "listen": "127.0.0.1", "listen_port": launch.mixed,
     })];
     if let Some(tun) = tun {
         inbounds.push(json!({
@@ -256,6 +272,8 @@ pub struct Launch<'a> {
     /// Concord takes the TUN section as an overlay; mihomo reads it from the profile; sing-box gets its own.
     pub tun: Option<Value>,
     pub mitm: Option<Value>,
+    /// The bench server's certificate, for a client that cannot skip verification.
+    pub trust: Option<PathBuf>,
     pub mixed: u16,
     pub placement: Placement,
     pub log: PathBuf,
@@ -303,8 +321,7 @@ impl Running {
                 )
             }
             Kind::Singbox => {
-                let config =
-                    singbox_profile(launch.proxy.as_ref(), launch.mixed, launch.tun.as_ref())?;
+                let config = singbox_profile(&launch)?;
                 let path = launch.home.join("sing-box.json");
                 std::fs::write(&path, config.to_string()).map_err(|e| e.to_string())?;
                 let mut command = isolate::command(&launch.spec.binary, &launch.placement);
@@ -522,6 +539,40 @@ pub async fn echo_once(entry: Entry, target: SocketAddr) -> std::io::Result<()> 
 mod tests {
     use super::*;
 
+    fn singbox(
+        proxy: Option<Value>,
+        tun: Option<Value>,
+        trust: Option<&str>,
+    ) -> Result<Value, String> {
+        let spec = CoreSpec {
+            name: "sing-box".into(),
+            kind: Kind::Singbox,
+            role: Role::of(Kind::Singbox, tun.is_some()),
+            source: String::new(),
+            binary: PathBuf::new(),
+            sha256: String::new(),
+            size: 0,
+            version: None,
+        };
+        singbox_profile(&Launch {
+            spec: &spec,
+            home: PathBuf::new(),
+            profile: String::new(),
+            proxy,
+            tun,
+            mitm: None,
+            trust: trust.map(PathBuf::from),
+            mixed: 4321,
+            placement: Placement {
+                cpus: None,
+                netns: None,
+            },
+            log: PathBuf::new(),
+            probe: SocketAddr::from(([127, 0, 0, 1], 1)),
+            entry: Entry::Tun,
+        })
+    }
+
     #[test]
     fn ssrust_uses_the_case_endpoint_and_cipher_in_its_own_config() {
         for method in ["aes-128-gcm", "chacha20-ietf-poly1305"] {
@@ -543,7 +594,7 @@ mod tests {
     #[test]
     fn singbox_takes_the_tun_entry_on_its_default_stack() {
         let tun = json!({"device": "cbtun0", "mtu": 1500, "stack": "system"});
-        let config = singbox_profile(None, 4321, Some(&tun)).unwrap();
+        let config = singbox(None, Some(tun.clone()), None).unwrap();
         assert_eq!(config["inbounds"][0]["type"], "mixed");
         assert_eq!(config["inbounds"][0]["listen_port"], 4321);
         let inbound = &config["inbounds"][1];
@@ -554,7 +605,7 @@ mod tests {
         assert!(inbound.get("stack").is_none());
         assert_eq!(config["outbounds"][0]["type"], "direct");
         assert_eq!(config["route"]["final"], config["outbounds"][0]["tag"]);
-        let socks_only = singbox_profile(None, 4321, None).unwrap();
+        let socks_only = singbox(None, None, None).unwrap();
         assert_eq!(socks_only["inbounds"].as_array().unwrap().len(), 1);
     }
 
@@ -563,7 +614,7 @@ mod tests {
         let mut proxy = json!({"name": "trojan-tls", "type": "trojan", "server": "peer.test",
                                "port": 1234, "password": "secret", "sni": "localhost",
                                "skip-cert-verify": true});
-        let config = singbox_profile(Some(&proxy), 4321, None).unwrap();
+        let config = singbox(Some(proxy.clone()), None, None).unwrap();
         let outbound = &config["outbounds"][0];
         assert_eq!(outbound["type"], "trojan");
         assert_eq!(outbound["server"], "peer.test");
@@ -573,18 +624,29 @@ mod tests {
         assert_eq!(outbound["tls"]["server_name"], "localhost");
         assert_eq!(outbound["tls"]["insecure"], true);
         proxy["client-fingerprint"] = json!("chrome");
-        assert!(singbox_profile(Some(&proxy), 4321, None).is_err());
+        assert!(singbox(Some(proxy.clone()), None, None).is_err());
         let mut proxy = json!({"name": "ss-aes128", "type": "ss", "server": "peer.test", "port": 1234,
                                "cipher": "aes-128-gcm", "password": "pw"});
-        let config = singbox_profile(Some(&proxy), 4321, None).unwrap();
+        let config = singbox(Some(proxy.clone()), None, None).unwrap();
         let outbound = &config["outbounds"][0];
         assert_eq!(outbound["type"], "shadowsocks");
         assert_eq!(outbound["server_port"], 1234);
         assert_eq!(outbound["method"], "aes-128-gcm");
         assert_eq!(outbound["password"], "pw");
         proxy["smux"] = json!({"enabled": true});
-        assert!(singbox_profile(Some(&proxy), 4321, None).is_err());
-        assert!(singbox_profile(Some(&json!({"type": "vmess"})), 4321, None).is_err());
+        assert!(singbox(Some(proxy.clone()), None, None).is_err());
+        assert!(singbox(Some(json!({"type": "vmess"})), None, None).is_err());
+        let proxy = json!({"name": "naive-quic", "type": "naive", "server": "peer.test", "port": 1234,
+                           "quic": true, "username": "u", "password": "p", "udp-over-tcp": true,
+                           "sni": "localhost", "skip-cert-verify": true});
+        assert!(singbox(Some(proxy.clone()), None, None).is_err());
+        let config = singbox(Some(proxy.clone()), None, Some("/certs/cert.pem")).unwrap();
+        let outbound = &config["outbounds"][0];
+        assert_eq!(outbound["type"], "naive");
+        assert_eq!(outbound["quic"], true);
+        assert_eq!(outbound["udp_over_tcp"], true);
+        assert_eq!(outbound["tls"]["certificate_path"], "/certs/cert.pem");
+        assert!(outbound["tls"].get("insecure").is_none());
     }
 
     #[test]

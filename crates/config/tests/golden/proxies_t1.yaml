@@ -5,3 +5,4 @@ proxies:
   - {name: snell, type: snell, server: 192.0.2.23, port: 8388, psk: secret, version: 3}
   - {name: ssh, type: ssh, server: 192.0.2.24, port: 22, username: u, password: p}
   - {name: sq, type: shadowquic, server: 192.0.2.25, port: 443, username: u, password: p, sni: example.test}
+  - {name: naive, type: naive, server: 192.0.2.26, port: 443, username: u, password: p, sni: example.test, insecure-concurrency: 2, headers: {X-Foo: bar}, udp: true, udp-over-tcp: true}

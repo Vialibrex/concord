@@ -44,6 +44,7 @@ pub enum OutboundKind {
     Mieru,
     AnyTls,
     ShadowQuic,
+    Naive,
 }
 
 impl OutboundKind {
@@ -76,6 +77,7 @@ impl OutboundKind {
             OutboundKind::Mieru => "Mieru",
             OutboundKind::AnyTls => "AnyTLS",
             OutboundKind::ShadowQuic => "ShadowQuic",
+            OutboundKind::Naive => "Naive",
         }
     }
 

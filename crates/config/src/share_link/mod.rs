@@ -1,5 +1,6 @@
 mod decode;
 mod encode;
+mod plain_url;
 mod urlx;
 mod xhttp;
 

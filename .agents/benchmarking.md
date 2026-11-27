@@ -143,6 +143,11 @@ Hysteria v1 needs `--sing-box <binary>` built with QUIC support, because mihomo 
 is measured separately from the mihomo servers. ShadowQUIC uses a local TLS listener on the same mihomo server
 for its JLS upstream. Include `tcp-multi` for fairness and `udp-stream` for end-to-end loss.
 
+`naive` and `naive-quic` are served by sing-box's naive inbound, so they need `--sing-box` too; UDP goes over
+UDP-over-TCP. Their reference is a sing-box client arm (`NAME=singbox:PATH`, a release built with
+`with_naive_outbound`), not mihomo, which has no naive outbound. sing-box's client cannot skip certificate
+verification, so it trusts the bench server's certificate; Concord skips verification as it does for the other cases.
+
 A second Linux machine on the same host may take the link-bound runs while the main VM measures: a plan whose
 `--link` sets a rate (`lossy`, `wan`, or `rate=` of at most 300 Mbit/s) and that runs only `tcp-down`, `tcp-up`,
 `tcp-multi`, `tcp-rr`, `tcp-crr`, `udp-stream` and `udp-rr`. Loopback, a plain or `ts=usec` veth, `idle`, `startup`

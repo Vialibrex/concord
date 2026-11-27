@@ -395,3 +395,176 @@ pub(crate) async fn client_settings(
         }
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_silent_peer_is_dropped_though_streams_keep_opening() {
+    let (near, far) = duplex(1 << 20);
+    tokio::spawn(async move {
+        let _silent: Result<h2::server::Connection<_, Bytes>, _> = h2::server::handshake(far).await;
+        std::future::pending::<()>().await;
+    });
+    let (_send, conn) = client_builder()
+        .handshake::<BoxStream, Bytes>(Box::new(near))
+        .await
+        .unwrap();
+    let activity = Activity::new();
+    spawn_checked_connection(&concord_common::Tasks::default(), conn, activity.clone());
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        activity.before_stream();
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(activity.ended());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_answers_pings_stays_up() {
+    let (near, far) = duplex(1 << 20);
+    tokio::spawn(async move {
+        let Ok(mut conn) = h2::server::handshake(far).await else {
+            return;
+        };
+        while conn.accept().await.is_some() {}
+    });
+    let (_send, conn) = client_builder()
+        .handshake::<BoxStream, Bytes>(Box::new(near))
+        .await
+        .unwrap();
+    let activity = Activity::new();
+    spawn_checked_connection(&concord_common::Tasks::default(), conn, activity.clone());
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        activity.before_stream();
+    }
+    assert!(!activity.ended());
+}
+
+const SETTINGS: [u8; 9] = [0, 0, 0, 4, 0, 0, 0, 0, 0];
+const WINDOW_UPDATE: [u8; 13] = [0, 0, 4, 8, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+#[tokio::test(start_paused = true)]
+async fn a_peer_that_only_sends_window_updates_is_not_pinged_to_death() {
+    let (near, mut far) = tokio::io::duplex(1 << 20);
+    tokio::spawn(async move {
+        if far.write_all(&SETTINGS).await.is_err() {
+            return;
+        }
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            if far.write_all(&WINDOW_UPDATE).await.is_err() {
+                return;
+            }
+        }
+    });
+    let tasks = concord_common::Tasks::default();
+    let (_sender, activity) = checked_handshake(&client_builder(), Box::new(near), &tasks)
+        .await
+        .unwrap();
+    for _ in 0..8 {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        activity.before_stream();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!activity.ended());
+}
+
+/// What a server that never ends its side of a tunnel saw: the DATA, then how the stream ended.
+async fn holding_server(far: DuplexStream) -> (Vec<u8>, Option<h2::Reason>) {
+    let mut conn = h2::server::handshake(far).await.unwrap();
+    let (request, mut respond) = conn.accept().await.unwrap().unwrap();
+    tokio::spawn(async move { while conn.accept().await.is_some() {} });
+    let _send = respond
+        .send_response(http::Response::new(()), false)
+        .unwrap();
+    let mut body = request.into_body();
+    let mut got = Vec::new();
+    loop {
+        match body.data().await {
+            Some(Ok(data)) => {
+                got.extend_from_slice(&data);
+                body.flow_control().release_capacity(data.len()).unwrap();
+            }
+            Some(Err(err)) => return (got, err.reason()),
+            None => return (got, None),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_tunnel_without_half_close_sends_its_writes_then_resets_the_stream() {
+    let (near, far) = duplex(1 << 16);
+    let server = tokio::spawn(holding_server(far));
+    let (mut sender, connection) = h2::client::handshake(near).await.unwrap();
+    tokio::spawn(connection);
+    let (response, send) = sender.send_request(http::Request::new(()), false).unwrap();
+    let body = H2Body::new(send, Incoming::Response(response)).without_half_close();
+    let (mut read, mut write) = Box::new(body).into_split();
+    let payload: Vec<u8> = (0..300_000).map(|n| (n % 251) as u8).collect();
+    write.write_all(&payload).await.unwrap();
+    let patience = std::time::Duration::from_secs(5);
+    tokio::time::timeout(patience, write.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut rest = Vec::new();
+    assert_eq!(
+        tokio::time::timeout(patience, read.read_to_end(&mut rest))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    let (got, reason) = tokio::time::timeout(patience, server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(got.len(), payload.len());
+    assert!(got == payload);
+    assert_eq!(reason, Some(h2::Reason::CANCEL));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_tunnel_whose_peer_grants_no_window_is_reset_after_the_drain_limit() {
+    let (near, mut far) = duplex(1 << 16);
+    let frames = tokio::spawn(async move {
+        far.write_all(&[0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0])
+            .await
+            .unwrap();
+        let mut preface = [0; 24];
+        far.read_exact(&mut preface).await.unwrap();
+        let mut kinds = Vec::new();
+        loop {
+            let mut header = [0; 9];
+            far.read_exact(&mut header).await.unwrap();
+            let length = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+            let mut payload = vec![0; length];
+            far.read_exact(&mut payload).await.unwrap();
+            kinds.push((header[3], length));
+            if header[3] == 3 {
+                return (kinds, u32::from_be_bytes(payload.try_into().unwrap()));
+            }
+        }
+    });
+    let (mut sender, connection) = h2::client::handshake(near).await.unwrap();
+    tokio::spawn(connection);
+    let (response, mut send) = sender.send_request(http::Request::new(()), false).unwrap();
+    send.send_data(Bytes::from_static(&[7; 1024]), false)
+        .unwrap();
+    let mut body = H2Body::new(send, Incoming::Response(response)).without_half_close();
+    let started = Instant::now();
+    body.shutdown().await.unwrap();
+    let waited = started.elapsed();
+    assert!(waited >= RESET_DRAIN, "{waited:?}");
+    assert!(waited < RESET_DRAIN + Duration::from_secs(1), "{waited:?}");
+    let (kinds, code) = tokio::time::timeout(Duration::from_secs(5), frames)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !kinds.iter().any(|&(kind, length)| kind == 0 && length > 0),
+        "{kinds:?}"
+    );
+    assert_eq!(code, u32::from(h2::Reason::CANCEL));
+    let mut one = [0; 1];
+    assert_eq!(body.read(&mut one).await.unwrap(), 0);
+}

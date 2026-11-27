@@ -495,7 +495,8 @@
       "shadowquic",
       "dns",
       "rematch",
-      "gost-relay"
+      "gost-relay",
+      "naive"
     ],
     "t2": [
       "tailscale",

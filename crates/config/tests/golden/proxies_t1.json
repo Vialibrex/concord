@@ -88,6 +88,21 @@
       "username": "u",
       "password": "p",
       "sni": "example.test"
+    },
+    {
+      "name": "naive",
+      "type": "naive",
+      "server": "192.0.2.26",
+      "port": 443,
+      "username": "u",
+      "password": "p",
+      "sni": "example.test",
+      "insecure-concurrency": 2,
+      "headers": {
+        "X-Foo": "bar"
+      },
+      "udp": true,
+      "udp-over-tcp": true
     }
   ],
   "proxy-groups": [],

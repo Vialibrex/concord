@@ -8,6 +8,7 @@ use self::tls::{
     tls_without_reality,
 };
 mod masque;
+mod naive;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -45,6 +46,7 @@ pub const T1_PROXY_TYPES: &[&str] = &[
     "dns",
     "rematch",
     "gost-relay",
+    "naive",
 ];
 pub const T2_PROXY_TYPES: &[&str] = &["tailscale", "easytier", "zerotier", "sudoku", "trusttunnel"];
 
@@ -192,6 +194,7 @@ fn parse_typed(
         "mieru" => ProxyKind::Mieru(parse_mieru(f)?),
         "ssh" => ProxyKind::Ssh(parse_ssh(f)?),
         "shadowquic" => ProxyKind::ShadowQuic(Box::new(parse_shadowquic(f)?)),
+        "naive" => ProxyKind::Naive(Box::new(naive::parse(f, caps)?)),
         _ => return quarantine(format!("unknown proxy type '{type_name}'")),
     };
     Ok((kind, common, smux))

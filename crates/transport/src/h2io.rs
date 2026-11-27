@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, ready};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use concord_common::stream_buffer::StreamBuffer;
@@ -11,13 +11,23 @@ use concord_common::{BoxRead, BoxStream, BoxWrite, Stream, Tasks};
 use h2::client::ResponseFuture;
 use h2::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::time::{Instant, Sleep, sleep};
+
+use crate::ended::Ended;
+
+mod checked;
+pub use checked::checked_handshake;
 
 const PING_TIMEOUT: Duration = Duration::from_secs(15);
+const AT_RISK: Duration = Duration::from_secs(10);
+const HUNG: Duration = Duration::from_secs(10);
+/// How long a tunnel that ends with RST_STREAM waits for its queued DATA to go out first.
+const RESET_DRAIN: Duration = HUNG;
 pub(crate) const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 pub(crate) const CONN_WINDOW: u32 = 65_535 + (1 << 30);
 pub(crate) const MAX_FRAME_SIZE: u32 = 1 << 20;
 
-pub(crate) fn h2_io_error(err: h2::Error) -> io::Error {
+pub fn h2_io_error(err: h2::Error) -> io::Error {
     if err.is_io() {
         return err.into_io().unwrap_or_else(|| io::ErrorKind::Other.into());
     }
@@ -64,6 +74,8 @@ pub struct Activity {
     base: Instant,
     last_ms: AtomicU64,
     ended: AtomicBool,
+    closing: AtomicBool,
+    signal: tokio::sync::Notify,
 }
 
 impl Activity {
@@ -72,11 +84,27 @@ impl Activity {
             base: Instant::now(),
             last_ms: AtomicU64::new(0),
             ended: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            signal: tokio::sync::Notify::new(),
         })
     }
 
     pub fn ended(&self) -> bool {
         self.ended.load(Ordering::Relaxed)
+    }
+
+    /// For a connection from [`checked_handshake`]: a stream about to open on a
+    /// connection quiet past Chromium's at-risk threshold sends a PING ahead of it.
+    pub fn before_stream(&self) {
+        if self.idle() >= AT_RISK {
+            self.signal.notify_one();
+        }
+    }
+
+    /// Drops a connection from [`checked_handshake`] and every stream on it.
+    pub fn close(&self) {
+        self.closing.store(true, Ordering::Relaxed);
+        self.signal.notify_one();
     }
 
     pub fn touch(&self) {
@@ -85,8 +113,15 @@ impl Activity {
     }
 
     fn idle(&self) -> Duration {
-        let now = u64::try_from(self.base.elapsed().as_millis()).unwrap_or(u64::MAX);
-        Duration::from_millis(now.saturating_sub(self.last_ms.load(Ordering::Relaxed)))
+        self.base.elapsed().saturating_sub(self.since_base())
+    }
+
+    fn last_read(&self) -> Instant {
+        self.base + self.since_base()
+    }
+
+    fn since_base(&self) -> Duration {
+        Duration::from_millis(self.last_ms.load(Ordering::Relaxed))
     }
 }
 
@@ -100,6 +135,68 @@ pub fn spawn_connection(
         drive(conn, ping_interval, &activity).await;
         activity.ended.store(true, Ordering::Relaxed);
     });
+}
+
+/// Chromium's liveness check in place of periodic PINGs: a PING goes out only ahead of a
+/// stream (see [`Activity::before_stream`]), and the connection is dropped when nothing has
+/// been read for the hung interval after it.
+pub(crate) fn spawn_checked_connection(
+    tasks: &Tasks,
+    conn: h2::client::Connection<BoxStream, Bytes>,
+    activity: Arc<Activity>,
+) {
+    activity.touch();
+    tasks.spawn(async move {
+        drive_checked(conn, &activity).await;
+        activity.ended.store(true, Ordering::Relaxed);
+    });
+}
+
+async fn drive_checked(conn: h2::client::Connection<BoxStream, Bytes>, activity: &Activity) {
+    let mut conn = Box::pin(conn);
+    let mut pings = conn.ping_pong();
+    loop {
+        tokio::select! {
+            _ = conn.as_mut() => return,
+            () = activity.signal.notified() => {}
+        }
+        if activity.closing.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(pings) = pings.as_mut() else {
+            continue;
+        };
+        let ping = pings.ping(h2::Ping::opaque());
+        tokio::pin!(ping);
+        // Chromium's CheckPingStatus: the session is dead once nothing has been read for the hung
+        // interval, or since the previous check; streams opening meanwhile do not move the deadline.
+        let mut last_check = Instant::now();
+        let check = tokio::time::sleep_until(last_check + HUNG);
+        tokio::pin!(check);
+        loop {
+            tokio::select! {
+                _ = conn.as_mut() => return,
+                answered = &mut ping => {
+                    if answered.is_err() {
+                        return;
+                    }
+                    activity.touch();
+                    break;
+                }
+                () = &mut check => {
+                    let (now, last_read) = (Instant::now(), activity.last_read());
+                    if now >= last_read + HUNG || last_read < last_check {
+                        return;
+                    }
+                    last_check = now;
+                    check.as_mut().reset(last_read + HUNG);
+                }
+                () = activity.signal.notified() => if activity.closing.load(Ordering::Relaxed) {
+                    return;
+                },
+            }
+        }
+    }
 }
 
 async fn drive(
@@ -141,6 +238,9 @@ pub enum Incoming {
     Done,
 }
 
+/// Judges a response's head in place of the default non-2xx rejection.
+pub type ResponseCheck = Box<dyn FnOnce(&http::response::Parts) -> io::Result<()> + Send>;
+
 /// The response side of a request stream: waits for the headers, rejects a non-2xx
 /// status, then yields the body.
 pub(crate) struct H2Reader {
@@ -148,6 +248,8 @@ pub(crate) struct H2Reader {
     pending: Bytes,
     pending_err: Option<io::Error>,
     activity: Option<Arc<Activity>>,
+    check: Option<ResponseCheck>,
+    ended: Option<Arc<Ended>>,
 }
 
 impl H2Reader {
@@ -157,6 +259,8 @@ impl H2Reader {
             pending: Bytes::new(),
             pending_err: None,
             activity: None,
+            check: None,
+            ended: None,
         }
     }
 
@@ -179,6 +283,14 @@ impl AsyncRead for H2Reader {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
+        if let Some(ended) = &this.ended
+            && ended.poll_ended(cx)
+        {
+            this.incoming = Incoming::Done;
+            this.pending = Bytes::new();
+            this.pending_err = None;
+            return Poll::Ready(Ok(()));
+        }
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
@@ -211,14 +323,20 @@ impl AsyncRead for H2Reader {
                         Poll::Pending => return Poll::Pending,
                         Poll::Ready(res) => res.map_err(h2_io_error)?,
                     };
-                    if !response.status().is_success() {
-                        this.incoming = Incoming::Done;
-                        return Poll::Ready(Err(io::Error::other(format!(
+                    let (head, body) = response.into_parts();
+                    let checked = match this.check.take() {
+                        Some(check) => check(&head),
+                        None if head.status.is_success() => Ok(()),
+                        None => Err(io::Error::other(format!(
                             "unexpected HTTP status {}",
-                            response.status()
-                        ))));
+                            head.status
+                        ))),
+                    };
+                    if let Err(err) = checked {
+                        this.incoming = Incoming::Done;
+                        return Poll::Ready(Err(err));
                     }
-                    this.incoming = Incoming::Body(response.into_body());
+                    this.incoming = Incoming::Body(body);
                 }
                 Incoming::Body(recv) => match recv.poll_data(cx) {
                     Poll::Pending => {
@@ -268,11 +386,14 @@ impl AsyncRead for H2Reader {
     }
 }
 
-/// The request side: writes become DATA frames, shutdown ends the stream.
+/// The request side: writes become DATA frames, shutdown ends the stream with END_STREAM, or
+/// with RST_STREAM once its DATA is out when `end` takes the reader down with it.
 pub(crate) struct H2Writer {
     send: SendStream<Bytes>,
     ending: bool,
     ended: bool,
+    end: Option<Arc<Ended>>,
+    drain: Option<Pin<Box<Sleep>>>,
 }
 
 struct OwnedData(StreamBuffer);
@@ -289,6 +410,8 @@ impl H2Writer {
             send,
             ending: false,
             ended: false,
+            end: None,
+            drain: None,
         }
     }
 
@@ -398,6 +521,21 @@ impl AsyncWrite for H2Writer {
         if this.ended {
             return Poll::Ready(Ok(()));
         }
+        if let Some(end) = &this.end {
+            if this.send.has_direct_writer() {
+                ready!(this.send.poll_flush_direct(cx)).map_err(h2_io_error)?;
+            }
+            let deadline = this
+                .drain
+                .get_or_insert_with(|| Box::pin(sleep(RESET_DRAIN)));
+            if this.send.poll_drained(cx).is_pending() && deadline.as_mut().poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            this.send.send_reset(h2::Reason::CANCEL);
+            this.ended = true;
+            end.end();
+            return Poll::Ready(Ok(()));
+        }
         if this.send.has_direct_writer() {
             if !this.ending {
                 ready!(this.send.poll_flush_direct(cx)).map_err(h2_io_error)?;
@@ -445,6 +583,20 @@ impl H2Body {
 
     pub fn with_activity(mut self, activity: Arc<Activity>) -> Self {
         self.reader.activity = Some(activity);
+        self
+    }
+
+    pub fn with_response_check(mut self, check: ResponseCheck) -> Self {
+        self.reader.check = Some(check);
+        self
+    }
+
+    /// Shutdown ends the whole stream rather than half of it, as a Chromium tunnel does: it waits
+    /// up to `RESET_DRAIN` for the queued DATA, resets the stream, and reads end.
+    pub fn without_half_close(mut self) -> Self {
+        let ended = Arc::new(Ended::default());
+        self.reader.ended = Some(ended.clone());
+        self.writer.end = Some(ended);
         self
     }
 

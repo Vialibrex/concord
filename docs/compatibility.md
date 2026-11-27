@@ -395,3 +395,30 @@ Shadowsocks supports `gost-plugin` in WebSocket mode, including TLS and its defa
 Gost relay supports TCP, destination-bound UDP, forward mode, TLS and per-connection smux v1.
 As with mihomo, its relay server needs `nodelay: true` so CONNECT is answered before application data,
 and `mux.version: 1` when multiplexing is enabled.
+
+## Outbounds mihomo Does Not Have
+
+### NaiveProxy (`type: naive`)
+
+The options are sing-box's `naive` outbound under kebab-case keys: `username`, `password`, `quic`,
+`insecure-concurrency`, `headers` (sing-box `extra_headers`), `udp-over-tcp` and `udp-over-tcp-version`,
+`stream-receive-window`, `quic-session-receive-window`, `quic-congestion-control` (`bbr`, `cubic` or `reno`), `sni`,
+`skip-cert-verify`, `fingerprint` and `ech-opts`. Share links are DuckSoft's `naive+https://` and `naive+quic://`.
+The wire follows naiveproxy, the protocol's owner; where sing-box's client, cronet-go, differs, Concord does what
+naiveproxy does:
+
+| Behaviour | sing-box (cronet-go) | Concord |
+|---|---|---|
+| Padding | Always Variant1; the request carries `Padding` of 30 to 61 characters and no `padding-type-request` | Negotiated as naiveproxy does: `padding` of 16 to 32 characters and `padding-type-request: 1, 0`, then the server's `padding-type-reply` (or, without one, its `padding` header) decides, so a server without padding gets plain bytes |
+| The first connection to a node | Writes before the server answers | Waits for the answer, one round trip, while the node's padding is unknown; afterwards writes go out with the request, as cronet-go's do |
+| Padding of the first eight writes | 0 to 255 bytes | naiveproxy's shape: a write under 100 bytes pads to at least 255 - its length, and a frame of 201 to 1023 bytes goes out in pieces of 100 to 200 bytes |
+| `stream-receive-window` left out on iOS | 4 MiB | 128 MiB, as on every other platform |
+| A server that offers only HTTP/1.1 | Chromium falls back to it | The dial fails; every naive server offers h2 |
+| `tls.certificate` (a custom root) | Accepted | Not supported; pin the server with `fingerprint` or use `skip-cert-verify` |
+| `skip-cert-verify` | Refused | Accepted |
+| The QUIC handshake | Chromium's BoringSSL QUIC hello | quinn and rustls, as for Concord's other QUIC outbounds |
+
+UDP needs `udp-over-tcp`, as in sing-box; without it the node does not offer UDP. naiveproxy's preamble (a few
+requests on a new connection before the tunnels) and its tunnel rotation are not done; cronet-go does neither. When
+the network changes, the node drops its HTTP/2 connections without a GOAWAY frame, where Chromium sends one first;
+HTTP/3 connections are closed with a CONNECTION_CLOSE.

@@ -6,7 +6,8 @@ use ::h3::quic::ConnectionErrorIncoming;
 
 type AnyError = dyn Error + Send + Sync + 'static;
 
-pub(super) fn error(err: impl Into<Box<AnyError>>) -> io::Error {
+/// An h3 or quinn error as an `io::Error` whose kind says what happened to the stream.
+pub fn h3_io_error(err: impl Into<Box<AnyError>>) -> io::Error {
     let err = err.into();
     match err.downcast::<io::Error>() {
         Ok(err) => *err,
@@ -61,33 +62,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn xhttp_h3_keeps_error_kinds() {
+    fn h3_errors_keep_their_kinds() {
         assert_eq!(
-            error(io::Error::from(io::ErrorKind::BrokenPipe)).kind(),
+            h3_io_error(io::Error::from(io::ErrorKind::BrokenPipe)).kind(),
             io::ErrorKind::BrokenPipe
         );
         assert_eq!(
-            error(quinn::ConnectionError::TimedOut).kind(),
+            h3_io_error(quinn::ConnectionError::TimedOut).kind(),
             io::ErrorKind::TimedOut
         );
         assert_eq!(
-            error(quinn::ConnectionError::Reset).kind(),
+            h3_io_error(quinn::ConnectionError::Reset).kind(),
             io::ErrorKind::ConnectionReset
         );
         assert_eq!(
-            error(quinn::ReadError::ClosedStream).kind(),
+            h3_io_error(quinn::ReadError::ClosedStream).kind(),
             io::ErrorKind::NotConnected
         );
         assert_eq!(
-            error(quinn::WriteError::ClosedStream).kind(),
+            h3_io_error(quinn::WriteError::ClosedStream).kind(),
             io::ErrorKind::NotConnected
         );
         assert_eq!(
-            error(quinn::ReadError::ZeroRttRejected).kind(),
+            h3_io_error(quinn::ReadError::ZeroRttRejected).kind(),
             io::ErrorKind::ConnectionReset
         );
         assert_eq!(
-            error(quinn::WriteError::ZeroRttRejected).kind(),
+            h3_io_error(quinn::WriteError::ZeroRttRejected).kind(),
             io::ErrorKind::ConnectionReset
         );
     }

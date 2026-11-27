@@ -456,6 +456,25 @@ pub struct HttpProxyOpts {
     pub headers: IndexMap<String, String>,
 }
 
+/// sing-box's `naive` outbound (`option/naive.go`); mihomo has no such type.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NaiveOpts {
+    pub server: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    pub tls: TlsOpts,
+    pub headers: IndexMap<String, String>,
+    pub quic: bool,
+    pub insecure_concurrency: u32,
+    pub udp_over_tcp: bool,
+    pub udp_over_tcp_version: u8,
+    /// Bytes; zero keeps the default.
+    pub stream_receive_window: u64,
+    pub quic_session_receive_window: u64,
+    pub quic_congestion_control: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WgPeer {
     pub server: String,
@@ -657,6 +676,7 @@ pub enum ProxyKind {
     Mieru(MieruOpts),
     Ssh(SshOpts),
     ShadowQuic(Box<ShadowQuicOpts>),
+    Naive(Box<NaiveOpts>),
 }
 
 impl ProxyKind {
@@ -685,6 +705,7 @@ impl ProxyKind {
             ProxyKind::Mieru(_) => "mieru",
             ProxyKind::Ssh(_) => "ssh",
             ProxyKind::ShadowQuic(_) => "shadowquic",
+            ProxyKind::Naive(_) => "naive",
         }
     }
 
@@ -714,6 +735,7 @@ impl ProxyKind {
             ProxyKind::Mieru(o) => Some((&o.server, o.port)),
             ProxyKind::Ssh(o) => Some((&o.server, o.port)),
             ProxyKind::ShadowQuic(o) => Some((&o.server, o.port)),
+            ProxyKind::Naive(o) => Some((&o.server, o.port)),
         }
     }
 }

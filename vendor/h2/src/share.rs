@@ -386,6 +386,13 @@ impl<B: Buf> SendStream<B> {
         StreamId::from_internal(self.inner.stream_id())
     }
 
+    // Concord: lets a caller reset a stream it never ends only once its DATA has gone out.
+    /// Ready once none of the DATA queued on this stream waits to be handed to the
+    /// connection, or the stream is closed; `send_reset` drops whatever is still queued.
+    pub fn poll_drained(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+        self.inner.poll_drained(cx)
+    }
+
     // Concord: opt-in split-I/O direct-write API.
     /// Returns true when this stream belongs to a split-I/O client connection.
     pub fn has_direct_writer(&self) -> bool {

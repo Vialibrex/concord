@@ -860,6 +860,11 @@ impl Prioritize {
                         debug_assert!(_res.is_ok());
                     });
 
+                    // Concord: wakes `SendStream::poll_drained`.
+                    if stream.buffered_send_data == 0 {
+                        stream.notify_send();
+                    }
+
                     let (eos, len) =
                         tracing::trace_span!("updating connection flow").in_scope(|| {
                             // TODO: proper error handling

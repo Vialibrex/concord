@@ -32,6 +32,8 @@ const NAMES: &[&str] = &[
     "wireguard-go",
     "mieru",
     "shadowsocks-rust",
+    "naiveproxy",
+    "cronet-go",
     "Go",
     "Rust",
     "Tokio",

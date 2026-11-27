@@ -17,6 +17,7 @@ mod lazy;
 mod link;
 mod masque;
 mod mieru;
+mod naive;
 mod node;
 mod openvpn;
 mod quic;

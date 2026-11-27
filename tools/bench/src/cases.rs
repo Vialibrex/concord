@@ -153,6 +153,16 @@ pub const ALL: &[Spec] = &[
         "trojan over TLS with the chrome client fingerprint (BoringSSL)",
     ),
     spec("anytls", true, "anytls"),
+    spec(
+        "naive",
+        true,
+        "NaiveProxy over HTTP/2, UDP over TCP (sing-box server, needs --sing-box)",
+    ),
+    spec(
+        "naive-quic",
+        true,
+        "NaiveProxy over HTTP/3, UDP over TCP (sing-box server, needs --sing-box)",
+    ),
     spec("hysteria2", true, "hysteria2 over QUIC"),
     spec(
         "hysteria-brutal",
@@ -267,8 +277,19 @@ impl Case {
 pub fn needs_mihomo(spec: Spec) -> bool {
     !matches!(
         spec.name,
-        "direct" | "rematch" | "hysteria-brutal" | "masque-l4" | "openvpn" | "openvpn-tcp"
+        "direct"
+            | "rematch"
+            | "hysteria-brutal"
+            | "naive"
+            | "naive-quic"
+            | "masque-l4"
+            | "openvpn"
+            | "openvpn-tcp"
     ) && !is_mitm(spec)
+}
+
+pub fn needs_singbox(spec: Spec) -> bool {
+    matches!(spec.name, "hysteria-brutal" | "naive" | "naive-quic")
 }
 
 /// The case needs a second listener: the TLS server its handshake is relayed to.
@@ -319,22 +340,8 @@ pub fn build(spec: Spec, host: &str, port: u16, decoy: u16, certs: &Path) -> Cas
             ..Case::bare(spec)
         };
     }
-    if spec.name == "hysteria-brutal" {
-        return Case {
-            singbox_listener: Some(json!({
-                "type": "hysteria", "tag": spec.name, "listen": host, "listen_port": port,
-                "up_mbps": 100, "down_mbps": 100,
-                "users": [{"name": "bench", "auth_str": "hy1-pw"}],
-                "tls": {"enabled": true, "alpn": ["hysteria"],
-                    "certificate_path": certs.join("cert.pem"), "key_path": certs.join("key.pem")}
-            })),
-            proxy: Some(json!({
-                "name": spec.name, "type": "hysteria", "server": host, "port": port,
-                "udp": true, "auth-str": "hy1-pw", "up": "100", "down": "100",
-                "sni": "localhost", "skip-cert-verify": true
-            })),
-            ..Case::bare(spec)
-        };
+    if let Some(case) = singbox_case(spec, host, port, certs) {
+        return case;
     }
     if let Some(case) = crate::openvpn::case(spec, host, port, certs) {
         return case;
@@ -582,6 +589,46 @@ fn merge(mut base: Value, more: &Value) -> Value {
         }
     }
     base
+}
+
+/// A case whose server is sing-box: Hysteria v1, which mihomo cannot serve, and NaiveProxy.
+fn singbox_case(spec: Spec, host: &str, port: u16, certs: &Path) -> Option<Case> {
+    if spec.name == "hysteria-brutal" {
+        return Some(Case {
+            singbox_listener: Some(json!({
+                "type": "hysteria", "tag": spec.name, "listen": host, "listen_port": port,
+                "up_mbps": 100, "down_mbps": 100,
+                "users": [{"name": "bench", "auth_str": "hy1-pw"}],
+                "tls": {"enabled": true, "alpn": ["hysteria"],
+                    "certificate_path": certs.join("cert.pem"), "key_path": certs.join("key.pem")}
+            })),
+            proxy: Some(json!({
+                "name": spec.name, "type": "hysteria", "server": host, "port": port,
+                "udp": true, "auth-str": "hy1-pw", "up": "100", "down": "100",
+                "sni": "localhost", "skip-cert-verify": true
+            })),
+            ..Case::bare(spec)
+        });
+    }
+    if matches!(spec.name, "naive" | "naive-quic") {
+        let quic = spec.name == "naive-quic";
+        return Some(Case {
+            singbox_listener: Some(json!({
+                "type": "naive", "tag": spec.name, "listen": host, "listen_port": port,
+                "network": if quic { "udp" } else { "tcp" },
+                "users": [{"username": "bench", "password": "naive-pw"}],
+                "tls": {"enabled": true,
+                    "certificate_path": certs.join("cert.pem"), "key_path": certs.join("key.pem")}
+            })),
+            proxy: Some(json!({
+                "name": spec.name, "type": "naive", "server": host, "port": port, "quic": quic,
+                "username": "bench", "password": "naive-pw", "udp": true, "udp-over-tcp": true,
+                "sni": "localhost", "skip-cert-verify": true
+            })),
+            ..Case::bare(spec)
+        });
+    }
+    None
 }
 
 pub fn write_certs(dir: &Path) -> std::io::Result<()> {

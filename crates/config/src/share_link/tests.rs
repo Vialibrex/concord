@@ -400,3 +400,43 @@ fn hysteria2_port_hopping_links() {
     assert_eq!(proxies[0]["ports"], "443,20000-30000");
     assert_eq!(proxies[0]["password"], "pw");
 }
+
+#[test]
+fn naive_links_follow_ducksofts_scheme() {
+    let read = decode_link("naive+https://what:happened@test.someone.cf?padding=false#Naive!");
+    assert_eq!(read[0]["name"], "Naive!");
+    assert_eq!(read[0]["port"], "443");
+    assert_eq!(read[0]["username"], "what");
+    assert_eq!(read[0]["password"], "happened");
+    assert_eq!(read[0]["quic"], false);
+    let read = decode_link("naive+quic://manhole:114514@quic.test.me");
+    assert_eq!(read[0]["name"], "quic.test.me:443");
+    assert_eq!(read[0]["quic"], true);
+    let read = decode_link(
+        "naive+https://u:p@a.example:8443?extra-headers=X-Username%3Auser%0D%0AX-Password%3A%20pass&sni=b.example&insecure-concurrency=3",
+    );
+    assert_eq!(read[0]["port"], "8443");
+    assert_eq!(read[0]["sni"], "b.example");
+    assert_eq!(read[0]["insecure-concurrency"], 3);
+    assert_eq!(
+        read[0]["headers"],
+        json!({"X-Username": "user", "X-Password": "pass"})
+    );
+    check(
+        json!({"name": "naive", "type": "naive", "server": "m.example", "port": 443, "quic": true,
+            "username": "u", "password": "p@ss", "headers": {"X-A": "1", "X-B": "2"},
+            "sni": "s.example", "insecure-concurrency": 2}),
+        "naive+quic://u:p%40ss@m.example:443?extra-headers=X-A%3A+1%0D%0AX-B%3A+2&insecure-concurrency=2&sni=s.example#naive",
+        &[
+            ("name", "naive"),
+            ("type", "naive"),
+            ("username", "u"),
+            ("password", "p@ss"),
+            ("quic", "true"),
+            ("headers.X-A", "1"),
+            ("headers.X-B", "2"),
+            ("sni", "s.example"),
+            ("insecure-concurrency", "2"),
+        ],
+    );
+}

@@ -1,4 +1,3 @@
-mod errors;
 mod io;
 
 use std::io as stdio;
@@ -8,7 +7,7 @@ use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use tokio::io::AsyncReadExt;
 
-use errors::error;
+use crate::h3io::{H3Upload, H3Writer, h3_io_error as error};
 
 use super::BoxRead;
 use super::request::Built;
@@ -133,7 +132,7 @@ impl H3Transport {
     pub(super) async fn fixed(&self, req: &Built, body: Vec<u8>) -> stdio::Result<u16> {
         let (stream, session) = self.request(req).await?;
         let (send, recv) = stream.split();
-        let mut upload = io::Upload::new(send);
+        let mut upload = H3Upload::new(send);
         if !body.is_empty() {
             upload.send(Bytes::from(body)).await?;
         }
@@ -147,7 +146,7 @@ impl H3Transport {
     pub(super) async fn download(&self, req: &Built) -> stdio::Result<Pending> {
         let (stream, session) = self.request(req).await?;
         let (send, recv) = stream.split();
-        io::Upload::new(send).finish().await?;
+        H3Upload::new(send).finish().await?;
         Ok(Self::response(recv, session))
     }
 
@@ -155,7 +154,7 @@ impl H3Transport {
         let (stream, session) = self.request(req).await?;
         let (send, recv) = stream.split();
         Ok((
-            Box::new(io::Writer::new(send, session.clone())),
+            Box::new(H3Writer::new(send, session.clone())),
             Self::response(recv, session),
         ))
     }

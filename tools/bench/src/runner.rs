@@ -172,7 +172,7 @@ impl Rig {
             let binary = self
                 .sing_box
                 .as_ref()
-                .ok_or("hysteria-brutal needs --sing-box")?;
+                .ok_or("a case served by sing-box needs --sing-box")?;
             let config = self.dir.join("server/singbox.json");
             std::fs::write(&config, cases::singbox_config(&built).to_string())
                 .map_err(|e| e.to_string())?;
@@ -572,6 +572,7 @@ impl Rig {
                     )
                 })
                 .flatten(),
+            trust: Some(self.dir.join("server/certs/cert.pem")).filter(|p| p.exists()),
             mixed,
             placement: self.placement(Role::Core),
             log: self

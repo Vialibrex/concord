@@ -4,6 +4,14 @@ use bytes::{Buf, Bytes};
 use h3::error::StreamError;
 use tokio::io::ReadBuf;
 
+mod body;
+mod errors;
+mod write;
+
+pub use body::{H3Body, H3Response};
+pub use errors::h3_io_error;
+pub use write::{H3Upload, H3Writer, Keep, SendStream};
+
 pub type RecvStream = h3::client::RequestStream<h3_quinn::RecvStream, Bytes>;
 
 /// The response body of a request stream as a byte stream. A read copies every DATA chunk already
@@ -22,6 +30,11 @@ impl H3Reader {
             pending: Bytes::new(),
             end: None,
         }
+    }
+
+    pub(crate) fn stop_sending(&mut self) {
+        self.recv
+            .stop_sending(h3::error::Code::H3_REQUEST_CANCELLED);
     }
 
     /// `Ready(Ok(()))` with nothing read is the end of the body. An error that follows bytes

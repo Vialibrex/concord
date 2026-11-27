@@ -107,7 +107,7 @@ struct RunArgs {
     #[arg(long, value_enum, default_value = "quick")]
     tier: Tier,
     #[arg(
-        help = "`NAME=concord:PATH`, `NAME=mihomo:PATH`, `NAME=singbox:PATH` (the direct, trojan-tls and plain Shadowsocks cases), `NAME=ssrust:PATH` (sslocal), or `NAME=rev:GITREV`, repeatable. The first is the subject; the others are what it is compared with. Defaults to `concord=concord:target/release/concord` and, with --mihomo, `go=mihomo:<that binary>`."
+        help = "`NAME=concord:PATH`, `NAME=mihomo:PATH`, `NAME=singbox:PATH` (the direct, trojan-tls, plain Shadowsocks and naive cases), `NAME=ssrust:PATH` (sslocal), or `NAME=rev:GITREV`, repeatable. The first is the subject; the others are what it is compared with. Defaults to `concord=concord:target/release/concord` and, with --mihomo, `go=mihomo:<that binary>`."
     )]
     #[arg(long = "core")]
     cores: Vec<String>,
@@ -118,7 +118,7 @@ struct RunArgs {
     mihomo: Option<PathBuf>,
     #[arg(
         long,
-        help = "sing-box with QUIC support, serving the Hysteria v1 Brutal case."
+        help = "sing-box with QUIC support, serving the Hysteria v1 Brutal and naive cases."
     )]
     sing_box: Option<PathBuf>,
     #[arg(
@@ -575,10 +575,10 @@ fn run(args: RunArgs) -> Result<bool, String> {
         return Err("two cores share a name".into());
     }
     if attached.is_empty()
-        && plan.cases.iter().any(|c| c.name == "hysteria-brutal")
+        && plan.cases.iter().any(|c| cases::needs_singbox(*c))
         && args.sing_box.is_none()
     {
-        return Err("hysteria-brutal needs --sing-box with QUIC support".into());
+        return Err("hysteria-brutal and the naive cases need --sing-box with QUIC support".into());
     }
     let needs_server = attached.is_empty() && plan.cases.iter().any(|c| cases::needs_mihomo(*c));
     let mihomo = match mihomo {

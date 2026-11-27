@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
+use super::plain_url;
 use super::urlx::{
     Link, decode_base64_std, decode_base64_url, parse_query, try_decode_base64, unique_name,
 };
@@ -87,7 +88,7 @@ fn split_alpn(value: &str) -> Value {
     Value::Array(value.split(',').map(text).collect())
 }
 
-fn into_map(value: Value) -> Map {
+pub(super) fn into_map(value: Value) -> Map {
     match value {
         Value::Object(map) => map,
         _ => Map::new(),
@@ -357,33 +358,8 @@ fn decode_line(
             }
             out.push(map);
         }
-        "anytls" => {
-            let Some(link) = Link::parse(line) else {
-                return;
-            };
-            if link.host.is_empty() || link.port.is_empty() {
-                return;
-            }
-            let username = link.username().to_string();
-            let password = link.password.clone().unwrap_or_else(|| username.clone());
-            let remarks = if link.fragment.is_empty() {
-                format!("{}:{}", link.host, link.port)
-            } else {
-                link.fragment.clone()
-            };
-            out.push(into_map(json!({
-                "name": unique_name(names, &remarks),
-                "type": "anytls",
-                "server": link.host,
-                "port": link.port,
-                "username": username,
-                "password": password,
-                "sni": link.get("sni"),
-                "fingerprint": link.get("hpkp"),
-                "skip-cert-verify": link.get("insecure") == "1",
-                "udp": true,
-            })));
-        }
+        "anytls" => plain_url::anytls(line, names, out),
+        "naive+https" | "naive+quic" => plain_url::naive(scheme, line, names, out),
         "mierus" => decode_mieru(line, names, out),
         _ => {}
     }
