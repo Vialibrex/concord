@@ -7,6 +7,14 @@ use crate::stream::Subscription;
 use crate::watch as streams;
 
 impl Control {
+    pub fn connection_snapshot(&self) -> ConnectionSnapshot {
+        streams::connection_snapshot(&self.engine)
+    }
+
+    pub fn traffic_totals(&self) -> (i64, i64) {
+        self.engine.traffic_total(false)
+    }
+
     pub(super) async fn traffic_watch(
         &self,
         params: TrafficWatchParams,
@@ -42,11 +50,7 @@ impl Control {
         if params.all {
             self.engine.close_all_connections();
         } else if let Some(ids) = params.ids {
-            for record in self.engine.connections() {
-                if ids.contains(&record.seq) {
-                    record.close();
-                }
-            }
+            self.engine.close_connections_by_seq(&ids);
         } else {
             return Err(ApiError::invalid_params("name ids or set all"));
         }

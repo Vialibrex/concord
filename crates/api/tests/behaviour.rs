@@ -1322,17 +1322,101 @@ async fn connections_arrive_as_a_snapshot_then_opens_counters_and_closes() {
         delta.closed.contains(&opened.opened[0].id)
     })
     .await;
-    assert!(
-        rig.control
-            .connection_close(ConnectionCloseParams {
-                ids: None,
-                all: false,
-            })
-            .await
-            .is_err()
-    );
+    let err = rig
+        .control
+        .connection_close(ConnectionCloseParams {
+            ids: None,
+            all: false,
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.message, "name ids or set all");
     drop(watch);
     assert_eq!(rig.bus.subscribers(), 0);
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connection_close_preserves_empty_unknown_duplicate_and_all_precedence() {
+    let rig = Rig::new().await;
+    let proxy = port_to_bind_later();
+    rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let target_port = echo_target().await;
+    let mut watch = rig
+        .control
+        .connection_watch(ConnectionWatchParams::default())
+        .await
+        .unwrap();
+
+    let s1 = through_the_proxy(proxy, target_port).await;
+    let id1 = eventually(&mut watch.events, |delta| !delta.opened.is_empty())
+        .await
+        .opened[0]
+        .id;
+    let s2 = through_the_proxy(proxy, target_port).await;
+    let id2 = eventually(&mut watch.events, |delta| !delta.opened.is_empty())
+        .await
+        .opened[0]
+        .id;
+    let s3 = through_the_proxy(proxy, target_port).await;
+    let id3 = eventually(&mut watch.events, |delta| !delta.opened.is_empty())
+        .await
+        .opened[0]
+        .id;
+
+    rig.control
+        .connection_close(ConnectionCloseParams {
+            ids: Some(Vec::new()),
+            all: false,
+        })
+        .await
+        .unwrap();
+    rig.control
+        .connection_close(ConnectionCloseParams {
+            ids: Some(vec![u64::MAX]),
+            all: false,
+        })
+        .await
+        .unwrap();
+    assert_eq!(rig.engine.connection_count(), 3);
+
+    rig.control
+        .connection_close(ConnectionCloseParams {
+            ids: Some(vec![id1, id1, u64::MAX]),
+            all: false,
+        })
+        .await
+        .unwrap();
+    let closed1 = eventually(&mut watch.events, |delta| delta.closed.contains(&id1)).await;
+    assert_eq!(
+        closed1
+            .ended
+            .iter()
+            .find(|end| end.id == id1)
+            .map(|end| end.reason),
+        Some(ConnectionEndReason::Core)
+    );
+    assert_eq!(rig.engine.connection_count(), 2);
+
+    rig.control
+        .connection_close(ConnectionCloseParams {
+            ids: Some(vec![u64::MAX]),
+            all: true,
+        })
+        .await
+        .unwrap();
+    let mut remaining = std::collections::HashSet::from([id2, id3]);
+    while !remaining.is_empty() {
+        let delta = eventually(&mut watch.events, |delta| !delta.closed.is_empty()).await;
+        for id in delta.closed {
+            remaining.remove(&id);
+        }
+    }
+    assert_eq!(rig.engine.connection_count(), 0);
+
+    drop((s1, s2, s3, watch));
     rig.finish().await;
 }
 
@@ -1381,6 +1465,106 @@ async fn a_closed_connection_brings_its_final_totals_to_a_watch_without_counters
         "without counters only closes carry totals: {closed:?}"
     );
     drop(watch);
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_counter_and_non_counter_watchers_preserve_periodic_and_final_totals() {
+    let rig = Rig::new().await;
+    let proxy = port_to_bind_later();
+    rig.write_config(&format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"));
+    rig.apply().await.unwrap();
+    rig.control.engine_start(Empty::default()).await.unwrap();
+    let target_port = echo_target().await;
+
+    let mut plain = rig
+        .control
+        .connection_watch(ConnectionWatchParams {
+            counters: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let _log = rig
+        .control
+        .log_watch(LogWatchParams::default())
+        .await
+        .unwrap();
+    assert!(!concord_common::EventSink::wants_connection_counters(
+        rig.bus.as_ref()
+    ));
+
+    let mut stream = through_the_proxy(proxy, target_port).await;
+    let opened = eventually(&mut plain.events, |delta| !delta.opened.is_empty()).await;
+    let id = opened.opened[0].id;
+    let mut echoed = [0u8; 4];
+    stream.write_all(b"ping").await.unwrap();
+    stream.read_exact(&mut echoed).await.unwrap();
+    timeout(PATIENCE, async {
+        loop {
+            let ready = rig
+                .control
+                .connection_snapshot()
+                .connections
+                .iter()
+                .any(|conn| conn.id == id && (conn.upload, conn.download) == (4, 4));
+            if ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("connection did not record initial traffic");
+
+    let mut counted = rig
+        .control
+        .connection_watch(ConnectionWatchParams {
+            counters: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(concord_common::EventSink::wants_connection_counters(
+        rig.bus.as_ref()
+    ));
+    let snapshot = counted.snapshot.take().unwrap();
+    let seen = snapshot
+        .connections
+        .iter()
+        .find(|conn| conn.id == id)
+        .expect("late counter watcher sees initial totals in snapshot");
+    assert_eq!((seen.upload, seen.download), (4, 4));
+
+    stream.write_all(b"pong").await.unwrap();
+    stream.read_exact(&mut echoed).await.unwrap();
+    eventually(&mut counted.events, |delta| {
+        delta
+            .counters
+            .iter()
+            .any(|counter| counter.id == id && (counter.upload, counter.download) == (8, 8))
+    })
+    .await;
+
+    drop(counted);
+    assert!(!concord_common::EventSink::wants_connection_counters(
+        rig.bus.as_ref()
+    ));
+    stream.write_all(b"last").await.unwrap();
+    stream.read_exact(&mut echoed).await.unwrap();
+    stream.shutdown().await.unwrap();
+    drop(stream);
+
+    let closed = eventually(&mut plain.events, |delta| delta.closed.contains(&id)).await;
+    let totals = closed
+        .counters
+        .iter()
+        .find(|counter| counter.id == id)
+        .expect("non-counter watcher still receives final totals on close");
+    assert_eq!((totals.upload, totals.download), (12, 12));
+    assert!(closed.ended.iter().any(|end| end.id == id));
+
+    drop((plain, _log));
     rig.finish().await;
 }
 

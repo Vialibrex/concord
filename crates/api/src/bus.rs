@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -28,6 +28,7 @@ type Hook = Box<dyn Fn(bool) + Send + Sync>;
 pub struct Topic<S> {
     subs: Mutex<Vec<Weak<S>>>,
     count: AtomicUsize,
+    joins: AtomicUsize,
     any: Arc<AtomicUsize>,
     hook: Option<Hook>,
 }
@@ -37,6 +38,7 @@ impl<S> Topic<S> {
         Arc::new(Topic {
             subs: Mutex::new(Vec::new()),
             count: AtomicUsize::new(0),
+            joins: AtomicUsize::new(0),
             any,
             hook,
         })
@@ -50,10 +52,15 @@ impl<S> Topic<S> {
         self.count.load(Ordering::Relaxed)
     }
 
+    pub fn joins(&self) -> usize {
+        self.joins.load(Ordering::Relaxed)
+    }
+
     pub fn join(self: &Arc<Self>, sub: &Arc<S>) -> Membership<S> {
         {
             let mut subs = lock(&self.subs);
             subs.push(Arc::downgrade(sub));
+            self.joins.fetch_add(1, Ordering::Relaxed);
             self.any.fetch_add(1, Ordering::SeqCst);
             if self.count.fetch_add(1, Ordering::SeqCst) == 0
                 && let Some(hook) = &self.hook
@@ -121,11 +128,18 @@ struct Closed {
 #[derive(Default)]
 struct ConnPending {
     opened: Vec<Arc<ConnRecord>>,
+    opened_ids: HashSet<u64>,
     closed: HashMap<u64, Closed>,
     counters: HashMap<u64, (u64, u64)>,
     overflowed: bool,
     resync_sent: bool,
     waker: Option<Waker>,
+}
+
+impl ConnPending {
+    fn len(&self) -> usize {
+        self.opened.len() + self.closed.len() + self.counters.len()
+    }
 }
 
 /// The changes to the connection table since a `connection.watch` last looked.
@@ -152,10 +166,10 @@ impl ConnSub {
                 return;
             }
             apply(&mut pending);
-            if pending.opened.len() + pending.closed.len() + pending.counters.len() > CONN_CAPACITY
-            {
+            if pending.len() > CONN_CAPACITY {
                 pending.overflowed = true;
                 pending.opened.clear();
+                pending.opened_ids.clear();
                 pending.closed.clear();
                 pending.counters.clear();
             }
@@ -167,11 +181,17 @@ impl ConnSub {
     }
 
     fn opened(&self, record: Arc<ConnRecord>) {
-        self.change(|pending| pending.opened.push(record));
+        self.change(|pending| {
+            let seq = record.seq;
+            pending.opened_ids.insert(seq);
+            pending.counters.remove(&seq);
+            pending.opened.push(record);
+        });
     }
 
     fn closed(&self, seq: u64, totals: (u64, u64), end: &ConnEnd) {
         self.change(|pending| {
+            pending.counters.remove(&seq);
             pending.closed.insert(
                 seq,
                 Closed {
@@ -183,14 +203,22 @@ impl ConnSub {
     }
 
     fn counters(&self, deltas: &[TrafficDelta]) {
-        if !self.counters {
+        if !self.counters || deltas.is_empty() {
             return;
         }
         self.change(|pending| {
             for delta in deltas {
+                if pending.opened_ids.contains(&delta.seq)
+                    || pending.closed.contains_key(&delta.seq)
+                {
+                    continue;
+                }
                 pending
                     .counters
                     .insert(delta.seq, (delta.upload, delta.download));
+                if pending.len() > CONN_CAPACITY {
+                    break;
+                }
             }
         });
     }
@@ -210,6 +238,7 @@ impl ConnSub {
                 pending.waker = Some(cx.waker().clone());
                 return Poll::Pending;
             }
+            pending.opened_ids.clear();
             (
                 std::mem::take(&mut pending.opened),
                 std::mem::take(&mut pending.closed),
@@ -217,9 +246,6 @@ impl ConnSub {
             )
         };
         let (opened, closed, mut counters) = taken;
-        for record in &opened {
-            counters.remove(&record.seq);
-        }
         counters.extend(closed.iter().map(|(id, closed)| (*id, closed.totals)));
         let mut ended: Vec<_> = closed
             .iter()
@@ -255,8 +281,17 @@ impl ConnSub {
     }
 }
 
+struct CounterInterest(Arc<AtomicUsize>);
+
+impl Drop for CounterInterest {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct ConnStream {
     sub: Arc<ConnSub>,
+    _counter_interest: Option<CounterInterest>,
     _membership: Membership<ConnSub>,
 }
 
@@ -274,6 +309,7 @@ impl Stream for ConnStream {
 /// building events.
 pub struct EventBus {
     any: Arc<AtomicUsize>,
+    conn_counters: Arc<AtomicUsize>,
     gate: Arc<LogGate>,
     log: Arc<Topic<QueueSub<LogEntry>>>,
     dns: Arc<Topic<QueueSub<DnsEntry>>>,
@@ -286,6 +322,7 @@ pub struct EventBus {
 impl EventBus {
     pub fn new() -> Arc<Self> {
         let any = Arc::new(AtomicUsize::new(0));
+        let conn_counters = Arc::new(AtomicUsize::new(0));
         let gate = LogGate::new();
         let engine: Arc<OnceLock<Weak<EngineCore>>> = Arc::new(OnceLock::new());
         let log_gate = gate.clone();
@@ -307,6 +344,7 @@ impl EventBus {
             events: Topic::new(any.clone(), None),
             conn: Topic::new(any.clone(), None),
             any,
+            conn_counters,
             gate,
             engine,
         })
@@ -393,8 +431,13 @@ impl EventBus {
     pub fn watch_connections(&self, counters: bool) -> ConnStream {
         let sub = ConnSub::new(counters);
         let membership = self.conn.join(&sub);
+        let counter_interest = counters.then(|| {
+            self.conn_counters.fetch_add(1, Ordering::SeqCst);
+            CounterInterest(self.conn_counters.clone())
+        });
         ConnStream {
             sub,
+            _counter_interest: counter_interest,
             _membership: membership,
         }
     }
@@ -408,11 +451,25 @@ impl EventBus {
             self.conn.subscribers(),
         ]
     }
+
+    pub fn topic_joins(&self) -> [usize; 5] {
+        [
+            self.log.joins(),
+            self.dns.joins(),
+            self.route.joins(),
+            self.events.joins(),
+            self.conn.joins(),
+        ]
+    }
 }
 
 impl EventSink for EventBus {
     fn enabled(&self) -> bool {
         self.any.load(Ordering::Relaxed) > 0
+    }
+
+    fn wants_connection_counters(&self) -> bool {
+        self.conn_counters.load(Ordering::Relaxed) > 0
     }
 
     fn publish(&self, event: EngineEvent) {
@@ -439,7 +496,7 @@ impl EventSink for EventBus {
                 }
             }
             EngineEvent::RequestTraffic(deltas) => {
-                if self.conn.active() {
+                if self.wants_connection_counters() {
                     self.conn.each(|sub| sub.counters(&deltas));
                 }
             }
@@ -814,5 +871,256 @@ mod tests {
         assert!(bus.gate.wants(concord_common::LogLevel::Error));
         drop(second);
         assert!(!bus.gate.wants(concord_common::LogLevel::Error));
+    }
+
+    #[test]
+    fn wants_connection_counters_tracks_only_counter_enabled_connection_watchers() {
+        let bus = EventBus::new();
+        assert!(!bus.enabled());
+        assert!(!bus.wants_connection_counters());
+
+        let log = bus.watch_log(LogLevel::Info, false);
+        let dns = bus.watch_dns();
+        let route = bus.watch_route();
+        let events = bus.watch_events(true, true);
+        assert!(bus.enabled());
+        assert!(!bus.wants_connection_counters());
+
+        let mut no_counters = bus.watch_connections(false);
+        assert!(bus.enabled());
+        assert!(!bus.wants_connection_counters());
+
+        let mut first = bus.watch_connections(true);
+        assert!(bus.wants_connection_counters());
+        let mut second = bus.watch_connections(true);
+        assert!(bus.wants_connection_counters());
+
+        let conn = record();
+        bus.publish(EngineEvent::Request(conn.clone()));
+        assert!(pull(&mut no_counters).is_some());
+        assert!(pull(&mut first).is_some());
+        assert!(pull(&mut second).is_some());
+
+        bus.publish(EngineEvent::RequestTraffic(vec![delta(conn.seq, 12)]));
+        assert!(pull(&mut no_counters).is_none());
+        assert_eq!(totals(&pull_event(&mut first)), [(conn.seq, 12, 0)]);
+        assert_eq!(totals(&pull_event(&mut second)), [(conn.seq, 12, 0)]);
+
+        drop(first);
+        assert!(bus.wants_connection_counters());
+        drop(second);
+        assert!(!bus.wants_connection_counters());
+        assert!(bus.enabled());
+
+        conn.upload.store(25, Ordering::Relaxed);
+        conn.download.store(7, Ordering::Relaxed);
+        bus.closed(&conn);
+        let closed = pull_event(&mut no_counters);
+        assert_eq!(closed.closed, [conn.seq]);
+        assert_eq!(totals(&closed), [(conn.seq, 25, 7)]);
+
+        drop((log, dns, route, events, no_counters));
+        assert!(!bus.enabled());
+        assert!(!bus.wants_connection_counters());
+    }
+
+    #[test]
+    fn pending_deduplicates_same_window_counters_for_opened_and_closed_connections() {
+        let bus = EventBus::new();
+        let mut stream = bus.watch_connections(true);
+        let (opened_only, short_lived, existing) = (record(), record(), record());
+
+        bus.publish(EngineEvent::Request(opened_only.clone()));
+        bus.publish(EngineEvent::Request(short_lived.clone()));
+        bus.publish(EngineEvent::RequestTraffic(vec![
+            delta(opened_only.seq, 10),
+            delta(short_lived.seq, 20),
+            delta(existing.seq, 30),
+        ]));
+        {
+            let pending = lock(&stream.sub.pending);
+            assert_eq!(pending.opened.len(), 2);
+            assert_eq!(pending.closed.len(), 0);
+            assert_eq!(
+                pending.counters.len(),
+                1,
+                "same-window opened connections skip separate counter slots"
+            );
+            assert!(pending.counters.contains_key(&existing.seq));
+        }
+
+        short_lived.upload.store(25, Ordering::Relaxed);
+        existing.upload.store(35, Ordering::Relaxed);
+        bus.closed(&short_lived);
+        bus.closed(&existing);
+        bus.publish(EngineEvent::RequestTraffic(vec![
+            delta(short_lived.seq, 999),
+            delta(existing.seq, 999),
+        ]));
+        {
+            let pending = lock(&stream.sub.pending);
+            assert_eq!(pending.opened.len(), 2);
+            assert_eq!(pending.closed.len(), 2);
+            assert!(
+                pending.counters.is_empty(),
+                "closing removes pending counters and ignores late ones"
+            );
+        }
+
+        let data = pull_event(&mut stream);
+        let opened_ids: Vec<u64> = data.opened.iter().map(|info| info.id).collect();
+        assert_eq!(opened_ids, [opened_only.seq, short_lived.seq]);
+        let mut expected_closed = vec![short_lived.seq, existing.seq];
+        expected_closed.sort_unstable();
+        assert_eq!(data.closed, expected_closed);
+        assert_eq!(
+            totals(&data),
+            [(short_lived.seq, 25, 0), (existing.seq, 35, 0)]
+        );
+    }
+
+    #[test]
+    fn pending_capacity_boundaries_hold_across_pure_short_and_counted_bursts() {
+        // Pure opens: 8,192 fits, 8,193 resyncs.
+        {
+            let bus = EventBus::new();
+            let mut stream = bus.watch_connections(true);
+            for _ in 0..CONN_CAPACITY {
+                bus.publish(EngineEvent::Request(record()));
+            }
+            assert_eq!(pull_event(&mut stream).opened.len(), CONN_CAPACITY);
+            for _ in 0..=CONN_CAPACITY {
+                bus.publish(EngineEvent::Request(record()));
+            }
+            assert!(matches!(pull(&mut stream), Some(Delivery::Resync)));
+            assert!(pull(&mut stream).is_none());
+        }
+
+        // Pure closes: 8,192 fits, 8,193 resyncs.
+        {
+            let bus = EventBus::new();
+            let mut stream = bus.watch_connections(true);
+            for _ in 0..CONN_CAPACITY {
+                bus.closed(&record());
+            }
+            assert_eq!(pull_event(&mut stream).closed.len(), CONN_CAPACITY);
+            for _ in 0..=CONN_CAPACITY {
+                bus.closed(&record());
+            }
+            assert!(matches!(pull(&mut stream), Some(Delivery::Resync)));
+            assert!(pull(&mut stream).is_none());
+        }
+
+        // Pure counters: 8,192 fits (and closing one of them replaces its slot instead of overflowing), 8,193 resyncs.
+        {
+            let bus = EventBus::new();
+            let mut stream = bus.watch_connections(true);
+            let mut records = Vec::with_capacity(CONN_CAPACITY);
+            for _ in 0..CONN_CAPACITY {
+                records.push(record());
+            }
+            let batch: Vec<_> = records.iter().map(|rec| delta(rec.seq, 1)).collect();
+            bus.publish(EngineEvent::RequestTraffic(batch));
+            records[0].upload.store(9, Ordering::Relaxed);
+            bus.closed(&records[0]);
+            let data = pull_event(&mut stream);
+            assert_eq!(data.counters.len(), CONN_CAPACITY);
+            assert_eq!(data.closed, [records[0].seq]);
+            assert_eq!(
+                data.counters
+                    .iter()
+                    .find(|counter| counter.id == records[0].seq)
+                    .map(|counter| counter.upload),
+                Some(9)
+            );
+
+            let overflow: Vec<_> = (0..=CONN_CAPACITY)
+                .map(|i| delta(i as u64 + 1, 1))
+                .collect();
+            bus.publish(EngineEvent::RequestTraffic(overflow));
+            assert!(matches!(pull(&mut stream), Some(Delivery::Resync)));
+            assert!(pull(&mut stream).is_none());
+        }
+
+        // Short-lived connections with open + counter + close take 2 slots each:
+        // 2,730, 2,731, and 4,096 all fit without Resync; 4,097 overflows.
+        for count in [2_730usize, 2_731, CONN_CAPACITY / 2] {
+            let bus = EventBus::new();
+            let mut stream = bus.watch_connections(true);
+            let mut seqs = Vec::with_capacity(count);
+            for idx in 0..count {
+                let rec = record();
+                let seq = rec.seq;
+                seqs.push(seq);
+                bus.publish(EngineEvent::Request(rec.clone()));
+                bus.publish(EngineEvent::RequestTraffic(vec![delta(seq, idx as u64)]));
+                rec.upload.store(idx as u64 + 1, Ordering::Relaxed);
+                bus.closed(&rec);
+            }
+            assert_eq!(lock(&stream.sub.pending).len(), count * 2);
+            assert!(lock(&stream.sub.pending).counters.is_empty());
+            let data = pull_event(&mut stream);
+            assert_eq!(data.opened.len(), count);
+            assert_eq!(data.closed.len(), count);
+            assert_eq!(data.ended.len(), count);
+            assert_eq!(data.counters.len(), count);
+            assert_eq!(
+                data.opened.iter().map(|info| info.id).collect::<Vec<_>>(),
+                seqs
+            );
+            assert!(data.closed.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(data.ended.windows(2).all(|pair| pair[0].id < pair[1].id));
+            assert!(data.counters.windows(2).all(|pair| pair[0].id < pair[1].id));
+        }
+
+        {
+            let bus = EventBus::new();
+            let mut stream = bus.watch_connections(true);
+            for _ in 0..=(CONN_CAPACITY / 2) {
+                let rec = record();
+                bus.publish(EngineEvent::Request(rec.clone()));
+                bus.publish(EngineEvent::RequestTraffic(vec![delta(rec.seq, 1)]));
+                bus.closed(&rec);
+            }
+            assert!(matches!(pull(&mut stream), Some(Delivery::Resync)));
+            assert!(pull(&mut stream).is_none());
+        }
+    }
+
+    #[test]
+    fn huge_counter_batch_and_slow_subscriber_overflow_boundedly_without_affecting_fast_one() {
+        let bus = EventBus::new();
+        let mut fast = bus.watch_connections(true);
+        let mut slow = bus.watch_connections(true);
+        let mut no_counters = bus.watch_connections(false);
+
+        for round in 0..3 {
+            let batch: Vec<_> = (0..3_000u64)
+                .map(|idx| delta(round * 3_000 + idx + 1, 5))
+                .collect();
+            bus.publish(EngineEvent::RequestTraffic(batch));
+            assert_eq!(pull_event(&mut fast).counters.len(), 3_000);
+        }
+        assert!(matches!(pull(&mut slow), Some(Delivery::Resync)));
+        assert!(pull(&mut slow).is_none());
+        assert!(pull(&mut no_counters).is_none());
+
+        let rec = record();
+        rec.upload.store(42, Ordering::Relaxed);
+        bus.publish(EngineEvent::Request(rec.clone()));
+        bus.closed(&rec);
+        assert_eq!(totals(&pull_event(&mut fast)), [(rec.seq, 42, 0)]);
+        assert_eq!(totals(&pull_event(&mut no_counters)), [(rec.seq, 42, 0)]);
+
+        let mut single_burst = bus.watch_connections(true);
+        let huge: Vec<_> = (0..20_000u64).map(|idx| delta(idx + 1, 1)).collect();
+        bus.publish(EngineEvent::RequestTraffic(huge));
+        {
+            let pending = lock(&single_burst.sub.pending);
+            assert!(pending.overflowed);
+            assert!(pending.counters.is_empty());
+        }
+        assert!(matches!(pull(&mut single_burst), Some(Delivery::Resync)));
+        assert!(pull(&mut single_burst).is_none());
     }
 }

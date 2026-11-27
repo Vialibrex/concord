@@ -244,6 +244,12 @@ pub trait EventSink: Send + Sync {
     fn enabled(&self) -> bool;
     fn publish(&self, event: CoreEvent);
 
+    /// Whether any subscriber wants periodic per-connection traffic counters.
+    /// Sinks that do not separate topics inherit [`enabled`](Self::enabled).
+    fn wants_connection_counters(&self) -> bool {
+        self.enabled()
+    }
+
     /// Whether the event was queued. A report of cumulative totals retries when it
     /// was not, and so must not count itself as delivered.
     fn offer(&self, event: CoreEvent) -> bool {

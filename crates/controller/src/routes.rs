@@ -326,10 +326,7 @@ impl Routes {
                     stream::connections(self.control.clone(), Duration::from_millis(period));
                 stream::respond(request, values, &self.sessions)
             }
-            (&Method::GET, []) => {
-                let mut table = stream::Table::new(self.control.clone());
-                json(&table.snapshot().await)
-            }
+            (&Method::GET, []) => json(&stream::connection_snapshot(&self.control).await),
             (&Method::DELETE, []) => {
                 let params = ConnectionCloseParams {
                     ids: None,

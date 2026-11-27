@@ -256,23 +256,30 @@ impl Table {
 
     pub async fn snapshot(&mut self) -> Value {
         self.catch_up().await;
-        let (upload, download) = totals(&self.control).await;
-        let memory = self
-            .control
-            .core_stats(Empty {})
-            .await
-            .map_or(0, |stats| stats.rss);
-        shapes::snapshot(self.open.values(), upload, download, memory)
+        snapshot_value(&self.control, self.open.values()).await
     }
 }
 
-async fn totals(control: &Arc<Control>) -> (i64, i64) {
-    match control.traffic_watch(TrafficWatchParams::default()).await {
-        Ok(subscription) => subscription
-            .snapshot
-            .map_or((0, 0), |traffic| (traffic.total_up, traffic.total_down)),
-        Err(_) => (0, 0),
-    }
+pub async fn connection_snapshot(control: &Arc<Control>) -> Value {
+    let mut list = control.connection_snapshot().connections;
+    sort_connections(&mut list);
+    snapshot_value(control, list.iter()).await
+}
+
+fn sort_connections(list: &mut [ConnectionInfo]) {
+    list.sort_unstable_by_key(|info| info.id);
+}
+
+async fn snapshot_value<'a>(
+    control: &Arc<Control>,
+    connections: impl Iterator<Item = &'a ConnectionInfo>,
+) -> Value {
+    let (upload, download) = control.traffic_totals();
+    let memory = control
+        .core_stats(Empty {})
+        .await
+        .map_or(0, |stats| stats.rss);
+    shapes::snapshot(connections, upload, download, memory)
 }
 
 /// A snapshot now, then one every `period` (`connections.go:60-70`).
@@ -288,4 +295,46 @@ pub fn connections(control: Arc<Control>, period: Duration) -> Values {
         },
     )
     .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(id: u64) -> ConnectionInfo {
+        serde_json::from_value(json!({
+            "id": id,
+            "start": 1_700_000_000_000i64,
+            "network": "tcp",
+            "sourceIp": "127.0.0.1",
+            "sourcePort": 1234,
+            "destinationPort": 443,
+            "inboundType": "socks5",
+            "chains": ["DIRECT"],
+            "rule": "MATCH",
+            "upload": id * 10,
+            "download": id * 20,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn direct_snapshot_sorts_connection_ids_numerically() {
+        let mut list = vec![info(10), info(2), info(100), info(1)];
+        sort_connections(&mut list);
+        let value = shapes::snapshot(list.iter(), 100, 200, 4096);
+        let ids: Vec<&str> = value["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["1", "2", "10", "100"]);
+        assert_eq!(value["uploadTotal"], 100);
+        assert_eq!(value["downloadTotal"], 200);
+        assert_eq!(value["memory"], 4096);
+
+        let empty = shapes::snapshot(std::iter::empty(), 0, 0, 0);
+        assert_eq!(empty["connections"], json!([]));
+    }
 }

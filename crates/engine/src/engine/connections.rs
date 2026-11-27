@@ -29,6 +29,10 @@ impl Engine {
         self.table.len()
     }
 
+    pub fn close_connections_by_seq(&self, seqs: &[u64]) {
+        self.table.close_seqs(seqs);
+    }
+
     pub fn close_all_connections(&self) {
         self.table.close_all();
     }

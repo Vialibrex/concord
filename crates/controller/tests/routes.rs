@@ -845,3 +845,209 @@ async fn the_log_stream_filters_by_the_level_it_asks_for_and_not_the_profiles() 
         json!({"type": "info", "payload": "[TCP] below the profile's level"})
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_get_connections_snapshots_without_subscribing_and_matches_websocket() {
+    let proxy = port_to_bind_later();
+    let rig = Rig::with_profile(
+        false,
+        &format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"),
+    )
+    .await;
+    rig.control.engine_start(Empty {}).await.unwrap();
+
+    let empty = rig.call("GET", "/connections", None).await.json();
+    assert_eq!(empty["connections"], json!([]));
+    assert_eq!(rig.bus.topic_joins()[4], 0);
+    assert_eq!(rig.bus.subscribers(), 0);
+
+    let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    let mut clients = Vec::new();
+    let mut peers = Vec::new();
+    for idx in 0..12usize {
+        let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+            .await
+            .unwrap();
+        client
+            .write_all(format!("CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut ok = [0u8; 39];
+        client.read_exact(&mut ok).await.unwrap();
+        let (mut far, _) = target.accept().await.unwrap();
+        let payload = format!("msg-{idx:02}");
+        client.write_all(payload.as_bytes()).await.unwrap();
+        let mut received = vec![0u8; payload.len()];
+        far.read_exact(&mut received).await.unwrap();
+        clients.push(client);
+        peers.push(far);
+    }
+
+    let get_body = rig.call("GET", "/connections", None).await.json();
+    assert_eq!(
+        rig.bus.topic_joins()[4],
+        0,
+        "plain GET must not open a connection.watch subscription"
+    );
+    let get_conns = get_body["connections"].as_array().unwrap();
+    assert_eq!(get_conns.len(), 12);
+    let ids: Vec<u64> = get_conns
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().parse::<u64>().unwrap())
+        .collect();
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{ids:?}");
+    assert!(get_body["uploadTotal"].as_i64().unwrap() >= 72);
+    assert!(get_body["memory"].is_u64());
+
+    let url = format!(
+        "ws://127.0.0.1:{}/connections?token={}",
+        rig.port, rig.secret
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let first = timeout(PATIENCE, socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let ws_body: Value = serde_json::from_str(first.to_text().unwrap()).unwrap();
+    assert_eq!(rig.bus.topic_joins()[4], 1);
+    assert_eq!(get_body["connections"], ws_body["connections"]);
+    assert_eq!(get_body["uploadTotal"], ws_body["uploadTotal"]);
+    assert_eq!(get_body["downloadTotal"], ws_body["downloadTotal"]);
+
+    assert_eq!(
+        rig.call("DELETE", "/connections/not-a-number", None)
+            .await
+            .status,
+        204
+    );
+    assert_eq!(
+        rig.call("DELETE", "/connections/999999999", None)
+            .await
+            .status,
+        204
+    );
+    let target_id = ids[0];
+    assert_eq!(
+        rig.call("DELETE", &format!("/connections/{target_id}"), None)
+            .await
+            .status,
+        204
+    );
+    timeout(PATIENCE, async {
+        loop {
+            let after = rig.call("GET", "/connections", None).await.json();
+            let list = after["connections"].as_array().unwrap();
+            if list.len() == 11
+                && !list
+                    .iter()
+                    .any(|item| item["id"].as_str() == Some(&target_id.to_string()))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("DELETE /connections/{id} did not close the connection");
+
+    drop((socket, clients, peers));
+    rig.control.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_connections_rebuilds_cleanly_after_resync_overflow() {
+    let proxy = port_to_bind_later();
+    let rig = Rig::with_profile(
+        false,
+        &format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"),
+    )
+    .await;
+    rig.control.engine_start(Empty {}).await.unwrap();
+
+    let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+        .await
+        .unwrap();
+    client
+        .write_all(format!("CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut ok = [0u8; 39];
+    client.read_exact(&mut ok).await.unwrap();
+    let (_far, _) = target.accept().await.unwrap();
+
+    let dummies: Vec<_> = (0..=8_192)
+        .map(|_| {
+            concord_common::ConnRecord::new(
+                concord_common::ConnMeta {
+                    network: concord_common::Network::Tcp,
+                    inbound: concord_common::InboundInfo::new(concord_common::InboundKind::Socks5),
+                    src: "127.0.0.1:1".parse().unwrap(),
+                    dst_ip: None,
+                    dst_port: 1,
+                    host: concord_common::Host::default(),
+                    sniff_host: concord_common::Host::default(),
+                    dns_mode: None,
+                    uid: None,
+                    process: String::new(),
+                    process_path: String::new(),
+                    remote_destination: String::new(),
+                    src_geoip: None,
+                    dst_geoip: None,
+                    src_asn: String::new(),
+                    dst_asn: String::new(),
+                    rematch_name: String::new(),
+                    special_rules: String::new(),
+                    special_proxy: String::new(),
+                },
+                Box::new([]),
+                Box::new([]),
+                Arc::from(""),
+                Arc::from(""),
+                false,
+                0,
+            )
+        })
+        .collect();
+
+    let url = format!(
+        "ws://127.0.0.1:{}/connections?interval=200&token={}",
+        rig.port, rig.secret
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+    let first = timeout(PATIENCE, socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let first: Value = serde_json::from_str(first.to_text().unwrap()).unwrap();
+    assert_eq!(first["connections"].as_array().unwrap().len(), 1);
+    let active_id = first["connections"][0]["id"].as_str().unwrap().to_string();
+    let joins_before = rig.bus.topic_joins()[4];
+    assert_eq!(joins_before, 1);
+
+    for dummy in &dummies {
+        concord_common::EventSink::closed(rig.bus.as_ref(), dummy);
+    }
+
+    let rebuilt = timeout(PATIENCE, async {
+        loop {
+            let msg = socket.next().await.unwrap().unwrap();
+            let frame: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            if rig.bus.topic_joins()[4] > joins_before {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("websocket table did not rebuild after Resync");
+    let conns = rebuilt["connections"].as_array().unwrap();
+    assert_eq!(conns.len(), 1);
+    assert_eq!(conns[0]["id"].as_str(), Some(active_id.as_str()));
+
+    drop((socket, client, _far));
+    rig.control.shutdown().await;
+}

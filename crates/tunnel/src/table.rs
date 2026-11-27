@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -121,8 +121,8 @@ impl Tracked {
 
     fn mark_dirty(self: &Arc<Self>) {
         if self.listed.load(Ordering::Acquire)
-            && self.table.events.enabled()
-            && !self.dirty.swap(true, Ordering::Relaxed)
+            && self.table.events.wants_connection_counters()
+            && !self.dirty.swap(true, Ordering::AcqRel)
         {
             self.table.enqueue_dirty(self.clone());
         }
@@ -151,7 +151,7 @@ impl Drop for Registration {
     fn drop(&mut self) {
         self.tracked.record.settle_end();
         self.tracked.record.close();
-        self.tracked.table.open.remove(&self.tracked.record.id);
+        self.tracked.table.remove_open(&self.tracked.record);
         self.tracked.table.remember_closed(&self.tracked.record);
         if self.tracked.listed.load(Ordering::Acquire) && self.tracked.table.events.enabled() {
             let _announcing = lock(&self.tracked.table.announcing);
@@ -163,6 +163,9 @@ impl Drop for Registration {
 /// Every connection of the process and its traffic. It outlives configs.
 pub struct ConnTable {
     open: DashMap<String, Arc<ConnRecord>>,
+    /// Active connections indexed by `seq`; `open` is the source of truth—every entry in `open`
+    /// lives here, so inserts write `by_seq` first and removes clear `open` first.
+    by_seq: DashMap<u64, Arc<ConnRecord>>,
     all: Totals,
     proxied: Totals,
     all_rate: Mutex<RateCursor>,
@@ -183,6 +186,7 @@ impl ConnTable {
     pub fn new(events: Arc<dyn EventSink>, tasks: Tasks) -> Arc<Self> {
         Arc::new(ConnTable {
             open: DashMap::new(),
+            by_seq: DashMap::new(),
             all: Totals::default(),
             proxied: Totals::default(),
             all_rate: Mutex::new(RateCursor::default()),
@@ -220,6 +224,10 @@ impl ConnTable {
             return None;
         }
         let registration = self.prepare(record, 0);
+        #[cfg(test)]
+        if let Some(hook) = tests::ON_REGISTER_SINCE_PREPARE.with(std::cell::Cell::take) {
+            hook(self);
+        }
         // `close_all` counts before it walks the table, so either it finds this entry or the
         // count read here has moved.
         if self.closes() != closes {
@@ -261,13 +269,14 @@ impl ConnTable {
     /// so whichever way the two interleave the entry does not stay behind.
     pub fn list(&self, tracked: &Arc<Tracked>) {
         let record = &tracked.record;
+        self.by_seq.insert(record.seq, record.clone());
         self.open.insert(record.id.clone(), record.clone());
         tracked.listed.store(true, Ordering::Release);
         if self.events.enabled() {
             self.events.publish(CoreEvent::Request(record.clone()));
         }
         if record.is_closed() {
-            self.open.remove(&record.id);
+            self.remove_open(record);
             self.remember_closed(record);
             if self.events.enabled() {
                 let _announcing = lock(&self.announcing);
@@ -276,6 +285,20 @@ impl ConnTable {
         } else {
             tracked.mark_dirty();
         }
+    }
+
+    fn remove_open(&self, record: &ConnRecord) {
+        self.open.remove(&record.id);
+        self.by_seq.remove(&record.seq);
+    }
+
+    fn open_by_seq(&self, seq: u64) -> Option<Arc<ConnRecord>> {
+        let candidate = self.by_seq.get(&seq).map(|entry| entry.value().clone())?;
+        let open = self
+            .open
+            .get(&candidate.id)
+            .map(|entry| entry.value().clone())?;
+        Arc::ptr_eq(&candidate, &open).then_some(open)
     }
 
     /// Lists a connection whose dial failed as opened and closed at once, to watchers only:
@@ -309,8 +332,8 @@ impl ConnTable {
 
     /// The uuid of a connection by its number, open or recently closed.
     pub fn id_of(&self, seq: u64) -> Option<String> {
-        if let Some(entry) = self.open.iter().find(|entry| entry.value().seq == seq) {
-            return Some(entry.key().clone());
+        if let Some(record) = self.open_by_seq(seq) {
+            return Some(record.id.clone());
         }
         lock(&self.closed_ids).ids.get(&seq).cloned()
     }
@@ -368,8 +391,33 @@ impl ConnTable {
     }
 
     pub fn close(&self, id: &str) {
-        if let Some(entry) = self.open.get(id) {
-            entry.value().close();
+        if let Some(record) = self.open.get(id).map(|entry| entry.value().clone()) {
+            record.close();
+        }
+    }
+
+    pub fn close_seqs(&self, seqs: &[u64]) {
+        match seqs {
+            [] => {}
+            [seq] => {
+                if let Some(record) = self.open_by_seq(*seq) {
+                    record.close();
+                }
+            }
+            seqs => {
+                let mut seen = HashSet::with_capacity(seqs.len());
+                let mut targets = Vec::with_capacity(seqs.len());
+                for &seq in seqs {
+                    if seen.insert(seq)
+                        && let Some(record) = self.open_by_seq(seq)
+                    {
+                        targets.push(record);
+                    }
+                }
+                for record in targets {
+                    record.close();
+                }
+            }
         }
     }
 
@@ -416,9 +464,9 @@ impl ConnTable {
             return false;
         }
         for tracked in &batch {
-            tracked.dirty.store(false, Ordering::Relaxed);
+            tracked.dirty.swap(false, Ordering::Acquire);
         }
-        if !self.events.enabled() {
+        if !self.events.wants_connection_counters() {
             return false;
         }
         let announcing = lock(&self.announcing);
@@ -462,6 +510,11 @@ mod tests {
 
     use super::*;
 
+    thread_local! {
+        pub(super) static ON_REGISTER_SINCE_PREPARE: std::cell::Cell<Option<fn(&ConnTable)>> =
+            const { std::cell::Cell::new(None) };
+    }
+
     #[derive(Default)]
     struct Sink {
         accept: AtomicBool,
@@ -471,6 +524,8 @@ mod tests {
         ends: StdMutex<Vec<(u64, Option<EndReason>)>>,
         /// Counters and closes by sequence number, in the order the sink took them.
         heard: StdMutex<Vec<(&'static str, u64)>>,
+        /// Runs inside the next published request.
+        during_request: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
         /// Runs inside the next accepted traffic offer.
         during_offer: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
     }
@@ -488,6 +543,10 @@ mod tests {
             match event {
                 CoreEvent::Request(_) => {
                     self.requests.fetch_add(1, Ordering::Relaxed);
+                    let during = lock(&self.during_request).take();
+                    if let Some(during) = during {
+                        during();
+                    }
                     true
                 }
                 CoreEvent::RequestTraffic(deltas) if self.accept.load(Ordering::Relaxed) => {
@@ -895,5 +954,282 @@ mod tests {
         registration.tracked().uploaded(1);
         tokio::time::sleep(REPORT_INTERVAL * 3).await;
         assert_eq!(lock(&sink.traffic).len(), 1);
+    }
+
+    struct ScopedSink {
+        inner: Sink,
+        enabled: AtomicBool,
+        wants_counters: AtomicBool,
+    }
+
+    impl ScopedSink {
+        fn new(enabled: bool, wants_counters: bool) -> Arc<Self> {
+            let inner = Sink::default();
+            inner.accept.store(true, Ordering::Relaxed);
+            Arc::new(ScopedSink {
+                inner,
+                enabled: AtomicBool::new(enabled),
+                wants_counters: AtomicBool::new(wants_counters),
+            })
+        }
+    }
+
+    impl EventSink for ScopedSink {
+        fn enabled(&self) -> bool {
+            self.enabled.load(Ordering::Acquire)
+        }
+
+        fn wants_connection_counters(&self) -> bool {
+            self.wants_counters.load(Ordering::Acquire)
+        }
+
+        fn publish(&self, event: CoreEvent) {
+            self.inner.publish(event);
+        }
+
+        fn offer(&self, event: CoreEvent) -> bool {
+            self.inner.offer(event)
+        }
+
+        fn closed(&self, record: &ConnRecord) {
+            self.inner.closed(record);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn traffic_does_not_mark_dirty_without_counter_interest_but_still_counts_and_closes() {
+        let sink = ScopedSink::new(true, false);
+        let table = ConnTable::new(sink.clone(), Default::default());
+        table.set_closed_capacity(4);
+        let registration = table.register(record(false), 0);
+        let tracked = registration.tracked().clone();
+        let seq = tracked.record.seq;
+        let id = tracked.record.id.clone();
+
+        tracked.uploaded(15);
+        tracked.downloaded(23);
+        assert!(lock(&table.dirty).is_empty());
+        assert!(!table.reporting.load(Ordering::Acquire));
+        assert!(!tracked.dirty.load(Ordering::Acquire));
+        assert_eq!(table.total(false), (15, 23));
+
+        tokio::time::sleep(REPORT_INTERVAL * 3).await;
+        assert!(lock(&sink.inner.traffic).is_empty());
+
+        drop(registration);
+        assert_eq!(*lock(&sink.inner.closed), [(seq, 15, 23)]);
+        assert_eq!(*lock(&sink.inner.ends), [(seq, Some(EndReason::Finished))]);
+        assert_eq!(table.id_of(seq).as_deref(), Some(id.as_str()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn last_counter_watcher_leaving_drains_dirty_and_allows_later_resubscribe() {
+        let sink = ScopedSink::new(true, true);
+        let table = ConnTable::new(sink.clone(), Default::default());
+        let registration = table.register(record(false), 0);
+        let tracked = registration.tracked().clone();
+        let seq = tracked.record.seq;
+
+        tracked.uploaded(10);
+        assert_eq!(lock(&table.dirty).len(), 1);
+        assert!(table.reporting.load(Ordering::Acquire));
+
+        sink.wants_counters.store(false, Ordering::Release);
+        tokio::time::sleep(REPORT_INTERVAL * 3).await;
+        assert!(lock(&table.dirty).is_empty());
+        assert!(!table.reporting.load(Ordering::Acquire));
+        assert!(!tracked.dirty.load(Ordering::Acquire));
+        assert!(lock(&sink.inner.traffic).is_empty());
+
+        tracked.uploaded(5);
+        tracked.downloaded(7);
+        assert!(lock(&table.dirty).is_empty());
+        assert!(!table.reporting.load(Ordering::Acquire));
+        assert_eq!(table.total(false), (15, 7));
+
+        sink.wants_counters.store(true, Ordering::Release);
+        tracked.uploaded(3);
+        assert_eq!(lock(&table.dirty).len(), 1);
+        assert!(table.reporting.load(Ordering::Acquire));
+        tokio::time::sleep(REPORT_INTERVAL * 3).await;
+        assert_eq!(lock(&sink.inner.traffic).len(), 1);
+        assert_eq!(lock(&sink.inner.traffic)[0][0].seq, seq);
+        assert_eq!(lock(&sink.inner.traffic)[0][0].upload, 18);
+        assert_eq!(lock(&sink.inner.traffic)[0][0].download, 7);
+        assert!(!table.reporting.load(Ordering::Acquire));
+
+        drop(registration);
+        assert_eq!(*lock(&sink.inner.closed), [(seq, 18, 7)]);
+    }
+
+    #[tokio::test]
+    async fn close_seqs_handles_empty_single_batch_duplicates_and_unknowns() {
+        let sink = Arc::new(Sink::default());
+        sink.accept.store(true, Ordering::Relaxed);
+        let table = ConnTable::new(sink.clone(), Default::default());
+
+        let first = table.register(record(false), 0);
+        let second = table.register(record(false), 0);
+        let third = table.register(record(false), 0);
+        let fourth = table.register(record(false), 0);
+        let seqs = [&first, &second, &third, &fourth].map(|reg| reg.tracked().record.seq);
+        assert_eq!(table.open.len(), 4);
+        assert_eq!(table.by_seq.len(), 4);
+
+        table.close_seqs(&[]);
+        table.close_seqs(&[u64::MAX]);
+        assert!(
+            [&first, &second, &third, &fourth]
+                .iter()
+                .all(|reg| !reg.tracked().record.is_closed())
+        );
+
+        assert!(table.report_once());
+        lock(&sink.traffic).clear();
+
+        first.tracked().uploaded(7);
+        table.close_seqs(&[seqs[0]]);
+        assert!(first.tracked().record.is_closed());
+        assert!(!second.tracked().record.is_closed());
+        assert!(
+            !table.report_once(),
+            "closed connection emits no periodic counters"
+        );
+
+        second.tracked().downloaded(9);
+        table.close_seqs(&[seqs[1], seqs[1], u64::MAX, seqs[2]]);
+        assert!(second.tracked().record.is_closed());
+        assert!(third.tracked().record.is_closed());
+        assert!(!fourth.tracked().record.is_closed());
+
+        drop((first, second, third));
+        assert_eq!(table.open.len(), 1);
+        assert_eq!(table.by_seq.len(), 1);
+        assert!(table.id_of(seqs[3]).is_some());
+        assert!(lock(&sink.traffic).is_empty());
+        let ends: HashMap<u64, Option<EndReason>> = lock(&sink.ends).iter().copied().collect();
+        assert_eq!(ends.get(&seqs[0]), Some(&Some(EndReason::Core)));
+        assert_eq!(ends.get(&seqs[1]), Some(&Some(EndReason::Core)));
+        assert_eq!(ends.get(&seqs[2]), Some(&Some(EndReason::Core)));
+
+        drop(fourth);
+        assert!(table.open.is_empty());
+        assert!(table.by_seq.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dual_index_stays_consistent_across_prepare_list_drop_races_and_failed() {
+        let sink = Arc::new(Sink::default());
+        let table = ConnTable::new(sink.clone(), Default::default());
+        table.set_closed_capacity(4);
+
+        let prepared = table.prepare(record(false), 0);
+        let prepared_seq = prepared.tracked().record.seq;
+        assert!(table.open.is_empty());
+        assert!(table.by_seq.is_empty());
+        assert_eq!(table.id_of(prepared_seq), None);
+        table.close_seqs(&[prepared_seq]);
+        assert!(!prepared.tracked().record.is_closed());
+        table.list(prepared.tracked());
+        assert_eq!(table.open.len(), 1);
+        assert_eq!(table.by_seq.len(), 1);
+        assert_eq!(
+            table.id_of(prepared_seq).as_deref(),
+            Some(prepared.tracked().record.id.as_str())
+        );
+        drop(prepared);
+        assert!(table.open.is_empty());
+        assert!(table.by_seq.is_empty());
+
+        let raced = table.prepare(record(false), 0);
+        let raced_tracked = raced.tracked().clone();
+        let raced_seq = raced_tracked.record.seq;
+        let raced_id = raced_tracked.record.id.clone();
+        drop(raced);
+        table.list(&raced_tracked);
+        assert!(table.open.is_empty());
+        assert!(table.by_seq.is_empty());
+        assert_eq!(table.id_of(raced_seq).as_deref(), Some(raced_id.as_str()));
+
+        let failed = record(false);
+        let failed_seq = failed.seq;
+        table.failed(|| failed.clone());
+        assert!(table.open.is_empty());
+        assert!(table.by_seq.is_empty());
+        assert_eq!(table.id_of(failed_seq), None);
+
+        let stale = record(false);
+        let stale_seq = stale.seq;
+        table.by_seq.insert(stale_seq, stale);
+        assert!(table.open_by_seq(stale_seq).is_none());
+        assert_eq!(table.id_of(stale_seq), None);
+        table.by_seq.remove(&stale_seq);
+
+        // `close_all` before `register_since` rejects on the first check.
+        let closes = table.closes();
+        table.close_all();
+        assert!(table.register_since(record(false), closes).is_none());
+        assert!(table.open.is_empty());
+        assert!(table.by_seq.is_empty());
+
+        // `close_all` between `register_since`'s first and second checks rejects after `prepare`.
+        let closes = table.closes();
+        let mid_record = record(false);
+        let mid_seq = mid_record.seq;
+        ON_REGISTER_SINCE_PREPARE.with(|cell| cell.set(Some(ConnTable::close_all)));
+        assert!(table.register_since(mid_record.clone(), closes).is_none());
+        assert!(mid_record.is_closed());
+        assert!(table.open.is_empty());
+        assert!(table.by_seq.is_empty());
+        assert!(
+            !lock(&sink.closed).iter().any(|(seq, _, _)| *seq == mid_seq),
+            "unlisted registration dropped on close_all is not announced"
+        );
+
+        // `drop` landing after `list` inserts into `by_seq` and `open`, before `is_closed()`.
+        let in_list = table.prepare(record(false), 0);
+        let in_list_tracked = in_list.tracked().clone();
+        let in_list_seq = in_list_tracked.record.seq;
+        let in_list_id = in_list_tracked.record.id.clone();
+        in_list_tracked.uploaded(11);
+        *lock(&sink.during_request) = Some(Box::new(move || {
+            drop(in_list);
+        }));
+        table.list(&in_list_tracked);
+        assert!(table.open.is_empty());
+        assert!(table.by_seq.is_empty());
+        assert!(in_list_tracked.record.is_closed());
+        assert_eq!(
+            table.id_of(in_list_seq).as_deref(),
+            Some(in_list_id.as_str())
+        );
+        assert!(lock(&sink.closed).contains(&(in_list_seq, 11, 0)));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_list_drop_lookup_and_close_leave_both_tables_empty() {
+        let table = ConnTable::new(Arc::new(Sink::default()), Default::default());
+        let mut handles = Vec::new();
+        for _ in 0..64 {
+            let table = table.clone();
+            handles.push(tokio::spawn(async move {
+                let reg = table.prepare(record(false), 0);
+                let tracked = reg.tracked().clone();
+                let seq = tracked.record.seq;
+                let closer = table.clone();
+                let list_task = tokio::spawn(async move {
+                    closer.list(&tracked);
+                });
+                let _ = table.id_of(seq);
+                table.close_seqs(&[seq]);
+                drop(reg);
+                list_task.await.unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        assert!(table.open.is_empty());
+        assert!(table.by_seq.is_empty());
     }
 }
