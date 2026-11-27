@@ -211,6 +211,15 @@ impl Group {
         matches!(self.parts.policy, Policy::LoadBalance(_))
     }
 
+    pub(crate) fn is_smart(&self) -> bool {
+        self.smart.is_some()
+    }
+
+    pub(crate) fn current_members_id_if_fresh(&self) -> Option<u64> {
+        let members = self.members.load();
+        self.is_current(&members).then(|| members.id())
+    }
+
     /// Select, url-test, smart and fallback take a manual pick.
     pub fn is_selectable(&self) -> bool {
         matches!(
@@ -443,6 +452,16 @@ impl Group {
             self.touch();
         }
         let members = self.members();
+        self.pick_with_members(&members, flow, host, touch)
+    }
+
+    fn pick_with_members(
+        self: &Arc<Self>,
+        members: &Arc<Members>,
+        flow: &FlowMeta,
+        host: Option<&str>,
+        touch: Touch,
+    ) -> Pick {
         match members.emptiness() {
             Emptiness::Fallback => {
                 return Pick::Node(Node::Leaf(self.parts.empty_fallback.clone()));
@@ -491,12 +510,12 @@ impl Group {
                 }
                 Pick::Node(first.clone())
             }
-            Policy::UrlTest { tolerance } => Pick::Node(self.url_test_pick(&members, *tolerance)),
+            Policy::UrlTest { tolerance } => Pick::Node(self.url_test_pick(members, *tolerance)),
             Policy::Smart { .. } => {
                 let index = self
                     .smart
                     .as_ref()
-                    .map_or(0, |owner| owner.pick(self, &members, flow, host, touch));
+                    .map_or(0, |owner| owner.pick(self, members, flow, host, touch));
                 Pick::Node(nodes.get(index).unwrap_or(first).clone())
             }
             Policy::Fallback => {
@@ -633,10 +652,17 @@ impl Group {
 
     /// The name the host shows as the current pick; empty for load balancing.
     pub fn now(self: &Arc<Self>, flow: &FlowMeta) -> String {
+        self.now_with_members_id(flow).0
+    }
+
+    pub(crate) fn now_with_members_id(self: &Arc<Self>, flow: &FlowMeta) -> (String, u64) {
         if self.is_load_balance() {
-            return String::new();
+            return (String::new(), 0);
         }
-        self.pick(flow, None, Touch::No).name().to_string()
+        let members = self.members();
+        let id = members.id();
+        let pick = self.pick_with_members(&members, flow, None, Touch::No);
+        (pick.name().to_string(), id)
     }
 
     /// What `proxy.list` shows as `fixed`: a manual pick of an url-test or fallback.

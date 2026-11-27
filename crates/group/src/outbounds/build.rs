@@ -6,14 +6,13 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use concord_common::sync::lock;
 use concord_common::{Address, BoxStream, CoreError, DialCx, NodeDialer, PacketSession};
 use concord_config::ConfigError;
 use concord_config::filter::{Matcher, compile_pattern};
 use concord_config::group::{GroupDef, GroupKind, LbStrategy};
 use concord_config::profile::Profile;
 
-use super::{Entry, Outbounds};
+use super::{Entry, Outbounds, PickCache};
 use crate::check::{Check, CheckParams, Source, Supervisor};
 use crate::deps::{Builtin, DEFAULT_TEST_TIMEOUT, GroupDeps};
 use crate::error::GroupError;
@@ -392,7 +391,7 @@ impl Outbounds {
                 providers,
                 checks,
                 supervisor: Mutex::new(Supervisor::default()),
-                last_picks: Mutex::new(HashMap::new()),
+                last_picks: Mutex::new(PickCache::default()),
                 background: AtomicBool::new(false),
             }
         });
@@ -401,7 +400,7 @@ impl Outbounds {
                 owner.bind(Arc::downgrade(&outbounds));
             }
         }
-        *lock(&outbounds.last_picks) = outbounds.pick_snapshot();
+        outbounds.seed_picks();
         Ok(outbounds)
     }
 }

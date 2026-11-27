@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -12,6 +13,7 @@ type Map = HashMap<Arc<str>, Arc<str>>;
 #[derive(Default)]
 pub struct SelectionStore {
     map: ArcSwap<Map>,
+    version: AtomicU64,
     revoked: Mutex<Vec<Arc<str>>>,
     revoked_ready: Notify,
     probing: Mutex<HashSet<Arc<str>>>,
@@ -29,12 +31,21 @@ impl Drop for Probing {
             let mut probing = lock(&self.store.probing);
             probing.remove(&self.group);
         }
+        self.store.bump_version();
     }
 }
 
 impl SelectionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn version(&self) -> u64 {
+        self.version.load(Ordering::Acquire)
+    }
+
+    fn bump_version(&self) {
+        self.version.fetch_add(1, Ordering::Release);
     }
 
     /// The saved names are not checked against any group's members.
@@ -45,6 +56,7 @@ impl SelectionStore {
             .map(|(group, proxy)| (Arc::from(group), Arc::from(proxy)))
             .collect();
         self.map.store(Arc::new(map));
+        self.bump_version();
     }
 
     pub fn get(&self, group: &str) -> Option<Arc<str>> {
@@ -70,6 +82,7 @@ impl SelectionStore {
             next.insert(Arc::from(group), Arc::from(proxy));
             next
         });
+        self.bump_version();
     }
 
     pub fn remove(&self, group: &str) -> bool {
@@ -79,6 +92,9 @@ impl SelectionStore {
             removed = next.remove(group).is_some();
             next
         });
+        if removed {
+            self.bump_version();
+        }
         removed
     }
 
@@ -89,6 +105,7 @@ impl SelectionStore {
             let mut probing = lock(&self.probing);
             probing.insert(group.clone());
         }
+        self.bump_version();
         Probing {
             store: Arc::clone(self),
             group: group.clone(),

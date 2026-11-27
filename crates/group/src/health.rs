@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
@@ -99,10 +99,13 @@ struct Inner {
     extra: HashMap<String, State>,
 }
 
-/// Per-group health generation bumped synchronously when any watched member records a test result.
+/// Per-group health generation and background-refresh dirty flag updated synchronously when any
+/// watched member records a test result (`epoch` invalidates url-test/Smart caches; `dirty` marks
+/// the group for `Outbounds::refresh_dirty_picks` and is consumed via `take_dirty`).
 #[derive(Debug, Default)]
 pub(crate) struct HealthWatch {
     epoch: AtomicU64,
+    dirty: AtomicBool,
 }
 
 impl HealthWatch {
@@ -116,6 +119,11 @@ impl HealthWatch {
 
     pub fn notify(&self) {
         self.epoch.fetch_add(1, Ordering::Release);
+        self.dirty.store(true, Ordering::Release);
+    }
+
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.swap(false, Ordering::AcqRel)
     }
 }
 

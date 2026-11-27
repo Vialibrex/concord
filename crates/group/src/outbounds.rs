@@ -68,6 +68,27 @@ pub fn node_exit(info: &concord_common::OutboundInfo) -> String {
     )
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static REFRESH_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_refresh_visits() -> usize {
+    REFRESH_VISITS.with(|visits| visits.replace(0))
+}
+
+struct PickEntry {
+    pick: String,
+    members_id: u64,
+}
+
+#[derive(Default)]
+struct PickCache {
+    picks: HashMap<Arc<str>, PickEntry>,
+    selection_version: u64,
+}
+
 pub struct Outbounds {
     pub(crate) shared: Arc<Shared>,
     env: ArcSwap<DialEnv>,
@@ -79,7 +100,7 @@ pub struct Outbounds {
     providers: Vec<Arc<ProxyProvider>>,
     checks: Vec<Arc<Check>>,
     supervisor: Mutex<Supervisor>,
-    last_picks: Mutex<HashMap<Arc<str>, String>>,
+    last_picks: Mutex<PickCache>,
     background: AtomicBool,
 }
 
@@ -289,27 +310,67 @@ impl Outbounds {
         }
     }
 
-    pub(crate) fn pick_snapshot(&self) -> HashMap<Arc<str>, String> {
-        let flow = dummy_flow(Address::new("", 0), Network::Tcp);
-        self.groups
-            .iter()
-            .filter(|group| group.is_selectable())
-            .map(|group| (group.name().clone(), group.now(&flow)))
-            .collect()
+    pub(super) fn seed_picks(&self) {
+        let mut cache = lock(&self.last_picks);
+        let _ = self.refresh_picks_into(&mut cache, true);
     }
 
     /// Counts a Moved when any pick differs from the last one seen.
     pub fn refresh_picks(&self) {
-        let picks = self.pick_snapshot();
+        self.refresh_picks_inner(true);
+    }
+
+    pub(crate) fn refresh_dirty_picks(&self) {
+        self.refresh_picks_inner(false);
+    }
+
+    fn refresh_picks_inner(&self, force_full: bool) {
         let changed = {
-            let mut last = lock(&self.last_picks);
-            let changed = *last != picks;
-            *last = picks;
-            changed
+            let mut cache = lock(&self.last_picks);
+            self.refresh_picks_into(&mut cache, force_full)
         };
         if changed {
             self.shared.route.moved();
         }
+    }
+
+    fn refresh_picks_into(&self, cache: &mut PickCache, force_full: bool) -> bool {
+        let flow = dummy_flow(Address::new("", 0), Network::Tcp);
+        let sel_ver = self.shared.selections.version();
+        let full = force_full || sel_ver != cache.selection_version;
+        let mut changed = false;
+        for group in &self.groups {
+            if !group.is_selectable() {
+                continue;
+            }
+            let dirty = group.health_watch().take_dirty();
+            let cached_id = cache.picks.get(group.name()).map(|entry| entry.members_id);
+            let members_unchanged =
+                cached_id.is_some() && group.current_members_id_if_fresh() == cached_id;
+            if !full && !dirty && !group.is_smart() && members_unchanged {
+                continue;
+            }
+            #[cfg(test)]
+            REFRESH_VISITS.with(|visits| visits.set(visits.get() + 1));
+            let (pick, members_id) = group.now_with_members_id(&flow);
+            match cache.picks.get_mut(group.name()) {
+                Some(previous) => {
+                    previous.members_id = members_id;
+                    if previous.pick != pick {
+                        previous.pick = pick;
+                        changed = true;
+                    }
+                }
+                None => {
+                    cache
+                        .picks
+                        .insert(group.name().clone(), PickEntry { pick, members_id });
+                    changed = true;
+                }
+            }
+        }
+        cache.selection_version = sel_ver;
+        changed
     }
 
     pub fn reset_sessions(&self) {
@@ -367,7 +428,7 @@ impl Outbounds {
                     _ = notified.refresh.notified() => {}
                 }
                 match refresher_owner.upgrade() {
-                    Some(outbounds) => outbounds.refresh_picks(),
+                    Some(outbounds) => outbounds.refresh_dirty_picks(),
                     None => return,
                 }
             }

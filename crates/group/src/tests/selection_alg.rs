@@ -4,6 +4,7 @@ use std::time::Duration;
 use super::*;
 use crate::group::{set_fastest_mid_scan, take_url_test_scans};
 use crate::health::{StatusRanges, take_lock_calls};
+use crate::outbounds::take_refresh_visits;
 use crate::priority::take_match_calls;
 use crate::smart::{set_candidates_mid_scan, take_align_scans, take_row_allocs, take_table_builds};
 
@@ -580,4 +581,481 @@ proxy-groups:
     }
     assert_eq!(u.pick(&flow, None, Touch::Yes).name(), "b");
     assert_eq!(s.pick(&flow, Some("ny.org"), Touch::Yes).name(), "b");
+}
+
+#[tokio::test(start_paused = true)]
+async fn dirty_refresh_skips_unrelated_non_smart_groups_and_batches_route_moved() {
+    let mut yaml = String::from("proxies:\n");
+    for i in 0..10 {
+        yaml.push_str(&format!("  - {{name: u{i}-a, type: direct}}\n"));
+        yaml.push_str(&format!("  - {{name: u{i}-b, type: direct}}\n"));
+    }
+    for i in 0..5 {
+        yaml.push_str(&format!("  - {{name: f{i}-a, type: direct}}\n"));
+        yaml.push_str(&format!("  - {{name: f{i}-b, type: direct}}\n"));
+    }
+    for i in 0..4 {
+        yaml.push_str(&format!("  - {{name: sel{i}-a, type: direct}}\n"));
+        yaml.push_str(&format!("  - {{name: sel{i}-b, type: direct}}\n"));
+    }
+    yaml.push_str("  - {name: s0-a, type: direct}\n  - {name: s0-b, type: direct}\n");
+    yaml.push_str("proxy-groups:\n");
+    for i in 0..10 {
+        yaml.push_str(&format!(
+            "  - {{name: u{i}, type: url-test, proxies: [u{i}-a, u{i}-b], url: '{TEST_URL}'}}\n"
+        ));
+    }
+    for i in 0..5 {
+        yaml.push_str(&format!(
+            "  - {{name: f{i}, type: fallback, proxies: [f{i}-a, f{i}-b], url: '{TEST_URL}'}}\n"
+        ));
+    }
+    for i in 0..4 {
+        yaml.push_str(&format!(
+            "  - {{name: sel{i}, type: select, proxies: [sel{i}-a, sel{i}-b]}}\n"
+        ));
+    }
+    yaml.push_str(&format!(
+        "  - {{name: s0, type: smart, proxies: [s0-a, s0-b], url: '{TEST_URL}'}}\n"
+    ));
+
+    let rig = Rig::new(&yaml);
+    let _ = take_refresh_visits();
+    let moved_before = rig.moved.count();
+
+    rig.out
+        .node("u0-b")
+        .unwrap()
+        .health()
+        .record(TEST_URL, 25, false, true);
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 2);
+    assert_eq!(rig.moved.count(), moved_before + 1);
+
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 1);
+    assert_eq!(rig.moved.count(), moved_before + 1);
+
+    rig.out
+        .node("u1-b")
+        .unwrap()
+        .health()
+        .record(TEST_URL, 20, false, true);
+    rig.out
+        .node("f0-a")
+        .unwrap()
+        .health()
+        .record(TEST_URL, 0, true, false);
+    rig.out
+        .node("f0-b")
+        .unwrap()
+        .health()
+        .record(TEST_URL, 30, false, true);
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 3);
+    assert_eq!(rig.moved.count(), moved_before + 2);
+
+    rig.out.refresh_picks();
+    assert_eq!(take_refresh_visits(), 21);
+    assert_eq!(rig.moved.count(), moved_before + 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn dirty_refresh_handles_oscillation_provider_reload_probing_and_smart_decay() {
+    let rig = Rig::new(&format!(
+        "proxies:
+  - {{name: a, type: direct}}
+  - {{name: b, type: direct}}
+  - {{name: fa, type: direct}}
+  - {{name: fb, type: direct}}
+  - {{name: sa, type: direct}}
+  - {{name: sb, type: direct}}
+proxy-providers:
+  p:
+    type: http
+    url: 'http://provider.test/p.yaml'
+    path: 'p.yaml'
+    payload:
+      - {{name: x, type: direct}}
+      - {{name: y, type: direct}}
+proxy-groups:
+  - {{name: u, type: url-test, proxies: [a, b], url: '{TEST_URL}'}}
+  - {{name: f, type: fallback, proxies: [fa, fb], url: '{TEST_URL}'}}
+  - {{name: sel, type: select, proxies: [a, b]}}
+  - {{name: up, type: url-test, use: [p], url: '{TEST_URL}'}}
+  - {{name: s, type: smart, proxies: [sa, sb], url: '{TEST_URL}', tolerance: 0}}
+"
+    ));
+
+    let a = rig.out.node("a").unwrap();
+    let b = rig.out.node("b").unwrap();
+    let sa = rig.out.node("sa").unwrap();
+    let sb = rig.out.node("sb").unwrap();
+    a.health().record(TEST_URL, 50, false, true);
+    b.health().record(TEST_URL, 100, false, true);
+    sa.health().record(TEST_URL, 20, false, true);
+    sb.health().record(TEST_URL, 60, false, true);
+    rig.out.refresh_dirty_picks();
+
+    let moved_before = rig.moved.count();
+    let _ = take_refresh_visits();
+    b.health().record(TEST_URL, 10, false, true);
+    b.health().record(TEST_URL, 100, false, true);
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 2);
+    assert_eq!(rig.moved.count(), moved_before);
+
+    let prov = rig.out.provider("p").unwrap();
+    prov.side_load(b"proxies:\n  - {name: x, type: direct}\n  - {name: y, type: direct}\n")
+        .await
+        .unwrap();
+    assert_eq!(rig.moved.count(), moved_before + 1);
+    let _ = take_refresh_visits();
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 2);
+    assert_eq!(rig.moved.count(), moved_before + 1);
+
+    prov.side_load(b"proxies:\n  - {name: y, type: direct}\n  - {name: x, type: direct}\n")
+        .await
+        .unwrap();
+    assert_eq!(rig.moved.count(), moved_before + 2);
+    let _ = rig.out.group("up").unwrap().members();
+    let _ = take_refresh_visits();
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 2);
+    assert_eq!(rig.moved.count(), moved_before + 3);
+
+    let moved_sel = rig.moved.count();
+    assert!(rig.out.select("sel", "b").await.unwrap());
+    assert_eq!(rig.moved.count(), moved_sel + 1);
+    let _ = take_refresh_visits();
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 1);
+    assert_eq!(rig.moved.count(), moved_sel + 1);
+
+    rig.out
+        .node("fb")
+        .unwrap()
+        .health()
+        .record(TEST_URL, 0, true, false);
+    rig.out.refresh_dirty_picks();
+    let staged = rig.out.stage_selection("f", "fb").unwrap();
+    rig.out.refresh_dirty_picks();
+    drop(staged);
+    let _ = take_refresh_visits();
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 6);
+
+    let moved_smart = rig.moved.count();
+    let chain_sa: Vec<Arc<str>> = vec![Arc::from("sa"), Arc::from("s")];
+    let err = io::Error::new(io::ErrorKind::TimedOut, "timed out");
+    for _ in 0..3 {
+        rig.out.smart_dial_failed(
+            &chain_sa,
+            Some("site-a.test"),
+            &err,
+            Duration::from_secs(5),
+            true,
+        );
+        rig.out.smart_dial_failed(
+            &chain_sa,
+            Some("site-b.test"),
+            &err,
+            Duration::from_secs(5),
+            true,
+        );
+    }
+    rig.out.refresh_dirty_picks();
+    assert_eq!(rig.leaf("s"), "sb");
+    assert_eq!(rig.moved.count(), moved_smart + 1);
+
+    tokio::time::advance(Duration::from_secs(60 * 60)).await;
+    let _ = take_refresh_visits();
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 1);
+    assert_eq!(rig.leaf("s"), "sa");
+    assert_eq!(rig.moved.count(), moved_smart + 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn dirty_refresh_preserves_mid_scan_marks_fallback_revocation_and_delay_events() {
+    let rig = Rig::new(&format!(
+        "proxies:
+  - {{name: fa, type: direct}}
+  - {{name: fb, type: direct}}
+  - {{name: ua, type: direct}}
+  - {{name: ub, type: direct}}
+proxy-groups:
+  - {{name: f, type: fallback, proxies: [fa, fb], url: '{TEST_URL}'}}
+  - {{name: u, type: url-test, proxies: [ua, ub], url: '{TEST_URL}', tolerance: 0}}
+"
+    ));
+
+    let ua = rig.out.node("ua").unwrap();
+    let ub = rig.out.node("ub").unwrap();
+    ua.health().record(TEST_URL, 50, false, true);
+    ub.health().record(TEST_URL, 100, false, true);
+    rig.out.refresh_dirty_picks();
+
+    // A record arriving after take_dirty() during a refresh scan must stay dirty for the next batch.
+    ua.health().record(TEST_URL, 60, false, true);
+    let ua_hook = ua.clone();
+    set_fastest_mid_scan(move || {
+        ua_hook.health().record(TEST_URL, 0, true, false);
+    });
+    let moved_mid = rig.moved.count();
+    let _ = take_refresh_visits();
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 1);
+    assert_eq!(rig.moved.count(), moved_mid);
+
+    let _ = take_refresh_visits();
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 1);
+    assert_eq!(rig.leaf("u"), "ub");
+    assert_eq!(rig.moved.count(), moved_mid + 1);
+
+    rig.out
+        .node("fa")
+        .unwrap()
+        .health()
+        .record(TEST_URL, 20, false, true);
+    rig.out
+        .node("fb")
+        .unwrap()
+        .health()
+        .record(TEST_URL, 30, false, true);
+    assert!(rig.out.select("f", "fb").await.unwrap());
+    assert_eq!(rig.leaf("f"), "fb");
+
+    let events_before = rig.events.delays().len();
+    rig.book.get("fb").fail.store(true, Ordering::SeqCst);
+    let _ = rig
+        .out
+        .test_delay("fb", TEST_URL, Duration::from_secs(2))
+        .await;
+    assert_eq!(rig.events.delays().len(), events_before + 1);
+
+    let moved_before = rig.moved.count();
+    let _ = take_refresh_visits();
+    rig.out.refresh_dirty_picks();
+    assert_eq!(take_refresh_visits(), 1);
+    assert_eq!(rig.leaf("f"), "fa");
+    assert_eq!(rig.moved.count(), moved_before + 2);
+    assert_eq!(rig.store.take_revoked().await, vec![Arc::from("f")]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn dirty_refresh_matches_full_refresh_across_nested_global_select_empty_and_events() {
+    let yaml = format!(
+        "proxies:
+  - {{name: a, type: direct}}
+  - {{name: b, type: direct}}
+  - {{name: fa, type: direct}}
+  - {{name: fb, type: direct}}
+  - {{name: sa, type: direct}}
+  - {{name: sb, type: direct}}
+proxy-providers:
+  p:
+    type: http
+    url: 'http://provider.test/p.yaml'
+    path: 'p.yaml'
+    payload:
+      - {{name: x, type: direct}}
+      - {{name: y, type: direct}}
+proxy-groups:
+  - {{name: u, type: url-test, proxies: [a, b], url: '{TEST_URL}', tolerance: 0}}
+  - {{name: f, type: fallback, proxies: [fa, fb], url: '{TEST_URL}'}}
+  - {{name: sel, type: select, proxies: [a, b]}}
+  - {{name: up, type: url-test, use: [p], url: '{TEST_URL}', tolerance: 0}}
+  - {{name: s, type: smart, proxies: [sa, sb], url: '{TEST_URL}', tolerance: 0}}
+  - {{name: nested, type: url-test, proxies: [u, f, a], url: '{TEST_URL}', tolerance: 0}}
+  - {{name: nested_sel, type: select, proxies: [u, f]}}
+"
+    );
+
+    async fn drain_revoked(rig: &Rig) -> Vec<Arc<str>> {
+        tokio::time::timeout(Duration::ZERO, rig.store.take_revoked())
+            .await
+            .unwrap_or_default()
+    }
+
+    async fn assert_batch_eq(full_rig: &Rig, dirty_rig: &Rig, label: &str) {
+        let flow = Rig::flow("diff.org");
+        full_rig.out.refresh_picks();
+        dirty_rig.out.refresh_dirty_picks();
+        let full_now: Vec<(String, String)> = full_rig
+            .out
+            .groups()
+            .iter()
+            .filter(|g| g.is_selectable())
+            .map(|g| (g.name().to_string(), g.now(&flow)))
+            .collect();
+        let dirty_now: Vec<(String, String)> = dirty_rig
+            .out
+            .groups()
+            .iter()
+            .filter(|g| g.is_selectable())
+            .map(|g| (g.name().to_string(), g.now(&flow)))
+            .collect();
+        assert_eq!(dirty_now, full_now, "now mismatch at {label}");
+        assert_eq!(
+            dirty_rig.moved.count(),
+            full_rig.moved.count(),
+            "moved mismatch at {label}"
+        );
+        assert_eq!(
+            dirty_rig.events.delays(),
+            full_rig.events.delays(),
+            "delay events mismatch at {label}"
+        );
+        let full_rev = drain_revoked(full_rig).await;
+        let dirty_rev = drain_revoked(dirty_rig).await;
+        assert_eq!(dirty_rev, full_rev, "revoked mismatch at {label}");
+    }
+
+    let full_rig = Rig::new(&yaml);
+    let dirty_rig = Rig::new(&yaml);
+
+    let both = [&full_rig, &dirty_rig];
+    for rig in both {
+        rig.out
+            .node("a")
+            .unwrap()
+            .health()
+            .record(TEST_URL, 50, false, true);
+        rig.out
+            .node("b")
+            .unwrap()
+            .health()
+            .record(TEST_URL, 100, false, true);
+        rig.out
+            .node("fa")
+            .unwrap()
+            .health()
+            .record(TEST_URL, 20, false, true);
+        rig.out
+            .node("fb")
+            .unwrap()
+            .health()
+            .record(TEST_URL, 30, false, true);
+        rig.out
+            .node("sa")
+            .unwrap()
+            .health()
+            .record(TEST_URL, 20, false, true);
+        rig.out
+            .node("sb")
+            .unwrap()
+            .health()
+            .record(TEST_URL, 60, false, true);
+        rig.out
+            .node("u")
+            .unwrap()
+            .health()
+            .record(TEST_URL, 15, false, true);
+        rig.out
+            .node("f")
+            .unwrap()
+            .health()
+            .record(TEST_URL, 80, false, true);
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "initial-health").await;
+
+    for rig in both {
+        let b = rig.out.node("b").unwrap();
+        b.health().record(TEST_URL, 10, false, true);
+        b.health().record(TEST_URL, 100, false, true);
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "oscillation-a-b-a").await;
+
+    for rig in both {
+        rig.out
+            .node("f")
+            .unwrap()
+            .health()
+            .record(TEST_URL, 5, false, true);
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "nested-group-health").await;
+
+    for rig in both {
+        assert!(rig.out.select("GLOBAL", "u").await.unwrap());
+        assert!(rig.out.select("nested_sel", "f").await.unwrap());
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "global-and-nested-select").await;
+
+    for rig in both {
+        rig.store.set("GLOBAL", "nested");
+        rig.store.set("sel", "b");
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "store-set-global-and-sel").await;
+
+    for rig in both {
+        assert!(rig.out.select("sel", "").await.unwrap());
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "select-cleared-empty").await;
+
+    for rig in both {
+        rig.store.set("sel", "b");
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "select-set-via-store").await;
+    for rig in both {
+        rig.store.set("sel", "");
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "select-empty-via-store").await;
+
+    for rig in both {
+        rig.out
+            .provider("p")
+            .unwrap()
+            .side_load(b"proxies:\n  - {name: x, type: direct}\n  - {name: y, type: direct}\n")
+            .await
+            .unwrap();
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "provider-same-name").await;
+
+    for rig in both {
+        rig.out
+            .provider("p")
+            .unwrap()
+            .side_load(b"proxies:\n  - {name: y, type: direct}\n  - {name: x, type: direct}\n")
+            .await
+            .unwrap();
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "provider-reordered").await;
+
+    for rig in both {
+        assert!(rig.out.select("f", "fb").await.unwrap());
+        rig.book.get("fb").fail.store(true, Ordering::SeqCst);
+        let _ = rig
+            .out
+            .test_delay("fb", TEST_URL, Duration::from_secs(2))
+            .await;
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "fallback-dead-pin-revoke").await;
+
+    let chain_sa: Vec<Arc<str>> = vec![Arc::from("sa"), Arc::from("s")];
+    let err = io::Error::new(io::ErrorKind::TimedOut, "timed out");
+    for rig in both {
+        for _ in 0..3 {
+            rig.out.smart_dial_failed(
+                &chain_sa,
+                Some("site-a.test"),
+                &err,
+                Duration::from_secs(5),
+                true,
+            );
+            rig.out.smart_dial_failed(
+                &chain_sa,
+                Some("site-b.test"),
+                &err,
+                Duration::from_secs(5),
+                true,
+            );
+        }
+    }
+    assert_batch_eq(&full_rig, &dirty_rig, "smart-ejected").await;
+
+    tokio::time::advance(Duration::from_secs(60 * 60)).await;
+    assert_batch_eq(&full_rig, &dirty_rig, "smart-time-only-decay").await;
 }
