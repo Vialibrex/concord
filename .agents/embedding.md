@@ -124,4 +124,6 @@ Workspace builds use non-FIPS `aws-lc-sys`. Its OS entropy path avoids jitter co
 process's first random request, including the first TLS connection. This setting affects every AWS-LC caller;
 BoringSSL is separate. The DRBG is still seeded by the operating system and uses hardware randomness for
 personalization when available. Without it, the extra input also comes from the OS, so upstream's two independent
-entropy sources are no longer guaranteed. This is an entropy-source policy choice, not a FIPS configuration.
+entropy sources are no longer guaranteed. This is an entropy-source policy choice, not a FIPS configuration. With
+the collector on, TLS-based protocols took about 53 ms to start; with it off, about 16 ms (Go: 34 ms).
+Recheck that the setting still takes effect when `aws-lc-sys` is upgraded.

@@ -250,7 +250,9 @@ before it starts, not more rounds on the same run.
 - `tcp-crr` depends on `netd` state: the same binary moves between two plateaus. Compare only interleaved results.
 - Throughput on a phone often measures the origin, pinned to a little core, not the proxy. Compare `cycles_per_byte`;
   `cpu_s_per_gb` is masked by frequency scaling (a lightly loaded core is clocked down), unless the policy is set to
-  `performance` for the run.
+  `performance` for the run. Under `schedutil` Concord was clocked near 0.83 GHz while Go, spinning, stayed near
+  1.4 GHz, so CPU per GB favoured Go; Concord's `cycles_per_byte` was 30-44% lower, and with the policy at
+  `performance` Concord used about 26% less CPU per GB.
 - `core_ctl` can isolate big cores, and binding only to isolated cores fails with `EINVAL`; pick cores that stay
   online (on a Snapdragon 888, `--cpus core=4-5,server=6-7,origin=0,client=1-3`).
 - `libconcord.so` is a `cdylib`, so SIGPIPE is not ignored by a Rust runtime; `concord_start` ignores it, and splice is
@@ -261,7 +263,8 @@ before it starts, not more rounds on the same run.
 **External TUN comparisons.** When comparing the TUN path with sing-box in another harness, make every
 implementation take the same relay path; sing-box's route override goes direct by default. A single run there can vary
 by ±40%: run at least twice and compare CPU per Gbit/s. With iperf, its cookie makes the connection a peeked stream,
-so check that the direct attach actually happened.
+so check that the direct attach actually happened. Confirm it with `perf`, and compare kernel copy cost as the absolute
+sample count from `perf report -f -n` divided by throughput, not as a percentage.
 
 ## Crypto Backends
 

@@ -39,6 +39,9 @@ Size every run to the change, and keep the full gate for the two cases below.
   started by hand, so nothing else runs it before a branch lands.
 - Run a test that only runs on another platform (a `cfg(target_os = ...)` test, the Windows tests) on a machine of
   that platform; on the host, run only that platform's clippy.
+- When a Linux container or VM gets the tree as an archive made on macOS, create it with `COPYFILE_DISABLE=1 tar` and
+  extract with `tar -xm`. Otherwise the AppleDouble `._*` files break the golden tests and old mtimes make cargo reuse
+  stale artifacts.
 
 ## The Full Gate
 
