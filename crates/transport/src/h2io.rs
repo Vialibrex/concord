@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 const PING_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 pub(crate) const CONN_WINDOW: u32 = 65_535 + (1 << 30);
+pub(crate) const MAX_FRAME_SIZE: u32 = 1 << 20;
 
 pub(crate) fn h2_io_error(err: h2::Error) -> io::Error {
     if err.is_io() {
@@ -35,6 +36,7 @@ pub fn client_builder() -> h2::client::Builder {
     builder
         .initial_window_size(STREAM_WINDOW)
         .initial_connection_window_size(CONN_WINDOW)
+        .max_frame_size(MAX_FRAME_SIZE)
         .enable_push(false);
     builder
 }
@@ -144,6 +146,7 @@ pub enum Incoming {
 pub(crate) struct H2Reader {
     incoming: Incoming,
     pending: Bytes,
+    pending_err: Option<io::Error>,
     activity: Option<Arc<Activity>>,
 }
 
@@ -152,7 +155,19 @@ impl H2Reader {
         H2Reader {
             incoming,
             pending: Bytes::new(),
+            pending_err: None,
             activity: None,
+        }
+    }
+
+    fn finish_read(&mut self, released: usize, saw_data: bool) {
+        if released > 0
+            && let Incoming::Body(recv) = &mut self.incoming
+        {
+            let _ = recv.flow_control().release_capacity(released);
+        }
+        if saw_data && let Some(activity) = &self.activity {
+            activity.touch();
         }
     }
 }
@@ -164,22 +179,38 @@ impl AsyncRead for H2Reader {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        loop {
-            if !this.pending.is_empty() {
-                let take = this.pending.len().min(buf.remaining());
-                let chunk = this.pending.get(..take).ok_or(io::ErrorKind::InvalidData)?;
-                buf.put_slice(chunk);
-                if take == this.pending.len() {
-                    this.pending = Bytes::new();
-                } else {
-                    this.pending.advance(take);
-                }
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+
+        let mut copied = 0usize;
+        if !this.pending.is_empty() {
+            let take = this.pending.len().min(buf.remaining());
+            let chunk = this.pending.get(..take).ok_or(io::ErrorKind::InvalidData)?;
+            buf.put_slice(chunk);
+            copied += take;
+            if take == this.pending.len() {
+                this.pending = Bytes::new();
+            } else {
+                this.pending.advance(take);
                 return Poll::Ready(Ok(()));
             }
+        }
+
+        if let Some(err) = this.pending_err.take() {
+            return Poll::Ready(Err(err));
+        }
+
+        let mut released = 0usize;
+        let mut saw_data = false;
+        while buf.remaining() > 0 {
             match &mut this.incoming {
-                Incoming::Done => return Poll::Ready(Ok(())),
+                Incoming::Done => break,
                 Incoming::Response(future) => {
-                    let response = ready!(Pin::new(future).poll(cx)).map_err(h2_io_error)?;
+                    let response = match Pin::new(future).poll(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(res) => res.map_err(h2_io_error)?,
+                    };
                     if !response.status().is_success() {
                         this.incoming = Incoming::Done;
                         return Poll::Ready(Err(io::Error::other(format!(
@@ -189,25 +220,51 @@ impl AsyncRead for H2Reader {
                     }
                     this.incoming = Incoming::Body(response.into_body());
                 }
-                Incoming::Body(recv) => match ready!(recv.poll_data(cx)) {
-                    None => {
+                Incoming::Body(recv) => match recv.poll_data(cx) {
+                    Poll::Pending => {
+                        if copied > 0 {
+                            break;
+                        }
+                        this.finish_read(released, saw_data);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(None) => {
+                        this.finish_read(released, saw_data);
                         this.incoming = Incoming::Done;
                         return Poll::Ready(Ok(()));
                     }
-                    Some(Err(err)) => {
+                    Poll::Ready(Some(Err(err))) => {
+                        this.finish_read(released, saw_data);
                         this.incoming = Incoming::Done;
-                        return Poll::Ready(Err(h2_io_error(err)));
-                    }
-                    Some(Ok(data)) => {
-                        let _ = recv.flow_control().release_capacity(data.len());
-                        if let Some(activity) = &this.activity {
-                            activity.touch();
+                        let err = h2_io_error(err);
+                        if copied > 0 {
+                            this.pending_err = Some(err);
+                            return Poll::Ready(Ok(()));
                         }
-                        this.pending = data;
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Ready(Some(Ok(mut data))) => {
+                        saw_data = true;
+                        released += data.len();
+                        if data.is_empty() {
+                            continue;
+                        }
+                        let take = data.len().min(buf.remaining());
+                        let chunk = data.get(..take).ok_or(io::ErrorKind::InvalidData)?;
+                        buf.put_slice(chunk);
+                        copied += take;
+                        if take < data.len() {
+                            data.advance(take);
+                            this.pending = data;
+                            break;
+                        }
                     }
                 },
             }
         }
+
+        this.finish_read(released, saw_data);
+        Poll::Ready(Ok(()))
     }
 }
 

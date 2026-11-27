@@ -12,25 +12,16 @@ use h2::client::SendRequest;
 use http::{Method, Request, Uri};
 
 use crate::DialFn;
-use crate::h2io::{
-    Activity, H2Body, Incoming, STREAM_WINDOW, h2_io_error, handshake_split, spawn_connection,
-};
+use crate::h2io::{Activity, H2Body, Incoming, h2_io_error, handshake_split, spawn_connection};
 pub(crate) use frame::gun_framed;
 
 const DEFAULT_SERVICE: &str = "GunService";
 const DEFAULT_USER_AGENT: &str = "grpc-go/1.36.0";
-const CONN_WINDOW: u32 = 65_535 + (1 << 30);
-const MAX_FRAME_SIZE: u32 = 1 << 20;
 const MAX_HEADER_LIST_SIZE: u32 = 10 << 20;
 
 fn client_builder() -> h2::client::Builder {
-    let mut builder = h2::client::Builder::new();
-    builder
-        .initial_window_size(STREAM_WINDOW)
-        .initial_connection_window_size(CONN_WINDOW)
-        .max_frame_size(MAX_FRAME_SIZE)
-        .max_header_list_size(MAX_HEADER_LIST_SIZE)
-        .enable_push(false);
+    let mut builder = crate::h2io::client_builder();
+    builder.max_header_list_size(MAX_HEADER_LIST_SIZE);
     builder
 }
 

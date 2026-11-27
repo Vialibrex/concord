@@ -192,6 +192,169 @@ async fn the_drop_hook_runs_once_after_both_halves_are_gone() {
     assert_eq!(runs.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn client_builder_advertises_the_reference_frame_size_and_windows() {
+    let (near, mut far) = duplex(1 << 16);
+    let observed = tokio::spawn(async move { client_settings(&mut far).await });
+    let io = Box::new(near) as BoxStream;
+    let (sender, conn) = client_builder().handshake::<_, Bytes>(io).await.unwrap();
+    let driver = tokio::spawn(conn);
+    let (settings, update) = observed.await.unwrap();
+    assert_eq!(settings.get(&2), Some(&0));
+    assert_eq!(settings.get(&4), Some(&(4 << 20)));
+    assert_eq!(settings.get(&5), Some(&(1 << 20)));
+    assert_eq!(update, 1 << 30);
+    drop(sender);
+    driver.abort();
+}
+
+async fn wait_buffered(reader: &mut H2Reader, want: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Incoming::Body(recv) = &mut reader.incoming
+                && recv.flow_control().used_capacity() >= want
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn h2_reader_drains_ready_frames_in_one_read_and_keeps_tail() {
+    let (near, far) = duplex(1 << 16);
+    let server = tokio::spawn(async move {
+        let mut conn = h2::server::handshake(far).await.unwrap();
+        let (_req, mut respond) = conn.accept().await.unwrap().unwrap();
+        let mut send = respond
+            .send_response(http::Response::new(()), false)
+            .unwrap();
+        send.send_data(Bytes::from_static(b"aaaa"), false).unwrap();
+        send.send_data(Bytes::from_static(b"bbbb"), false).unwrap();
+        send.send_data(Bytes::from_static(b"cccc"), false).unwrap();
+        while conn.accept().await.is_some() {}
+    });
+    let (mut sender, conn) = client_builder().handshake::<_, Bytes>(near).await.unwrap();
+    let driver = tokio::spawn(conn);
+    let (response, _send) = sender.send_request(http::Request::new(()), true).unwrap();
+    let response = response.await.unwrap();
+    let mut reader = H2Reader::new(Incoming::Body(response.into_body()));
+    wait_buffered(&mut reader, 12).await;
+
+    let mut first = [0u8; 10];
+    let n = reader.read(&mut first).await.unwrap();
+    assert_eq!(n, 10);
+    assert_eq!(&first, b"aaaabbbbcc");
+    assert_eq!(reader.pending.as_ref(), b"cc");
+    if let Incoming::Body(recv) = &mut reader.incoming {
+        assert_eq!(recv.flow_control().used_capacity(), 0);
+    } else {
+        panic!("expected open body");
+    }
+
+    let mut tail = [0u8; 4];
+    let n = reader.read(&mut tail).await.unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(tail.get(..n), Some(b"cc".as_slice()));
+    assert!(reader.pending.is_empty());
+
+    driver.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn h2_reader_preserves_eof_after_partial_drain() {
+    let (near, far) = duplex(1 << 16);
+    let server = tokio::spawn(async move {
+        let mut conn = h2::server::handshake(far).await.unwrap();
+        let (_req, mut respond) = conn.accept().await.unwrap().unwrap();
+        let mut send = respond
+            .send_response(http::Response::new(()), false)
+            .unwrap();
+        send.send_data(Bytes::from_static(b"hi"), false).unwrap();
+        send.send_data(Bytes::from_static(b"!"), true).unwrap();
+        while conn.accept().await.is_some() {}
+    });
+    let (mut sender, conn) = client_builder().handshake::<_, Bytes>(near).await.unwrap();
+    let driver = tokio::spawn(conn);
+    let (response, _send) = sender.send_request(http::Request::new(()), true).unwrap();
+    let response = response.await.unwrap();
+    let mut reader = H2Reader::new(Incoming::Body(response.into_body()));
+    wait_buffered(&mut reader, 3).await;
+
+    let mut buf = [0u8; 16];
+    let n = reader.read(&mut buf).await.unwrap();
+    assert_eq!(buf.get(..n), Some(b"hi!".as_slice()));
+    assert_eq!(reader.read(&mut buf).await.unwrap(), 0);
+
+    driver.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn h2_reader_preserves_error_after_partial_drain() {
+    let (near, far) = duplex(1 << 16);
+    let (sent_tx, sent_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut conn = h2::server::handshake(far).await.unwrap();
+        let (_req, mut respond) = conn.accept().await.unwrap().unwrap();
+        let mut send = respond
+            .send_response(http::Response::new(()), false)
+            .unwrap();
+        send.send_data(Bytes::from_static(b"o"), false).unwrap();
+        send.send_data(Bytes::from_static(b"k"), false).unwrap();
+        let mut barrier_respond: Option<h2::server::SendResponse<Bytes>> = None;
+        let mut sent_rx = Some(sent_rx);
+        loop {
+            tokio::select! {
+                _ = async { sent_rx.as_mut().unwrap().await }, if sent_rx.is_some() => {
+                    sent_rx = None;
+                    send.send_reset(h2::Reason::CANCEL);
+                    if let Some(mut respond) = barrier_respond.take() {
+                        let _ = respond.send_response(http::Response::new(()), true);
+                    }
+                }
+                next = conn.accept() => match next {
+                    Some(Ok((_req, mut respond))) => {
+                        if sent_rx.is_none() {
+                            let _ = respond.send_response(http::Response::new(()), true);
+                        } else {
+                            barrier_respond = Some(respond);
+                        }
+                    }
+                    _ => break,
+                }
+            }
+        }
+    });
+    let (mut sender, conn) = client_builder().handshake::<_, Bytes>(near).await.unwrap();
+    let driver = tokio::spawn(conn);
+    let (response, _send) = sender.send_request(http::Request::new(()), true).unwrap();
+    let response = response.await.unwrap();
+    let mut reader = H2Reader::new(Incoming::Body(response.into_body()));
+    wait_buffered(&mut reader, 2).await;
+    let _ = sent_tx.send(());
+    let mut barrier_sender = sender.ready().await.unwrap();
+    let (barrier, _barrier_send) = barrier_sender
+        .send_request(http::Request::new(()), true)
+        .unwrap();
+    barrier.await.unwrap();
+
+    let mut buf = [0u8; 16];
+    let n = reader.read(&mut buf).await.unwrap();
+    assert_eq!(buf.get(..n), Some(b"ok".as_slice()));
+    assert!(reader.pending_err.is_some());
+    let err = reader.read(&mut buf).await.unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::ConnectionReset);
+    assert!(reader.pending_err.is_none());
+
+    driver.abort();
+    server.abort();
+}
+
 /// Plays the server side of a client handshake on `far`: sends an empty SETTINGS, then
 /// returns the client's SETTINGS and its connection-level WINDOW_UPDATE increment.
 pub(crate) async fn client_settings(
