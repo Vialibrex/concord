@@ -80,7 +80,7 @@ pub fn set_clock(clock: Box<dyn Fn() -> SystemTime + Send + Sync>) {
 }
 
 #[inline]
-fn get_now_timestamp() -> u64 {
+pub(crate) fn get_now_timestamp() -> u64 {
     let clock = CLOCK.read().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = clock.as_ref().map_or_else(SystemTime::now, |clock| clock());
     match now.duration_since(SystemTime::UNIX_EPOCH) {

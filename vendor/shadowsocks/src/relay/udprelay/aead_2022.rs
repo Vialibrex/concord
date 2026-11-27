@@ -51,9 +51,8 @@ use std::{
     hash::{Hash, Hasher},
     io::{self, Cursor, Seek, SeekFrom},
     rc::Rc,
-    slice,
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use aes::{
@@ -108,11 +107,26 @@ pub enum ProtocolError {
 /// AEAD 2022 protocol result
 pub type ProtocolResult<T> = Result<T, ProtocolError>;
 
+/// Concord: keyed by a hash of the key's bytes rather than its address, which a freed key's
+/// successor can take while the old key's cipher is still cached. A hash keeps the key as
+/// small as the address was: the cache allocates its index for every entry up front.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 struct CipherKey {
     method: CipherKind,
-    key: usize,
+    key: u64,
     session_id: u64,
+}
+
+impl CipherKey {
+    fn new(method: CipherKind, key: &[u8], session_id: u64) -> CipherKey {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        CipherKey {
+            method,
+            key: hasher.finish(),
+            session_id,
+        }
+    }
 }
 
 impl PartialOrd for CipherKey {
@@ -146,30 +160,42 @@ thread_local! {
         RefCell::new(LruCache::with_expiry_duration_and_capacity(CIPHER_CACHE_DURATION, CIPHER_CACHE_LIMIT));
 }
 
+/// Concord: the clock `set_clock` installs, as the TCP relay reads it.
 #[inline]
 pub fn get_now_timestamp() -> u64 {
-    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
-        Ok(n) => n.as_secs(),
-        Err(_) => panic!("SystemTime::now() is before UNIX Epoch!"),
-    }
+    crate::relay::tcprelay::now_timestamp()
 }
 
 fn get_cipher(method: CipherKind, key: &[u8], session_id: u64) -> Rc<UdpCipher> {
     CIPHER_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
 
-        let cache_key = CipherKey {
-            method,
-            // The key is stored in ServerConfig structure, so the address of it won't change.
-            key: key.as_ptr() as usize,
-            session_id,
-        };
-
         cache
-            .entry(cache_key)
+            .entry(CipherKey::new(method, key, session_id))
             .or_insert_with(|| Rc::new(UdpCipher::new(method, key, session_id)))
             .clone()
     })
+}
+
+/// Concord: opens `message` with the cached cipher of the session, or with a new one that is
+/// cached only once it opened the packet, so packets that do not open leave no cipher behind,
+/// as sing-shadowsocks drops a session whose first packet fails (`shadowaead_2022/service.go:429-445`).
+fn decrypt_with_cache(method: CipherKind, key: &[u8], session_id: u64, nonce: &[u8], message: &mut [u8]) -> bool {
+    let cache_key = CipherKey::new(method, key, session_id);
+    let cached = CIPHER_CACHE.with(|cache| cache.borrow_mut().get(&cache_key).cloned());
+    if let Some(cipher) = cached {
+        return cipher.decrypt_packet(nonce, message);
+    }
+    let cipher = Rc::new(UdpCipher::new(method, key, session_id));
+    if !cipher.decrypt_packet(nonce, message) {
+        return false;
+    }
+    CIPHER_CACHE.with(|cache| cache.borrow_mut().insert(cache_key, cipher));
+    true
+}
+
+pub fn cipher_cache_len() -> usize {
+    CIPHER_CACHE.with(|cache| cache.borrow().len())
 }
 
 fn encrypt_message(
@@ -263,13 +289,10 @@ fn decrypt_message(
             // But still, we get the session_id for cache
             let session_id = {
                 let session_id_buf = &message[0..8];
-                let session_id_slice: &[u64] = unsafe { slice::from_raw_parts(session_id_buf.as_ptr() as *const _, 1) };
-                u64::from_be(session_id_slice[0])
+                u64::from_be_bytes(session_id_buf.try_into().expect("session id is 8 bytes"))
             };
 
-            let cipher = get_cipher(method, key, session_id);
-
-            if !cipher.decrypt_packet(nonce, message) {
+            if !decrypt_with_cache(method, key, session_id, nonce, message) {
                 return Err(ProtocolError::DecryptPayloadError);
             }
         }
@@ -285,13 +308,10 @@ fn decrypt_message(
             // But still, we get the session_id for cache
             let session_id = {
                 let session_id_buf = &message[0..8];
-                let session_id_slice: &[u64] = unsafe { slice::from_raw_parts(session_id_buf.as_ptr() as *const _, 1) };
-                u64::from_be(session_id_slice[0])
+                u64::from_be_bytes(session_id_buf.try_into().expect("session id is 8 bytes"))
             };
 
-            let cipher = get_cipher(method, key, session_id);
-
-            if !cipher.decrypt_packet(nonce, message) {
+            if !decrypt_with_cache(method, key, session_id, nonce, message) {
                 return Err(ProtocolError::DecryptPayloadError);
             }
         }
@@ -324,11 +344,10 @@ fn decrypt_message(
 
             let session_id = {
                 let session_id_buf = &packet_header[0..8];
-                let session_id_slice: &[u64] = unsafe { slice::from_raw_parts(session_id_buf.as_ptr() as *const _, 1) };
-                u64::from_be(session_id_slice[0])
+                u64::from_be_bytes(session_id_buf.try_into().expect("session id is 8 bytes"))
             };
 
-            let cipher = if method_support_eih(method) {
+            if method_support_eih(method) {
                 if let Some(user_manager) = user_manager {
                     // Extensible Identity Header
                     // https://github.com/Shadowsocks-NET/shadowsocks-specs/blob/main/2022-2-shadowsocks-2022-extensible-identity-headers.md
@@ -371,20 +390,15 @@ fn decrypt_message(
                         }
                         Some(user) => {
                             trace!("{:?} chosen by EIH", user);
-                            let cipher = get_cipher(method, user.key(), session_id);
                             client_user = Some(user);
-                            cipher
                         }
                     }
-                } else {
-                    get_cipher(method, key, session_id)
                 }
-            } else {
-                get_cipher(method, key, session_id)
-            };
+            }
+            let key = client_user.as_ref().map_or(key, |user| user.key());
 
             let nonce = &packet_header[4..16];
-            if !cipher.decrypt_packet(nonce, message) {
+            if !decrypt_with_cache(method, key, session_id, nonce, message) {
                 return Err(ProtocolError::DecryptPayloadError);
             }
         }

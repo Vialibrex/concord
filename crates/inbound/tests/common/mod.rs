@@ -93,7 +93,8 @@ pub async fn open(
     handler: Arc<dyn FlowHandler>,
 ) -> Vec<ListenError> {
     let collided = |error: &ListenError| {
-        spec.port(error.kind) == Some(0) && error.source.kind() == io::ErrorKind::AddrInUse
+        error.kind().and_then(|kind| spec.port(kind)) == Some(0)
+            && error.source.kind() == io::ErrorKind::AddrInUse
     };
     let mut errors = listeners
         .reconcile(spec, handler.clone(), Tasks::default())

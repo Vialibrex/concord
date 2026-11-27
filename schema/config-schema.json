@@ -47,13 +47,13 @@
       "external-controller-cors",
       "bind-address",
       "lan-allowed-ips",
-      "lan-disallowed-ips"
-    ],
-    "t2": [
+      "lan-disallowed-ips",
       "listeners",
       "tunnels",
       "ss-config",
-      "vmess-config",
+      "vmess-config"
+    ],
+    "t2": [
       "tuic-server",
       "iptables",
       "clash-for-android",

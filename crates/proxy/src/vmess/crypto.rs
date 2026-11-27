@@ -13,6 +13,7 @@ use sha3::Shake128;
 use sha3::digest::{ExtendableOutput, XofReader};
 
 use super::cfb::{CfbDecryptor, CfbEncryptor};
+pub(crate) use super::one_shot::{one_shot_open, one_shot_seal};
 use crate::addr_codec::VMESS;
 use crate::util::invalid_data;
 
@@ -175,7 +176,7 @@ fn aead(security: Security, key: &[u8]) -> io::Result<LessSafeKey> {
         .map_err(|_| invalid_data("bad vmess key"))
 }
 
-fn gcm(key: &[u8]) -> io::Result<LessSafeKey> {
+pub(super) fn gcm(key: &[u8]) -> io::Result<LessSafeKey> {
     aead(Security::Aes128Gcm, key)
 }
 
@@ -193,35 +194,6 @@ fn base_nonce(iv: &[u8; 16]) -> [u8; 12] {
         .zip(iv)
         .for_each(|(slot, byte)| *slot = *byte);
     out
-}
-
-pub(crate) fn one_shot_seal(
-    key: &[u8],
-    nonce: &[u8],
-    aad: &[u8],
-    plain: &[u8],
-) -> io::Result<Vec<u8>> {
-    let cipher = gcm(key)?;
-    let nonce = <[u8; 12]>::try_from(nonce).map_err(|_| invalid_data("bad nonce"))?;
-    let mut out = plain.to_vec();
-    let tag = cipher
-        .seal_in_place_separate_tag(
-            Nonce::assume_unique_for_key(nonce),
-            Aad::from(aad),
-            &mut out,
-        )
-        .map_err(|_| invalid_data("seal failed"))?;
-    out.extend_from_slice(tag.as_ref());
-    Ok(out)
-}
-
-fn one_shot_open(key: &[u8], nonce: &[u8], aad: &[u8], sealed: &mut [u8]) -> io::Result<usize> {
-    let cipher = gcm(key)?;
-    let nonce = <[u8; 12]>::try_from(nonce).map_err(|_| invalid_data("bad nonce"))?;
-    cipher
-        .open_in_place(Nonce::assume_unique_for_key(nonce), Aad::from(aad), sealed)
-        .map(|plain| plain.len())
-        .map_err(|_| invalid_data("vmess header authentication failed"))
 }
 
 fn fnv1a(data: &[u8]) -> u32 {
@@ -536,7 +508,7 @@ pub(crate) struct BodyEncoder {
 }
 
 impl BodyEncoder {
-    pub(crate) fn new(request: &Request) -> io::Result<Self> {
+    pub(crate) fn new(request: &Request, key: &[u8; 16], iv: &[u8; 16]) -> io::Result<Self> {
         let security = request.security;
         let authenticated = request.option & OPT_AUTH_LENGTH != 0;
         Ok(BodyEncoder {
@@ -544,18 +516,18 @@ impl BodyEncoder {
             option: request.option,
             data: security
                 .is_aead()
-                .then(|| DataAead::new(security, &request.key, &request.nonce))
+                .then(|| DataAead::new(security, key, iv))
                 .transpose()?,
             length: (authenticated && chunked(request.option))
                 .then(|| LengthAead::new(security, request))
                 .transpose()?,
             shake: if chunked(request.option) {
-                Shake::new(&request.nonce, request.option, authenticated)
+                Shake::new(iv, request.option, authenticated)
             } else {
                 None
             },
             cfb: (security == Security::Legacy)
-                .then(|| CfbEncryptor::new(&request.key, &request.nonce))
+                .then(|| CfbEncryptor::new(key, iv))
                 .transpose()?,
         })
     }
@@ -843,7 +815,7 @@ mod tests {
 
     fn pair(security: Security, command: u8, padding: bool, authenticated: bool) -> Pair {
         let request = Request::new(security, command, padding, authenticated);
-        let encoder = BodyEncoder::new(&request).unwrap();
+        let encoder = BodyEncoder::new(&request, &request.key, &request.nonce).unwrap();
         let cfb = (security == Security::Legacy)
             .then(|| legacy_response_decryptor(&request.key, &request.nonce).unwrap());
         let decoder = BodyDecoder::new(&request, &request.key, &request.nonce).unwrap();
@@ -902,8 +874,10 @@ mod tests {
             for padding in [false, true] {
                 for authenticated in [false, true] {
                     let request = Request::new(security, CMD_TCP, padding, authenticated);
-                    let mut scalar = BodyEncoder::new(&request).unwrap();
-                    let mut owned = BodyEncoder::new(&request).unwrap();
+                    let mut scalar =
+                        BodyEncoder::new(&request, &request.key, &request.nonce).unwrap();
+                    let mut owned =
+                        BodyEncoder::new(&request, &request.key, &request.nonce).unwrap();
                     let mut decoder =
                         BodyDecoder::new(&request, &request.key, &request.nonce).unwrap();
                     let requirements = owned.owned_requirements().unwrap();

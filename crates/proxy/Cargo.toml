@@ -8,6 +8,9 @@ publish.workspace = true
 description = "Outbound proxy protocols for Concord"
 repository.workspace = true
 
+[features]
+server = []
+
 [lib]
 doctest = false
 

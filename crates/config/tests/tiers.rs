@@ -19,6 +19,19 @@ const SAMPLES: &[(&str, &str)] = &[
     ("lan-disallowed-ips", "lan-disallowed-ips: [192.168.1.1/32]"),
     ("authentication", "authentication: [\"user:pass\"]"),
     ("skip-auth-prefixes", "skip-auth-prefixes: [10.0.0.0/8]"),
+    (
+        "listeners",
+        "listeners: [{name: in, type: mixed, port: 7896}]",
+    ),
+    ("tunnels", "tunnels: [\"tcp,127.0.0.1:7897,a.test:22\"]"),
+    (
+        "ss-config",
+        "ss-config: \"ss://aes-128-gcm:password@127.0.0.1:7898\"",
+    ),
+    (
+        "vmess-config",
+        "vmess-config: \"vmess://1:9d0cb9d0-964f-4ef6-897d-6c6b3ccf9e68@127.0.0.1:7899\"",
+    ),
     ("mode", "mode: global"),
     ("log-level", "log-level: debug"),
     ("ipv6", "ipv6: false"),

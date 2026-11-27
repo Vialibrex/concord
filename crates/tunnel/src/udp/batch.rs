@@ -112,14 +112,15 @@ impl Drop for BatchRound<'_> {
 /// delivered to it, and the lease that puts a flow back.
 pub(super) fn take_round_flow(
     src: SocketAddr,
+    conn: u64,
     dst: &Address,
 ) -> (Option<(FlowId, Arc<Flow>)>, RoundLease) {
     BATCH
         .try_with(|batch| {
             let mut batch = batch.borrow_mut();
-            let flow = batch
-                .flow
-                .take_if(|(id, _)| id.src == src && id.dst == *dst);
+            let flow = batch.flow.take_if(|(id, _)| {
+                id.src == nat_src(src, conn) && id.conn == conn && id.dst == *dst
+            });
             let forgotten = batch.forgotten;
             (flow, RoundLease { forgotten })
         })

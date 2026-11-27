@@ -2,7 +2,7 @@ mod chunk;
 pub(crate) mod crypto;
 mod legacy;
 mod udp;
-mod window;
+pub(crate) mod window;
 
 use std::io;
 use std::sync::Arc;

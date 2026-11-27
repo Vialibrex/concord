@@ -203,6 +203,7 @@ fn established(
     let session = session_with(&inner, socket, reply, 1);
     let id = FlowId {
         src: source(),
+        conn: 0,
         dst: target(),
     };
     inner.nat.flows.insert(id, ready_flow(&session));
@@ -223,6 +224,7 @@ fn upload(
             let flow = UdpFlow {
                 inbound,
                 src: source(),
+                conn: 0,
                 dst: target(),
                 dscp: 0,
             };

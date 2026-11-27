@@ -37,6 +37,10 @@ use super::aead_2022::{
     decrypt_client_payload_aead_2022, decrypt_server_payload_aead_2022, encrypt_client_payload_aead_2022,
     encrypt_server_payload_aead_2022,
 };
+/// Concord: the AEAD-2022 UDP ciphers this thread holds, for tests.
+#[cfg(feature = "aead-cipher-2022")]
+#[doc(hidden)]
+pub use super::aead_2022::cipher_cache_len;
 use super::options::UdpSocketControlData;
 #[cfg(feature = "stream-cipher")]
 use super::stream::{decrypt_payload_stream, encrypt_payload_stream};

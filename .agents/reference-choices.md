@@ -131,6 +131,59 @@ Concord already takes these from the references; keep them unless the reference 
   `sync_dns_server`). What mihomo's apply starts besides them (health checks, provider updates, NTP) stays with the
   config and runs whatever the run state. `engine::lifecycle_tests` holds it.
 
+- [language-neutral] **VMess server request checks** follow sing-vmess `v0.2.5` `service.go:208-216`: the AuthID's
+  CRC32 and a timestamp within 120 s of the clock, before any account's header key is tried, and a replayed AuthID
+  is refused (how long, under Deliberate Differences). The clock is the engine's, NTP corrected, as mihomo hands
+  `ntp.Now` to the service (`listener/sing_vmess/server.go:73`). The response header echoes the request's option byte, as
+  sing-vmess writes it (`service.go:388`, `:414`); v2ray `v4.34.0` and xray write the response's own option, zero
+  (`proxy/vmess/encoding/server.go:391`, `:327`), and none of their clients reads it.
+  `a_replayed_request_and_a_stranger_are_refused` and `the_time_window_is_the_engines_clock` hold it.
+
+- [language-neutral] **Shadowsocks server UDP sessions** expire after five idle minutes, mihomo `v1.19.33`'s
+  `sing.UDPTimeout` (`listener/sing/sing.go:32`), which `listener/sing_shadowsocks/server.go:58` hands to the
+  sing-shadowsocks services. An AEAD-2022 session accepts each client packet id once, within a window of 8128 ids
+  behind the newest, sing-shadowsocks `v0.2.13` `shadowaead_2022/slidingwindow.go`, checked and recorded at
+  `service.go:449`, `:463`; the client-side window (`proxy::ss::window`) is the same one. sing keys a session by its
+  id alone (`service.go:429`, `service_multi.go:305`) and sends its replies to the address its latest packet came
+  from (sing `v0.5.8` `common/udpnat/service.go:92`). Concord keys it by id, cipher and the key its packets opened
+  with, so two users or two ciphers never share a session's key or window, and moves its replies to the client's
+  latest address the same way. `an_aead_2022_packet_id_passes_once_and_still_after_a_reload`,
+  `a_session_is_its_id_wherever_its_packets_come_from`,
+  `a_cipher_changed_under_the_same_key_seals_with_the_new_cipher` and
+  `two_users_behind_one_address_and_session_id_get_their_own_sessions` hold it. Its TCP and UDP timestamps are
+  read on the engine's clock, NTP corrected, as mihomo hands `ntp.Now` to its 2022 services
+  (`listener/sing_shadowsocks/server.go:79`); `an_aead_2022_server_reads_timestamps_on_the_engines_clock` holds it.
+
+- [language-neutral] **A protocol server's UDP flows** are told apart by the connection that carries them, as mihomo
+  gives each packet connection a fresh SNAT key (`listener/sing/sing.go:158`, `:202`): the UDP streams one gun
+  connection multiplexes share its peer address but not their NAT, and an AEAD-2022 session keeps its flows when the
+  client's address changes. `a_flow_named_by_its_connection_follows_the_client_and_no_other_connection` holds it.
+
+- [language-neutral] **A default listener URL** (`ss-config`, `vmess-config`) is read as Go's `url.Parse` reads it
+  through mihomo's `mhurl` (`listener/shadowsocks/utils.go:51-63`): the user and secret are percent-decoded and a
+  malformed escape fails the URL. The listener it opens is apart from `listeners`, as mihomo opens it from its own
+  key, so a listener named `DEFAULT-SHADOWSOCKS` or `DEFAULT-VMESS` runs beside it.
+  `a_default_listener_url_is_percent_decoded` and `a_listener_named_like_a_default_one_is_its_own` hold it.
+
+- [language-neutral] **A Trojan server request** reads the two bytes after the key and after the address without
+  checking that they are CRLF, as mihomo does (`listener/trojan/server.go:285-289`, `:319-322`).
+
+- [language-neutral] **gun servers' HTTP/2 connections** follow Go's HTTP/2 server under mihomo's `http.Server`: the
+  client's first frame after the preface must be SETTINGS, within 2 s (`net/http/internal/http2/server.go:59`,
+  `:1442-1446`, Go 1.27.3); a connection advertises 250 concurrent streams (`:61`); it goes away 30 s after its last
+  stream closed, the `IdleTimeout` mihomo sets (`listener/sing_vmess/server.go:96`, `listener/sing_vless/server.go:86`,
+  `listener/trojan/server.go:82`; Go runs it from the last stream's close, `server.go:804-806`, `:1590-1595`), and
+  lingers 1 s after its GOAWAY (`:1345`). `a_client_that_sends_only_the_preface_is_closed` and
+  `an_http2_connection_closes_once_no_stream_has_been_open_for_the_idle_timeout` hold it. Its receive windows
+  are the server defaults of metacubex/http `v0.1.8`, which mihomo's servers import
+  (`listener/sing_vmess/server.go:27`, `transport/gun/server.go:14`): 1 MiB per stream and per connection
+  (`http2/config.go:104`, `:109`), not the client's larger ones.
+
+- [language-neutral] **A tunnel listed twice** runs once, as mihomo keys its tunnel listeners by address, target and
+  proxy and creates only the keys it lacks (`listener/listener.go:572-613`). Concord drops any listener whose id
+  repeats one before it, a tunnel's id being all it is. `a_listener_listed_twice_runs_once_and_its_port_is_still_released`
+  holds it.
+
 - [language-neutral] **Proxy group/provider name collisions** follow mihomo `v1.19.33` (`3f27ef39`)
   `adapter/outboundgroup/parser.go:155-163`: reject a provider with the group's name only when the group's
   `proxies` list is nonempty; a provider-only group may share a provider's name.
@@ -410,6 +463,11 @@ Concord already takes these from the references; keep them unless the reference 
 | OpenVPN pings with `comp-lzo` | language-neutral | mihomo `3f27ef39` sends a ping without the comp-lzo header byte (`transport/openvpn/client.go:682-691`), which an OpenVPN 2.6 server with `comp-lzo` reads as a bad compression header and drops (`comp-lzo.c` (`lzo_decompress`)), and checks for a ping before taking the header off (`client.go:822-827`). Concord puts the 0xFA header on pings as on every packet and takes the header off before looking for a ping (`crates/proxy/src/openvpn/tunnel.rs` (`open_data`)); `pings_carry_the_comp_lzo_header` holds it. | None (behaviour, no performance effect) |
 | macOS utun name | language-neutral | mihomo `v1.19.33` replaces a darwin `tun.device` that is not `utun` and a number (`listener/sing_tun/server.go:116-134`, `:151-155`) with the lowest `utun` number no interface holds, which it reads from the interface list (`:80-113`). Concord leaves such a name unset and lets the kernel assign the utun unit, which also comes out as the lowest free one, without a number read from a list that another process can change before the device opens. mihomo logs the replacement as a warning (`:119`); Concord logs it at info, since a host may send a fixed name the user cannot change. `TunOptions::device_name` (`crates/tun/src/options.rs`) decides it and `macos_leaves_a_name_that_is_not_a_utun_unit_to_the_kernel` holds it. | None (behaviour, no performance effect) |
 | Download request headers | language-neutral | mihomo sets only the User-Agent on a provider or geo download (`component/http/http.go:54-56`), and metacubex/http v0.1.8 adds `Accept-Encoding: gzip` when the request names no encoding and no range (`transport.go:2846-2864`), and unpacks the body only then (`transport.go:2439-2444`). Concord's downloads do the same (`crates/engine/src/resources/fetch.rs` (`request_headers`)) and also send `Accept: */*` when the request names no `Accept`, as curl does by default: a request without one is a bot signal in common web firewall rule sets (OWASP CRS rule 920300), and no server refuses `*/*`. Headers the profile names win over all three. `a_download_asks_for_any_type_and_gzip_and_unpacks_the_gzip_it_asked_for` and `headers_a_download_names_itself_win_and_its_gzip_stays_packed` hold it. | None (behaviour, no performance effect) |
+| Profile listener reloads | language-neutral | mihomo `v1.19.33` closes a listener whose config changed and opens the new one (`listener/listener.go:631-643`); when that listen fails the map keeps the closed listener, so applying the old config again compares equal and leaves the port closed. Concord keys each port by its bind address and sockets: a change of users, certificate or protocol keeps the socket and its connections and serves the new config, and a port that failed to bind is bound again on the next apply. `a_named_listener_takes_its_new_service_on_the_socket_it_kept` and `a_named_port_that_could_not_bind_is_tried_again_and_its_neighbour_runs` hold it. | None (behaviour, no performance effect) |
+| Server replay state | language-neutral | mihomo `v1.19.33` opens a changed listener with a new service (`listener/listener.go:631-643`), so its VMess AuthID filter, Shadowsocks salt filter and 2022 UDP sessions start empty; sing-vmess `v0.2.5` keeps an AuthID 120 s from its arrival (`service.go:70`), though one stamped up to 120 s ahead of the clock is accepted for 240 s (`:211`). Concord keeps each listener's AuthIDs, salts and 2022 UDP sessions under its name, or a default listener's under its key, across reloads, and keeps an AuthID until its own timestamp leaves the window. `an_auth_id_is_refused_for_as_long_as_its_timestamp_is_accepted`, `a_replayed_request_and_a_stranger_are_refused` and `an_aead_2022_packet_id_passes_once_and_still_after_a_reload` hold it. The table holds an AuthID up to 240 s rather than 120 s. | None (behaviour, no performance effect) |
+| Multi-port listeners | language-neutral | mihomo `v1.19.33` returns at the first port of a listener that fails to bind (`listener/inbound/socks.go:86-112`) and never closes the ports it already opened. Concord binds each port on its own, reports the one that failed and serves the rest. `a_named_port_that_could_not_bind_is_tried_again_and_its_neighbour_runs` holds it. | None (behaviour, no performance effect) |
+| Listener `proxy` and `rule` names | language-neutral | mihomo `v1.19.33` finds a listener's `proxy` only when a connection arrives (`tunnel/tunnel.go:318-322`) and runs the main rules for a `rule` that names no sub-rule (`:713-720`). Concord rejects the profile, as it does for any other missing name. `inbound_references_must_exist` holds it. | None (behaviour, no performance effect) |
+| Profile listener and tunnel lifetime | language-neutral | mihomo `v1.19.33` opens `listeners` and `tunnels` in `ApplyConfig` (`hub/executor/executor.go:107`, `:110`). Concord opens them with the global ports on `engine.start` and closes them on `engine.stop`, as FlClash's Go core does, so an embedding host decides when a profile may take ports. `profile_listeners_and_tunnels_open_and_close_with_the_listeners` holds it. | None (behaviour, no performance effect) |
 
 
 ## Tunables
@@ -516,7 +574,17 @@ MiB, GiB, ns, µs, ms, s, min, h), or as the source text in backticks; `cfg` var
 | `inbound::accept::MAX_BACKOFF` | 1 s | B | Accept-error backoff ceiling; Go `net/http/server.go:3585` (Server.Serve tempDelay max 1 s), same doubling loop. |
 | `inbound::accept::MIN_BACKOFF` | 5 ms | B | Accept-error backoff start; Go `net/http/server.go:3581` (Server.Serve tempDelay starts at 5 ms, doubles). |
 | `inbound::bind::LISTEN_BACKLOG` | 2147483647 | C | Linux lowers a listen backlog to `net.core.somaxconn` (`net/socket.c::__sys_listen_socket`), XNU to `kern.ipc.somaxconn` (`bsd/kern/uipc_socket.c::solisten`), and Windows takes `SOMAXCONN` = 0x7fffffff as the provider's maximum (Go `syscall/types_windows.go:649`); asking for the most gives each system's limit, which is what Go passes after reading it (`net/sock_linux.go:33-52`, `net/sock_bsd.go:14-31`). |
-| `inbound::ctx::HANDSHAKE_TIMEOUT` | 15 s | B | sing-box bounds reading a request head by TCPTimeout = 15 s (`constant/timeout.go:9`, used as ReadHeaderTimeout at `transport/v2rayhttp/server.go:65`); same value. |
+| `common::serve::HANDSHAKE_TIMEOUT` | 15 s | B | sing-box bounds reading a request head by TCPTimeout = 15 s (`constant/timeout.go:9`, used as ReadHeaderTimeout at `transport/v2rayhttp/server.go:65`); same value. |
+| `proxy::server::ss::UDP_SESSION_IDLE` | 300 s | B | mihomo `v1.19.33` gives its Shadowsocks services `sing.UDPTimeout` = 5 min (`listener/sing/sing.go:32`, passed at `listener/sing_shadowsocks/server.go:58`) as their UDP session expiry; same value. |
+| `proxy::server::vmess::WINDOW` | 120 s | B | sing-vmess `v0.2.5` accepts timestamps within 120 s of its clock (`service.go:211`); same value. Each AuthID is kept until its timestamp is more than this behind the clock. |
+| `transport::server::FIRST_SETTINGS` | 2 s | B | Go's HTTP/2 server `firstSettingsTimeout` (`net/http/internal/http2/server.go:59`, Go 1.27.3); same value. It also bounds the server's own handshake. |
+| `transport::server::IDLE` | 30 s | B | mihomo `v1.19.33` `http.Server{IdleTimeout: 30 * time.Second}` for its vmess, vless and trojan carriers (`listener/sing_vmess/server.go:96`); same value. |
+| `transport::server::MAX_STREAMS` | 250 | B | Go's HTTP/2 server `defaultMaxStreams` (`server.go:61`, applied at `config.go:51`); same value. |
+| `transport::server::GOAWAY_GRACE` | 1 s | B | Go's HTTP/2 server `goAwayTimeout` (`server.go:1345`); same value. |
+| `transport::server::CONN_WINDOW` | 1 MiB | B | metacubex/http `v0.1.8`, the HTTP stack mihomo's gun and ws servers import (`transport/gun/server.go:14`, `listener/sing_vmess/server.go:27`), defaults a server's `MaxUploadBufferPerConnection` to 1 << 20 (`http2/config.go:104`); same value. |
+| `transport::server::STREAM_WINDOW` | 1 MiB | B | metacubex/http `v0.1.8`, which mihomo's gun and ws servers run on, defaults a server's `MaxUploadBufferPerStream` to 1 << 20 (`http2/config.go:109`); same value. |
+| `transport::server::MAX_REQUEST_HEAD` | 1052672 | B | metacubex/http `v0.1.8`'s `http.Server` reads a request head up to `DefaultMaxHeaderBytes` 1 << 20 plus 4096 (`server.go:896`, `:905-906`), the limit mihomo's ws servers run with; same value. |
+| `proxy::server::ss::MAX_SESSIONS` | 16384 | B | sing-shadowsocks `v0.2.13` bounds its 2022 UDP sessions by age only (`shadowaead_2022/service.go:79-80`); the nearest bound is sing-tun's UDPNATMax, 16384, which `tunnel::udp::MAX_FLOWS` already takes. A full table lets the least recently seen session go, which sing never does early: packets that session sent within the 30 s timestamp window can then be replayed once into the new session that its id opens, and its client gets a new server session id and NAT flow. |
 | `inbound::http::body::MAX_LINE` | 4096 | B | Go `net/http/internal/chunked.go:19` maxLineLength = 4096 for a chunk-size line, which mihomo's HTTP inbound reads through (`listener/http/proxy.go:51`); same value. |
 | `inbound::http::forward::IDLE_TIMEOUT` | 90 s | B | HTTP inbound upstream pool idle 90 s; mihomo `listener/http/client.go:22` IdleConnTimeout 90 s (from Go `net/http/transport.go:55`). |
 | `inbound::http::forward::MAX_IDLE` | 100 | B | HTTP inbound upstream idle pool cap 100; mihomo `listener/http/client.go:21` MaxIdleConns 100 (Go `net/http/transport.go:54`). |
@@ -893,6 +961,9 @@ tunables. `module::*` covers every constant in that module and its submodules th
 | `proxy::uot::*` | UDP-over-TCP legacy protocol version 1, sing `common/uot/protocol.go:14` (metacubex sing v0.5.8) |
 | `proxy::vless::encryption::kdf::*` | BLAKE3 IV and message permutation, BLAKE3 specification §2.1 and §3.1; portable context hashing uses DERIVE_KEY_CONTEXT and the normal BLAKE3 tree. |
 | `proxy::vless::stream::*` | VLESS commands (mihomo `transport/vless/vless.go:22-24`) and XTLS Vision wire: TLS record prefixes and TLS 1.3 supported_versions (`transport/vless/vision/filter.go:11-14`), padding header 21, commands 0/1/2, buffer limit 8192 - 21 (`transport/vless/vision/padding.go:15-20`, `:47-50`). |
+| `proxy::server::vless::*` | VLESS request version 0 and the response header `[version, 0]` with no addons, sing-vmess `v0.2.5` `vless/protocol.go:17`, `vless/service.go:224` |
+| `transport::server::SETTINGS_FRAME` | HTTP/2 SETTINGS frame type 0x4, RFC 9113 §6.5 |
+| `proxy::server::vmess::SEALED_LENGTH` | VMess AEAD request: the 2-byte header length sealed with a 16-byte tag, sing-vmess `v0.2.5` `service.go:175` |
 | `proxy::vmess::crypto::*` | VMess wire: version 1, write chunk 15000, max padding 64, cipher overhead 16, commands 1/2/3, request options 1/4/8/16 (sing-vmess v0.2.5 `protocol.go:25-29`, `:44-54`, `:73`), HMAC-SHA256 block 64 in the AEAD KDF (RFC 2104). |
 | `proxy::wireguard::amnezia::mac::*` | WireGuard protocol cookie lifetime 120 s (whitepaper §5.4.7), wireguard-go CookieRefreshTime (metacubex wireguard-go `device/constants.go:24`; amneziawg-go `device/constants.go:24`); WireGuard cookie reply 64 bytes, amneziawg-go `device/noise-protocol.go:68`; WireGuard handshake initiation 148 bytes, amneziawg-go `device/noise-protocol.go:66`; WireGuard mac1/mac2 16 bytes (keyed BLAKE2s-128), WireGuard whitepaper §5.4.4; WireGuard handshake response 92 bytes, amneziawg-go `device/noise-protocol.go:67` |
 | `proxy::wireguard::transport::*` | WireGuard message header: 1 type byte + 3 reserved bytes, whitepaper §5.4; reserved bytes rewritten as in mihomo/sing-wireguard reserved option |

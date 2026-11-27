@@ -27,10 +27,10 @@ The exact edges are in `xtask/src/layers.rs`. From the bottom up:
 | Pure | `config`, `rules` | Profile parsing and validation; the rule compiler and route program. No tokio |
 | OS | `platform` | The `Platform` trait a host implements (`protect`, process lookup, default interface) and native system calls (sockopts, splice, tproxy, rlimits, owned mmap buffers) |
 | Sockets and crypto | `net`, `tls`, `netstack` | Socket factory, dialing, loopback guard, the relay; rustls and BoringSSL backends, fingerprints, REALITY, ECH; the user-space TCP/IP stack shared by TUN and WireGuard |
-| Links | `transport`, `quic`, `proxy` | ws, gRPC, h2, xhttp, obfs, ShadowTLS, sing-mux; QUIC for the outbounds and DNS: the quinn runtime on the engine's tasks, QUIC over a `PacketSession`, socket obfuscation and port hopping, congestion controllers, shared connections and streams; the outbound protocols and how a node's link is composed |
+| Links | `transport`, `quic`, `proxy` | ws, gRPC, h2, xhttp, obfs, ShadowTLS, sing-mux; QUIC for the outbounds and DNS: the quinn runtime on the engine's tasks, QUIC over a `PacketSession`, socket obfuscation and port hopping, congestion controllers, shared connections and streams; the outbound protocols and how a node's link is composed; behind `server`, the protocol servers a listener runs |
 | Services | `dns`, `group` | Resolver, upstreams, fake-ip, cache; groups, providers, health checks |
 | Pipeline | `tunnel` | Pre-handle, sniff, route, dial, track, relay; UDP NAT; connection table |
-| Edges | `inbound`, `tun`, `mitm` | mixed/http/socks/redir/tproxy listeners; TUN device, routes and stack driver; MITM, scripts, capture |
+| Edges | `inbound`, `tun`, `mitm` | mixed/http/socks/redir/tproxy listeners, a profile's named listeners and tunnels, and the sockets protocol servers run on; TUN device, routes and stack driver; MITM, scripts, capture |
 | Root | `engine` | Composition, lifecycle, apply, background tasks, state that outlives a config |
 | Control | `proto`, `api`, `controller`, `rpc`, `ipc`, `ffi` | Wire types and registry; one typed function per method; the Clash REST and WebSocket API for dashboards; JSON-RPC; socket framing and handshake; the C ABI |
 | Binaries | `bins/desktop`, `bins/android` | The `concord` executable and the C ABI `cdylib` `libconcord.so` |

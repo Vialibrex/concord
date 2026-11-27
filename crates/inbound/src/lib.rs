@@ -4,6 +4,7 @@ mod accept;
 mod bind;
 mod ctx;
 mod http;
+mod listener;
 mod listeners;
 mod socks;
 mod socks4;
@@ -15,6 +16,8 @@ mod udp;
 
 use std::io;
 
+pub use concord_common::serve::Protocol;
+pub use listener::{ListenerId, NamedListener, ProxyAuth, Service};
 pub use listeners::{Bound, Listeners};
 pub use spec::{Cidr, ListenSpec, parse_credential};
 pub use transparent::{PlatformTransparent, TproxyDatagram, Transparent};
@@ -57,16 +60,6 @@ impl ListenerKind {
             ListenerKind::TProxy => "DEFAULT-TPROXY",
         }
     }
-
-    fn has_udp(self) -> bool {
-        matches!(self, ListenerKind::Mixed | ListenerKind::Socks)
-    }
-
-    /// mihomo starts its TProxy UDP listener beside the redirect one too, so a redirect
-    /// port answers UDP as well, as `DEFAULT-TPROXY`; its failure only warns.
-    fn has_transparent_udp(self) -> bool {
-        matches!(self, ListenerKind::Redir | ListenerKind::TProxy)
-    }
 }
 
 impl ListenSpec {
@@ -82,16 +75,30 @@ impl ListenSpec {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("Start {} server error: listen {addr}: {source}", kind.label())]
+#[error("Start {label} server error: listen {addr}: {source}")]
 pub struct ListenError {
-    pub kind: ListenerKind,
+    pub id: ListenerId,
+    pub label: String,
     pub addr: String,
     #[source]
     pub source: io::Error,
 }
 
 impl ListenError {
-    fn new(kind: ListenerKind, addr: String, source: io::Error) -> Self {
-        ListenError { kind, addr, source }
+    fn new(id: ListenerId, label: &str, addr: String, source: io::Error) -> Self {
+        ListenError {
+            id,
+            label: label.to_owned(),
+            addr,
+            source,
+        }
+    }
+
+    /// The global port that failed, when it was one.
+    pub fn kind(&self) -> Option<ListenerKind> {
+        match self.id {
+            ListenerId::Global(kind) => Some(kind),
+            _ => None,
+        }
     }
 }

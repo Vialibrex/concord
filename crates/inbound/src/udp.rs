@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use concord_common::Tasks;
 use concord_common::addr::unmap;
+use concord_common::serve::{DatagramSeal, DatagramService};
 use concord_common::sync::lock;
 use concord_common::{Address, InboundInfo, InboundKind, PacketBuf, UdpFlow, UdpPayload, UdpReply};
 use tokio::net::UdpSocket;
@@ -14,7 +15,8 @@ use tokio::task::coop::consume_budget;
 use tokio_util::sync::CancellationToken;
 
 use crate::accept::next_backoff;
-use crate::ctx::{ListenCtx, unmap_addr};
+use crate::ctx::{ListenCtx, Slot, unmap_addr};
+use crate::listener::Service;
 use crate::socks5::{MAX_UDP_HEADER, Writer, addr_len, decode_udp, write_addr};
 
 const DRAIN_BATCH: usize = 64;
@@ -110,6 +112,49 @@ impl UdpReply for SocksUdpReply {
     }
 }
 
+/// A tunnel answers with the payload as it is.
+struct RawReply {
+    out: Weak<UdpOut>,
+    client: SocketAddr,
+}
+
+impl UdpReply for RawReply {
+    fn poll_write_back(
+        &self,
+        cx: &mut Context<'_>,
+        payload: &[u8],
+        _from: &Address,
+    ) -> Poll<io::Result<()>> {
+        let Some(out) = self.out.upgrade() else {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        };
+        out.poll_send(cx, payload, self.client)
+    }
+}
+
+struct SealedReply {
+    out: Weak<UdpOut>,
+    client: SocketAddr,
+    seal: Arc<dyn DatagramSeal>,
+}
+
+impl UdpReply for SealedReply {
+    fn poll_write_back(
+        &self,
+        cx: &mut Context<'_>,
+        payload: &[u8],
+        from: &Address,
+    ) -> Poll<io::Result<()>> {
+        let Some(out) = self.out.upgrade() else {
+            return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        };
+        match self.seal.seal(payload, from) {
+            Ok(packet) => out.poll_send(cx, packet.as_slice(), self.client),
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    }
+}
+
 struct Assoc {
     count: usize,
     user: Option<Arc<str>>,
@@ -178,7 +223,7 @@ impl Drop for AssocGuard {
     }
 }
 
-pub(crate) async fn run(ctx: Arc<ListenCtx>, out: Arc<UdpOut>, cancel: CancellationToken) {
+pub(crate) async fn run(slot: Arc<Slot>, out: Arc<UdpOut>, cancel: CancellationToken) {
     let local = out.socket.local_addr().ok();
     let mut delay = Duration::ZERO;
     loop {
@@ -200,7 +245,7 @@ pub(crate) async fn run(ctx: Arc<ListenCtx>, out: Arc<UdpOut>, cancel: Cancellat
             match out.socket.try_recv_from(packet.spare_mut()) {
                 Ok((len, from)) => {
                     packet.advance(len);
-                    dispatch(&ctx, &out, local, packet, from);
+                    dispatch(&slot, &out, local, packet, from);
                     delay = Duration::ZERO;
                 }
                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
@@ -215,6 +260,43 @@ pub(crate) async fn run(ctx: Arc<ListenCtx>, out: Arc<UdpOut>, cancel: Cancellat
 }
 
 fn dispatch(
+    slot: &Slot,
+    out: &Arc<UdpOut>,
+    local: Option<SocketAddr>,
+    packet: PacketBuf,
+    from: SocketAddr,
+) {
+    let live = slot.load();
+    let ctx = &live.udp;
+    match &*live.service {
+        Service::Socks { .. } | Service::Mixed { .. } => socks(ctx, out, local, packet, from),
+        Service::Tunnel { target, .. } => {
+            let reply: Arc<dyn UdpReply> = Arc::new(RawReply {
+                out: Arc::downgrade(out),
+                client: from,
+            });
+            let dst = target.clone();
+            let inbound = ctx.inbound(InboundKind::Tunnel, local, None);
+            deliver(ctx, &inbound, from, 0, dst, packet, &reply);
+        }
+        Service::Protocol(protocol) => {
+            if let Some(service) = &protocol.datagram {
+                opened(
+                    ctx,
+                    protocol.kind,
+                    service.as_ref(),
+                    out,
+                    local,
+                    packet,
+                    from,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn socks(
     ctx: &ListenCtx,
     out: &Arc<UdpOut>,
     local: Option<SocketAddr>,
@@ -228,24 +310,51 @@ fn dispatch(
         return;
     };
     packet.consume(header);
-    let inbound = InboundInfo {
-        kind: InboundKind::Socks5,
-        name: ctx.name.clone(),
-        addr: local,
-        user,
-        host: false,
-        user_agent: None,
+    let reply: Arc<dyn UdpReply> = reply;
+    let inbound = ctx.inbound(InboundKind::Socks5, local, user);
+    deliver(ctx, &inbound, from, 0, dst, packet, &reply);
+}
+
+fn opened(
+    ctx: &ListenCtx,
+    kind: InboundKind,
+    service: &dyn DatagramService,
+    out: &Arc<UdpOut>,
+    local: Option<SocketAddr>,
+    mut packet: PacketBuf,
+    from: SocketAddr,
+) {
+    let Some(opened) = service.open(&mut packet, from) else {
+        return;
     };
+    let reply: Arc<dyn UdpReply> = Arc::new(SealedReply {
+        out: Arc::downgrade(out),
+        client: from,
+        seal: opened.seal,
+    });
+    let inbound = ctx.inbound(kind, local, opened.user);
+    deliver(ctx, &inbound, from, opened.conn, opened.dst, packet, &reply);
+}
+
+fn deliver(
+    ctx: &ListenCtx,
+    inbound: &InboundInfo,
+    from: SocketAddr,
+    conn: u64,
+    dst: Address,
+    packet: PacketBuf,
+    reply: &Arc<dyn UdpReply>,
+) {
     let flow = UdpFlow {
-        inbound: &inbound,
+        inbound,
         src: unmap_addr(from),
+        conn,
         dst,
         dscp: 0,
     };
-    let reply: Arc<dyn UdpReply> = reply;
     ctx.shared
         .handler()
-        .handle_udp(flow, UdpPayload::Owned(packet), &reply);
+        .handle_udp(flow, UdpPayload::Owned(packet), reply);
 }
 
 #[cfg(test)]
@@ -314,13 +423,29 @@ mod tests {
         let assoc = Arc::new(Associations::default());
         let _guard = assoc.register(client.local_addr().unwrap().ip(), None);
         let ctx = Arc::new(ListenCtx {
-            shared,
+            shared: shared.clone(),
             name: Arc::from("test"),
+            special: None,
             assoc,
         });
+        let slot = Arc::new(Slot::new(Arc::new(crate::ctx::Live {
+            tcp: ctx.clone(),
+            udp: ctx,
+            auth: crate::ctx::Auth::Open,
+            service: Arc::new(Service::Socks {
+                auth: crate::listener::ProxyAuth::Open,
+                udp: true,
+            }),
+            cx: Arc::new(concord_common::serve::InboundCx {
+                name: Arc::from("test"),
+                special: None,
+                handler: shared.handler(),
+                tasks: Tasks::default(),
+            }),
+        })));
         let cancel = CancellationToken::new();
         let task = tokio::spawn(run(
-            ctx,
+            slot,
             UdpOut::new(Arc::new(socket), Tasks::default()),
             cancel.clone(),
         ));

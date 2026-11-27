@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 pub const USAGE: &str = "\
 Usage: concord run [-c <file>] [-d <directory>]
 
-  -c, --config <file>         The Clash profile to run [default: <directory>/config.yaml]
+  -c, -f, --config <file>     The Clash profile to run [default: <directory>/config.yaml]
   -d, --directory <directory> Home of the working config, geo data and provider caches
                               [default: ~/.config/concord]
   -h, --help                  Print this help
@@ -46,7 +46,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Command, String> 
     while let Some(arg) = args.next() {
         let slot = match arg.as_str() {
             "-h" | "--help" => return Ok(Command::Help),
-            "-c" | "--config" => &mut config,
+            "-c" | "-f" | "--config" => &mut config,
             "-d" | "--directory" => &mut home,
             _ => return Err(format!("unexpected argument {arg}")),
         };
@@ -264,6 +264,10 @@ mod tests {
             parse_args(&["--directory", "home", "--config", "a.yaml"]),
             Ok(expected)
         );
+        let Ok(Command::Run(options)) = parse_args(&["-d", "home", "-f", "a.yaml"]) else {
+            panic!("-f is -c")
+        };
+        assert_eq!(options.config, Some(PathBuf::from("a.yaml")));
     }
 
     #[test]

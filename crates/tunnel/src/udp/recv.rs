@@ -192,6 +192,7 @@ pub(super) fn delivered(result: io::Result<()>) -> bool {
 pub(super) fn answered_flow(nat: &UdpNat, session: &Session, from: &Address) -> Option<Arc<Flow>> {
     let id = FlowId {
         src: session.key.src,
+        conn: session.key.conn,
         dst: from.clone(),
     };
     if let Some(flow) = nat.flows.get(&id) {

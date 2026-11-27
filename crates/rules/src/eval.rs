@@ -84,7 +84,7 @@ pub(crate) enum Node {
     InUser(Box<[Box<str>]>),
     InName(Box<[Box<str>]>),
     RematchName(Box<[Box<str>]>),
-    InType(u8),
+    InType(u32),
     Url(Box<fancy_regex::Regex>),
     UserAgent(Box<[u8]>),
     Process {
@@ -123,17 +123,10 @@ impl Node {
     }
 }
 
-pub(crate) fn inbound_bit(kind: InboundKind) -> u8 {
-    1 << match kind {
-        InboundKind::Http => 0,
-        InboundKind::Https => 1,
-        InboundKind::Socks4 => 2,
-        InboundKind::Socks5 => 3,
-        InboundKind::Redir => 4,
-        InboundKind::TProxy => 5,
-        InboundKind::Tun => 6,
-        InboundKind::Inner => 7,
-    }
+const _: () = assert!(InboundKind::ALL.len() <= u32::BITS as usize);
+
+pub(crate) fn inbound_bit(kind: InboundKind) -> u32 {
+    1 << kind as u32
 }
 
 pub(crate) struct Ev<'a> {

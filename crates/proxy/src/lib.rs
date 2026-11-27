@@ -22,6 +22,8 @@ mod openvpn;
 mod quic;
 mod reject;
 mod rematch;
+#[cfg(feature = "server")]
+pub mod server;
 mod session_slot;
 mod shadowquic;
 mod smux;

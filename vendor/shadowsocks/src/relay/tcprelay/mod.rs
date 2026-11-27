@@ -11,6 +11,8 @@ mod aead;
 mod aead_2022;
 #[cfg(feature = "aead-cipher-2022")]
 pub use self::aead_2022::set_clock;
+#[cfg(feature = "aead-cipher-2022")]
+pub(crate) use self::aead_2022::get_now_timestamp as now_timestamp;
 pub mod crypto_io;
 pub mod proxy_listener;
 pub mod proxy_stream;

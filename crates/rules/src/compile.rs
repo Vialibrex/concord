@@ -735,21 +735,11 @@ fn process(cx: &mut Cx<'_>, by_name: bool, mode: ProcessMode) -> Node {
     Node::Process { by_name, mode }
 }
 
-fn in_type_mask(items: &[String]) -> u8 {
-    const KINDS: [InboundKind; 8] = [
-        InboundKind::Http,
-        InboundKind::Https,
-        InboundKind::Socks4,
-        InboundKind::Socks5,
-        InboundKind::Redir,
-        InboundKind::TProxy,
-        InboundKind::Tun,
-        InboundKind::Inner,
-    ];
-    let mut mask = 0u8;
+fn in_type_mask(items: &[String]) -> u32 {
+    let mut mask = 0;
     for item in items {
         let upper = item.to_uppercase();
-        for kind in KINDS {
+        for kind in InboundKind::ALL {
             let wanted = if upper == "SOCKS" {
                 matches!(kind, InboundKind::Socks4 | InboundKind::Socks5)
             } else {

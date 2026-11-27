@@ -19,8 +19,8 @@ use crate::node::{Link, info_for};
 use crate::ss::crypto::{CryptoIo, SsKey, new_context};
 use crate::ssr::{SsrCipher, stream_cipher};
 
-const CMD_TCP: u8 = 1;
-const CMD_UDP: u8 = 3;
+pub(crate) const CMD_TCP: u8 = 1;
+pub(crate) const CMD_UDP: u8 = 3;
 const MAX_PACKET: usize = 8192;
 const CRLF: &[u8; 2] = b"\r\n";
 
@@ -44,7 +44,7 @@ struct Trojan {
     ss: Option<SsLayer>,
 }
 
-fn password_key(password: &str) -> [u8; 56] {
+pub(crate) fn password_key(password: &str) -> [u8; 56] {
     let digest = Sha224::digest(password.as_bytes());
     let mut out = [0u8; 56];
     let _ = hex::encode_to_slice(digest, &mut out);
@@ -103,7 +103,7 @@ impl Outbound for Trojan {
     }
 }
 
-struct TrojanFrames;
+pub(crate) struct TrojanFrames;
 
 impl Encoder for TrojanFrames {
     fn headroom(&self) -> usize {

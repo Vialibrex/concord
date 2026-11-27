@@ -11,7 +11,8 @@ use concord_common::{
 };
 use concord_config::proxy::{ProxyDef, VlessOpts};
 
-use self::stream::{CMD_MUX, CMD_TCP, CMD_UDP, FLOW_VISION, ResponseSkip, Vision, request_header};
+pub(crate) use self::stream::{CMD_MUX, CMD_TCP, CMD_UDP};
+use self::stream::{FLOW_VISION, ResponseSkip, Vision, request_header};
 use crate::addr_codec::{MAX_ADDR_LEN, PACKET_ADDR};
 use crate::ctx::{BuildCtx, BuildError};
 use crate::dgram::{Decoded, Decoder, Encoder, StreamSession};
@@ -100,7 +101,7 @@ impl Outbound for Vless {
 }
 
 /// `[length][packet-addr address][payload]`, the length covering the rest.
-struct PacketAddrFrames;
+pub(crate) struct PacketAddrFrames;
 
 impl Encoder for PacketAddrFrames {
     fn headroom(&self) -> usize {

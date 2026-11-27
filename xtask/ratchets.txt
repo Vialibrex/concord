@@ -2,11 +2,10 @@
 # A number may go up only with `raised from <old>: <reason>`; see `.agents/rules.md`.
 file-lines crates/config/src/proxy/parse.rs 933
 file-lines crates/config/src/share_link/decode.rs 941 raised from 940: subscription text falls back to URL-safe base64 after the standard alphabet; folding the fallback into urlx needs a wider import that wraps onto its own line, so back down when share_link/decode.rs is split
-file-lines crates/proxy/src/vmess/crypto.rs 807
 file-lines crates/tls/src/record.rs 989
 file-lines tools/bench/src/load.rs 1105
 file-lines tools/bench/src/runner.rs 869 raised from 852: the rig starts, watches and stops one OpenVPN server per openvpn case, and builds its cases in build_cases
-fn-lines crates/config/src/profile.rs::load_raw 180
+fn-lines crates/config/src/profile.rs::load_raw 174
 fn-lines crates/config/src/profile.rs::resolve_groups 144 raised from 142: a group in `use` and GLOBAL as a member are refused at load, as mihomo does
 fn-lines crates/config/src/rule.rs::build_cond 125
 fn-lines crates/config/src/share_link/decode.rs::decode_line 294

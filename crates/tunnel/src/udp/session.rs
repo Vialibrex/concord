@@ -6,6 +6,7 @@ pub(super) async fn session_for(
     inner: &Arc<Inner>,
     runtime: &Arc<Runtime>,
     state: &FlowState,
+    conn: u64,
     decision: &Decision,
     reply: &Arc<dyn UdpReply>,
     target: &Address,
@@ -17,7 +18,8 @@ pub(super) async fn session_for(
         None
     };
     let key = SessionKey {
-        src: state.meta.src,
+        src: nat_src(state.meta.src, conn),
+        conn,
         outbound: Arc::as_ptr(&decision.leaf).cast::<()>() as usize,
         v6,
         dst: (!multi).then(|| state.meta.dst.clone()),

@@ -1,15 +1,17 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use concord_common::addr::unmap;
+use concord_common::serve::InboundCx;
+pub(crate) use concord_common::serve::{HANDSHAKE_TIMEOUT, Peer};
 use concord_common::sync;
 use concord_common::{
-    Address, BoxStream, FlowHandler, FlowMeta, InboundInfo, InboundKind, Network, UdpFlow,
+    Address, BoxStream, FlowHandler, FlowMeta, InboundInfo, InboundKind, Network, Special, UdpFlow,
     UdpPayload, UdpReply,
 };
 
-use crate::spec::Policy;
+use crate::listener::Service;
+use crate::spec::{Authenticator, Policy};
 use crate::udp::Associations;
 
 struct Unset;
@@ -22,10 +24,6 @@ impl FlowHandler for Unset {
 }
 
 /// What every listener of one `Listeners` reads at accept time.
-/// Bounds the first byte, a SOCKS handshake and an HTTP request head that has not yet been
-/// served, so idle clients on an `allow-lan` port cannot hold descriptors.
-pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
-
 pub(crate) struct Shared {
     handler: RwLock<Arc<dyn FlowHandler>>,
     policy: RwLock<Arc<Policy>>,
@@ -53,12 +51,47 @@ impl Shared {
     }
 }
 
-/// One listener's view: its inbound name (`in-name`) and the UDP associations
-/// its SOCKS5 control connections open.
+/// One listener's view: its inbound name (`in-name`), its `rule` and `proxy`, and the UDP
+/// associations its SOCKS5 control connections open.
 pub(crate) struct ListenCtx {
     pub(crate) shared: Arc<Shared>,
     pub(crate) name: Arc<str>,
+    pub(crate) special: Option<Arc<Special>>,
     pub(crate) assoc: Arc<Associations>,
+}
+
+pub(crate) enum Auth {
+    /// `authentication`, `skip-auth-prefixes`, the LAN lists and the host credential.
+    Global,
+    Open,
+    Own(Authenticator),
+}
+
+/// What one port serves now; a reload that keeps the port swaps it whole.
+pub(crate) struct Live {
+    pub(crate) tcp: Arc<ListenCtx>,
+    /// mihomo names the UDP of a global mixed port `DEFAULT-SOCKS` and that of a redirect
+    /// port `DEFAULT-TPROXY`.
+    pub(crate) udp: Arc<ListenCtx>,
+    pub(crate) auth: Auth,
+    pub(crate) service: Arc<Service>,
+    pub(crate) cx: Arc<InboundCx>,
+}
+
+pub(crate) struct Slot(RwLock<Arc<Live>>);
+
+impl Slot {
+    pub(crate) fn new(live: Arc<Live>) -> Self {
+        Slot(RwLock::new(live))
+    }
+
+    pub(crate) fn load(&self) -> Arc<Live> {
+        sync::read(&self.0).clone()
+    }
+
+    pub(crate) fn store(&self, live: Arc<Live>) {
+        *sync::write(&self.0) = live;
+    }
 }
 
 /// Who a proxy client proved to be: the user it named, or the host itself, which names none.
@@ -84,13 +117,6 @@ impl Client {
     }
 }
 
-/// Both ends of an accepted connection with IPv4-mapped addresses unmapped.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct Peer {
-    pub(crate) src: SocketAddr,
-    pub(crate) local: SocketAddr,
-}
-
 pub(crate) fn unmap_addr(addr: SocketAddr) -> SocketAddr {
     SocketAddr::new(unmap(addr.ip()), addr.port())
 }
@@ -103,19 +129,31 @@ impl ListenCtx {
         dst: Address,
         client: Client,
     ) -> FlowMeta {
+        let mut inbound = self.inbound(kind, Some(peer.local), client.user);
+        inbound.host = client.host;
         FlowMeta {
             dscp: 0,
             network: Network::Tcp,
-            inbound: InboundInfo {
-                kind,
-                name: self.name.clone(),
-                addr: Some(peer.local),
-                user: client.user,
-                host: client.host,
-                user_agent: None,
-            },
+            inbound,
             src: peer.src,
             dst,
+        }
+    }
+
+    pub(crate) fn inbound(
+        &self,
+        kind: InboundKind,
+        local: Option<SocketAddr>,
+        user: Option<Arc<str>>,
+    ) -> InboundInfo {
+        InboundInfo {
+            kind,
+            name: self.name.clone(),
+            addr: local,
+            user,
+            host: false,
+            user_agent: None,
+            special: self.special.clone(),
         }
     }
 

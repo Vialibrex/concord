@@ -6,15 +6,13 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use concord_common::sync::lock;
-use concord_common::{
-    Address, InboundInfo, InboundKind, PacketBuf, Tasks, UdpFlow, UdpPayload, UdpReply,
-};
+use concord_common::{Address, InboundKind, PacketBuf, Tasks, UdpFlow, UdpPayload, UdpReply};
 use tokio::net::UdpSocket;
 use tokio::task::coop::consume_budget;
 use tokio_util::sync::CancellationToken;
 
 use crate::accept::next_backoff;
-use crate::ctx::{ListenCtx, unmap_addr};
+use crate::ctx::{Slot, unmap_addr};
 use crate::transparent::Transparent;
 
 const DRAIN_BATCH: usize = 64;
@@ -25,7 +23,7 @@ type Pair = (SocketAddr, SocketAddr);
 /// server's address and connected to the client, so the client's later datagrams for the
 /// same server reach it rather than the listener.
 struct Table {
-    ctx: Arc<ListenCtx>,
+    slot: Arc<Slot>,
     transparent: Arc<dyn Transparent>,
     cancel: CancellationToken,
     tasks: Tasks,
@@ -82,22 +80,17 @@ impl Table {
     }
 
     fn deliver(&self, local: Option<SocketAddr>, packet: PacketBuf, reply: &Arc<Reply>, dscp: u8) {
-        let inbound = InboundInfo {
-            kind: InboundKind::TProxy,
-            name: self.ctx.name.clone(),
-            addr: local,
-            user: None,
-            host: false,
-            user_agent: None,
-        };
+        let live = self.slot.load();
+        let inbound = live.udp.inbound(InboundKind::TProxy, local, None);
         let flow = UdpFlow {
             inbound: &inbound,
             src: reply.client,
+            conn: 0,
             dst: Address::from(reply.dst),
             dscp,
         };
         let reply: Arc<dyn UdpReply> = reply.clone();
-        self.ctx
+        live.udp
             .shared
             .handler()
             .handle_udp(flow, UdpPayload::Owned(packet), &reply);
@@ -164,7 +157,7 @@ async fn read_back(table: Arc<Table>, key: Pair, held: Arc<Foreign>) {
 }
 
 pub(crate) async fn run(
-    ctx: Arc<ListenCtx>,
+    slot: Arc<Slot>,
     socket: UdpSocket,
     transparent: Arc<dyn Transparent>,
     cancel: CancellationToken,
@@ -172,7 +165,7 @@ pub(crate) async fn run(
 ) {
     let local = socket.local_addr().ok();
     let table = Arc::new(Table {
-        ctx,
+        slot,
         transparent,
         cancel: cancel.clone(),
         tasks,

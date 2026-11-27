@@ -336,6 +336,7 @@ pub(crate) struct Applied {
     pub dns_listen_mark: u32,
     pub store_fake_ip: bool,
     pub sniffing: bool,
+    pub inbounds: Vec<concord_inbound::NamedListener>,
     pub stop: CancellationToken,
 }
 
@@ -393,6 +394,7 @@ pub(crate) struct Shared {
     pub android: bool,
     pub proxy_tasks: Arc<crate::proxy_tasks::ProxyTasks>,
     pub scripts: Arc<concord_common::scripts::ScriptSlot>,
+    pub carried: Arc<crate::inbounds::Carried>,
 }
 
 /// Why a config could not be applied. Only the text reaches the host, as the failure message.
@@ -613,6 +615,7 @@ pub(crate) async fn build(
         shared.scripts.clone(),
     ));
     let applied = Applied {
+        inbounds: crate::inbounds::build(&profile.inbounds, home, &shared.carried, &shared.clock),
         tun_inet4: crate::tun::inet4_of(profile.dns.fake_ip_range),
         dns_listen: if profile.dns.enable {
             profile.dns.listen.clone()

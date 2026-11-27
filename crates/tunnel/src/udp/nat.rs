@@ -93,10 +93,11 @@ pub(crate) fn handle(
     if !inner.handles(flow.inbound.kind) {
         return;
     }
-    let (cached, lease) = take_round_flow(flow.src, &flow.dst);
+    let (cached, lease) = take_round_flow(flow.src, flow.conn, &flow.dst);
     let known = cached.or_else(|| {
         let id = FlowId {
-            src: flow.src,
+            src: nat_src(flow.src, flow.conn),
+            conn: flow.conn,
             dst: flow.dst.clone(),
         };
         let known = inner.nat.flows.get(&id).map(|known| known.clone());
@@ -111,7 +112,8 @@ pub(crate) fn handle(
         return;
     };
     let id = FlowId {
-        src: flow.src,
+        src: nat_src(flow.src, flow.conn),
+        conn: flow.conn,
         dst: flow.dst.clone(),
     };
     start_flow(inner, runtime, id, flow.meta(), payload, reply.clone());
@@ -270,7 +272,7 @@ pub(super) async fn connect(
         concord_common::query_trail::traced(resolve_target(runtime, state, &decision)).await;
     state.note_queries(queries);
     let target = target?;
-    let session = session_for(inner, runtime, state, &decision, &reply, &target).await?;
+    let session = session_for(inner, runtime, state, id.conn, &decision, &reply, &target).await?;
 
     if let (Some(origin), Some(ip)) = (id.dst.ip(), target.ip()) {
         session.map_target(unmap(ip), unmap(origin));

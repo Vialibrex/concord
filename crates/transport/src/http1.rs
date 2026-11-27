@@ -141,13 +141,27 @@ impl ResponseHead {
 
 /// Reads up to the blank line that ends an HTTP head and keeps whatever was read
 /// past it, so a stream can carry on from there.
-#[derive(Default)]
 pub(crate) struct HeadReader {
     buf: Vec<u8>,
     scan: HeadScan,
+    limit: usize,
+}
+
+impl Default for HeadReader {
+    fn default() -> Self {
+        HeadReader::with_limit(MAX_HEAD)
+    }
 }
 
 impl HeadReader {
+    pub fn with_limit(limit: usize) -> Self {
+        HeadReader {
+            buf: Vec::new(),
+            scan: HeadScan::default(),
+            limit,
+        }
+    }
+
     pub fn poll_head<S: AsyncRead + Unpin + ?Sized>(
         &mut self,
         cx: &mut Context<'_>,
@@ -160,7 +174,7 @@ impl HeadReader {
                 self.scan = HeadScan::default();
                 return Poll::Ready(Ok(head));
             }
-            if self.buf.len() > MAX_HEAD {
+            if self.buf.len() > self.limit {
                 return Poll::Ready(Err(invalid("HTTP head too large")));
             }
             let mut chunk = [0u8; READ_CHUNK];

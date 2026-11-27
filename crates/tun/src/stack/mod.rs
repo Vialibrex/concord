@@ -99,6 +99,7 @@ impl FlowSink for HandlerSink {
         let flow = UdpFlow {
             inbound: &self.inbound,
             src: flow.src,
+            conn: 0,
             dst: Address::Socket(flow.dst),
             dscp: 0,
         };

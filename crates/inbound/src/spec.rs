@@ -126,7 +126,7 @@ pub(crate) struct Authenticator {
 }
 
 impl Authenticator {
-    fn new(credentials: &[(String, String)]) -> Option<Self> {
+    pub(crate) fn new(credentials: &[(String, String)]) -> Option<Self> {
         if credentials.is_empty() {
             return None;
         }

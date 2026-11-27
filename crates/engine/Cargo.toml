@@ -12,9 +12,11 @@ repository.workspace = true
 doctest = false
 
 [features]
-default = ["mitm"]
+default = ["mitm", "server"]
 # Without it a `mitm` section is ignored. `concord-api` turns it on for the MITM methods.
 mitm = ["dep:concord-mitm"]
+# Without it a profile's protocol listeners (shadowsocks, vmess, vless, trojan) stay closed.
+server = ["concord-proxy/server"]
 
 [dependencies]
 concord-common = { workspace = true, features = ["io"] }
@@ -62,6 +64,7 @@ rcgen = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 tokio-rustls = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

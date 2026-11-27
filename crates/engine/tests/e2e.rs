@@ -43,6 +43,9 @@ mod download_peak;
 #[path = "e2e/script_cost.rs"]
 mod script_cost;
 
+#[path = "e2e/inbounds.rs"]
+mod inbounds;
+
 #[path = "e2e/rematch.rs"]
 mod rematch;
 

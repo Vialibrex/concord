@@ -35,6 +35,8 @@ pub mod query_trail;
 #[cfg(feature = "io")]
 pub mod scripts;
 #[cfg(feature = "io")]
+pub mod serve;
+#[cfg(feature = "io")]
 pub mod stream;
 #[cfg(feature = "io")]
 pub mod stream_buffer;
@@ -58,7 +60,7 @@ pub use addr::{Address, Host, IpVersion, Network, ip4p_target};
 pub use clock::ClockOffset;
 pub use meta::{
     DnsMode, FlowKey, FlowMeta, HttpFacts, InboundInfo, InboundKind, ProcessInfo, RouteState,
-    UdpFlow,
+    Special, UdpFlow, next_conn,
 };
 pub use options::{CoreOptions, FindProcessMode, LogLevel, TunnelMode};
 pub use timing::{ConnStep, ConnTiming};

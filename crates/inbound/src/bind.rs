@@ -22,6 +22,8 @@ pub(crate) struct BindKey {
     pub host: BindHost,
     pub port: u16,
     pub mptcp: bool,
+    /// `SO_MARK` on the listening socket, a listener's `routing-mark`; zero sets none.
+    pub mark: u32,
 }
 
 /// `listener.go`'s `genAddr`: loopback unless the LAN is allowed, and `*` is the
@@ -88,6 +90,7 @@ fn new_socket(
     ty: Type,
     protocol: Option<Protocol>,
     wildcard: bool,
+    mark: u32,
 ) -> io::Result<Socket> {
     let domain = Domain::for_address(addr);
     let socket = match Socket::new(domain, ty, protocol) {
@@ -96,6 +99,9 @@ fn new_socket(
         Err(err) => return Err(err),
     };
     concord_platform::prepare_listener(&socket, addr.is_ipv6() && wildcard)?;
+    if mark != 0 {
+        concord_platform::set_routing_mark(&socket, mark)?;
+    }
     Ok(socket)
 }
 
@@ -109,7 +115,8 @@ pub(crate) fn bind_tcp(
         .flatten()
         .filter(|_| transparent.is_none());
     first_bound(key.host, key.port, |addr| {
-        let socket = new_socket(addr, Type::STREAM, protocol, key.host == BindHost::Wildcard)?;
+        let wildcard = key.host == BindHost::Wildcard;
+        let socket = new_socket(addr, Type::STREAM, protocol, wildcard, key.mark)?;
         if let Some(transparent) = transparent {
             transparent.make_transparent(&socket, addr.is_ipv6())?;
         }
@@ -125,9 +132,18 @@ pub(crate) fn bind_tcp(
 pub(crate) fn bind_udp(
     tcp_local: SocketAddr,
     transparent: Option<&dyn Transparent>,
+    mark: u32,
 ) -> io::Result<UdpSocket> {
     let wildcard = tcp_local.ip().is_unspecified();
-    let socket = new_socket(tcp_local, Type::DGRAM, None, wildcard)?;
+    let socket = new_socket(tcp_local, Type::DGRAM, None, wildcard, mark)?;
+    finish_udp(socket, tcp_local, transparent)
+}
+
+fn finish_udp(
+    socket: Socket,
+    tcp_local: SocketAddr,
+    transparent: Option<&dyn Transparent>,
+) -> io::Result<UdpSocket> {
     concord_platform::prepare_udp_socket(&socket)?;
     if let Some(transparent) = transparent {
         transparent.prepare_udp(&socket, tcp_local.is_ipv6())?;
@@ -135,6 +151,22 @@ pub(crate) fn bind_udp(
     socket.bind(&SockAddr::from(tcp_local))?;
     socket.set_nonblocking(true)?;
     UdpSocket::from_std(socket.into())
+}
+
+/// A UDP port with no TCP port beside it, such as a UDP-only tunnel. No TCP port holds the
+/// address, so SO_REUSEADDR stays off: on Linux it would let a second process share it.
+pub(crate) fn bind_udp_alone(key: &BindKey) -> io::Result<UdpSocket> {
+    first_bound(key.host, key.port, |addr| {
+        let socket = new_socket(
+            addr,
+            Type::DGRAM,
+            None,
+            addr.ip().is_unspecified(),
+            key.mark,
+        )?;
+        socket.set_reuse_address(false)?;
+        finish_udp(socket, addr, None)
+    })
 }
 
 #[cfg(test)]
@@ -170,11 +202,28 @@ mod tests {
             host: BindHost::Ip(Ipv4Addr::LOCALHOST.into()),
             port: 0,
             mptcp: false,
+            mark: 0,
         };
         let tcp = bind_tcp(&key, None).unwrap();
         let local = tcp.local_addr().unwrap();
-        let udp = bind_udp(local, None).unwrap();
+        let udp = bind_udp(local, None, 0).unwrap();
         assert_eq!(udp.local_addr().unwrap(), local);
+    }
+
+    /// Only Linux lets two unicast UDP sockets that set SO_REUSEADDR share a port; BSD
+    /// refuses the second either way.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_udp_only_port_cannot_be_bound_twice() {
+        let key = |port| BindKey {
+            host: BindHost::Ip(Ipv4Addr::LOCALHOST.into()),
+            port,
+            mptcp: false,
+            mark: 0,
+        };
+        let first = bind_udp_alone(&key(0)).unwrap();
+        let port = first.local_addr().unwrap().port();
+        assert!(bind_udp_alone(&key(port)).is_err());
     }
 
     #[tokio::test]
@@ -184,6 +233,7 @@ mod tests {
                 host: BindHost::Ip(Ipv4Addr::LOCALHOST.into()),
                 port: 0,
                 mptcp: false,
+                mark: 0,
             },
             None,
         )
@@ -194,6 +244,7 @@ mod tests {
                 host: BindHost::Ip(Ipv4Addr::LOCALHOST.into()),
                 port,
                 mptcp: false,
+                mark: 0,
             },
             None,
         )

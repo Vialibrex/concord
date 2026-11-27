@@ -32,7 +32,8 @@ mihomo; a key that only uses one, such as `copy: *domain`, is still unknown.
 | Behaviour | mihomo | Concord |
 |---|---|---|
 | A node of an unsupported type, or one whose options cannot be built | The whole profile fails, or, for options checked when connecting, the node's connections fail | The node is set aside with a warning |
-| `listeners`, `tunnels`, `external-controller-tls`, `-unix`, `-pipe`, `external-ui` and `external-doh-server` | Opened | Never opened; the host opens listeners through the API |
+| `listeners`, `tunnels`, `ss-config` and `vmess-config` | Opened when the profile loads | Opened when the host starts the listeners, as with the ports, and closed when it stops them; `concord run` starts them at once. See Partial Support for what they serve |
+| `tuic-server`, `external-controller-tls`, `-unix`, `-pipe`, `external-ui` and `external-doh-server` | Opened | Never opened; the host opens listeners through the API |
 | `external-controller`, `secret` and `external-controller-cors` | Read from the profile | Read from the profile when Concord runs on its own (`concord run`). An app that embeds Concord sets them itself, and the profile's values are ignored with a warning |
 | Dashboard changes in an app that embeds Concord | mihomo's embedded builds refuse `PUT`/`PATCH /configs` and the geo update | Allowed, except `PUT /configs` and `tun` in `PATCH /configs`, which belong to the app; the app is told of every change so it stays in step |
 | Dial retries | Up to 10 per connection within 5 s | None: one dial per connection, as sing-box does; a failed dial fails the connection. A smart group is the exception: after a node-level failure it redials up to two more of its members within the same 5 s, unless a selection holds it on one member |
@@ -183,6 +184,21 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
 
 ## Partial Support
 
+- **Inbound servers** (`listeners`, `tunnels`, `ss-config`, `vmess-config`): the `http`, `socks`, `mixed`, `redir`,
+  `tproxy`, `tunnel`, `shadowsocks`, `vmess`, `vless` and `trojan` types are served, with `users`, `rule`, `proxy`,
+  `routing-mark` and, on the stream protocols, TLS with `client-auth-type`, `ws-path` and `grpc-service-name`.
+  `IN-NAME`, `IN-TYPE`, `IN-USER` and `IN-PORT` match their flows as in mihomo. A listener of another type, or one
+  that asks for something not served (`reality-config`, `shadow-tls`, `res-tls`, `jls`, `tlsmirror-config`,
+  `mkcp-config`, `mekya-config`, `kcp-tun`, `ech-key`, `xhttp-config`, VLESS `decryption` or the `xtls-rprx-vision`
+  flow, Trojan `ss-option`, Shadowsocks `simple-obfs`, TLS on `http`, `socks` or `mixed`), stays closed with a
+  `listener_skipped` warning while the rest of the profile loads. `mux-option` is ignored with a warning: XUDP over
+  `v1.mux.cool` is served, one session per connection, and sing-mux is not; a Mux.Cool TCP sub-stream or a second
+  session closes the connection, where mihomo serves them. VMess takes AEAD requests only, so a client with `alterId`
+  above 0 cannot connect; mihomo also takes the legacy header. A Trojan request with an unknown key is closed, with no
+  fallback, and one with the trojan-go mux command (`0x7f`) is closed too. A Shadowsocks server takes the ciphers its
+  node does: `aes-192-gcm`, which mihomo's server also takes, is not served. A
+  certificate, key or client CA is the PEM text itself or a file inside the home directory. A listener that cannot
+  bind is logged and retried on the next reload; unlike the ports, it is not reported to the host.
 - **MASQUE:** Cloudflare WARP CONNECT-IP over H3 and H2 capsules, and TCP-only `h3-l4proxy`, with
   ECDSA client authentication and endpoint SPKI pinning. H3 IP advertises the 10 MiB header limit and both
   standard and legacy datagram settings; L4 advertises only the header limit. Grease and disabled extension

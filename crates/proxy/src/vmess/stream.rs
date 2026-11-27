@@ -476,7 +476,7 @@ impl<S> VmessStream<S> {
         request: Request,
         dst: Address,
     ) -> io::Result<Self> {
-        let encoder = BodyEncoder::new(&request)?;
+        let encoder = BodyEncoder::new(&request, &request.key, &request.nonce)?;
         Ok(VmessStream {
             io,
             cfg,
@@ -491,6 +491,52 @@ impl<S> VmessStream<S> {
                 ended: false,
                 owned: OwnedDrain::default(),
             },
+        })
+    }
+
+    /// The server end of a request already read: the reader starts at the body, and the
+    /// sealed response header goes out ahead of the first reply.
+    #[cfg(feature = "server")]
+    pub(crate) fn server(
+        io: S,
+        request: Request,
+        response_head: Vec<u8>,
+        key: &[u8; 16],
+        iv: &[u8; 16],
+    ) -> io::Result<Self> {
+        let decoder = BodyDecoder::new(&request, &request.key, &request.nonce)?;
+        let mut reader = Reader::new();
+        if request.security == Security::Legacy {
+            reader.cfb = Some(legacy_response_decryptor(&request.key, &request.nonce)?);
+        }
+        reader.stage = if decoder.chunked() {
+            ReadStage::Len
+        } else {
+            ReadStage::Raw
+        };
+        reader.decoder = Some(decoder);
+        let cfg = VmessCfg {
+            user: [0; 16],
+            alter: None,
+            security: request.security,
+            global_padding: false,
+            authenticated_length: false,
+            clock: Arc::new(std::time::SystemTime::now),
+        };
+        Ok(VmessStream {
+            io,
+            cfg: Arc::new(cfg),
+            writer: Writer {
+                handshake: None,
+                encoder: BodyEncoder::new(&request, key, iv)?,
+                out: response_head,
+                pos: 0,
+                staged: None,
+                ended: false,
+                owned: OwnedDrain::default(),
+            },
+            request: Arc::new(request),
+            reader,
         })
     }
 
@@ -721,7 +767,7 @@ mod tests {
         near: tokio::io::DuplexStream,
     ) -> (VmessStream<tokio::io::DuplexStream>, BodyEncoder) {
         let request = Request::new(security, CMD_TCP, false, authenticated);
-        let expected = BodyEncoder::new(&request).unwrap();
+        let expected = BodyEncoder::new(&request, &request.key, &request.nonce).unwrap();
         let cfg = Arc::new(VmessCfg::new(
             "00000000-0000-0000-0000-000000000001",
             0,
@@ -850,7 +896,8 @@ mod tests {
                 if security == Security::None && command == CMD_TCP {
                     body.extend_from_slice(b"hello");
                 } else {
-                    let mut encoder = BodyEncoder::new(&response).unwrap();
+                    let mut encoder =
+                        BodyEncoder::new(&response, &response.key, &response.nonce).unwrap();
                     encoder.seal(b"hello", &mut body).unwrap();
                     encoder.seal(&[], &mut body).unwrap();
                 }

@@ -27,9 +27,46 @@ concord run -c config.yaml
 ```
 
 Concord loads the profile, opens the listeners it declares (`mixed-port`, `port`, `socks-port`, `redir-port`,
-`tproxy-port`, `tun`) and logs to standard error at the profile's `log-level`. Ctrl-C or SIGTERM stops it.
+`tproxy-port`, `tun`, `listeners`, `tunnels`, `ss-config`, `vmess-config`) and logs to standard error at the profile's
+`log-level`. Ctrl-C or SIGTERM stops it. `-f` is accepted for `-c`, as mihomo spells it.
 
 TUN needs the privileges the platform requires to create a device and change routes.
+
+### Running As A Server
+
+A profile whose `listeners` declare protocol servers runs as a server with the same command; there is no separate
+mode. A minimal Shadowsocks and VMess server:
+
+```yaml
+log-level: info
+listeners:
+  - name: ss-in
+    type: shadowsocks
+    port: 8388
+    cipher: 2022-blake3-aes-128-gcm
+    password: <base64 key of 16 bytes>
+  - name: vmess-in
+    type: vmess
+    port: 10086
+    certificate: certs/server.crt
+    private-key: certs/server.key
+    users:
+      - username: alice
+        uuid: <uuid>
+rules:
+  - MATCH,DIRECT
+```
+
+`listen` defaults to every address, as in mihomo, and `allow-lan` does not narrow a named listener. `certificate`
+and `private-key` take inline PEM or a path inside the home directory; a path that leaves it or goes through a
+symbolic link is refused, as provider paths are. Rules see each connection's listener as `IN-NAME` and its user as
+`IN-USER`; a listener's `proxy` or `rule` sends its connections to that node or sub-rule. A port that cannot be bound
+is logged and tried again on the next reload while the other ports serve. [compatibility.md](compatibility.md)
+lists the types and options served.
+
+The server is the `concord` executable built as in [Building](#building); no separate server package is released.
+`-d` sets the home directory the certificate paths and provider files are read from, and SIGHUP reloads the profile
+as below. Ports below 1024 need the privilege the platform asks for, `CAP_NET_BIND_SERVICE` on Linux.
 
 ### Checking A Profile
 

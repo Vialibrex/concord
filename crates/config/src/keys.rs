@@ -183,13 +183,13 @@ pub const TOP_T1: &[&str] = &[
     "bind-address",
     "lan-allowed-ips",
     "lan-disallowed-ips",
-];
-
-pub const TOP_T2: &[&str] = &[
     "listeners",
     "tunnels",
     "ss-config",
     "vmess-config",
+];
+
+pub const TOP_T2: &[&str] = &[
     "tuic-server",
     "iptables",
     "clash-for-android",

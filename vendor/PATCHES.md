@@ -46,6 +46,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | shadowsocks | Send the first write over as many chunks as it needs | None | Bug-fix PR |
 | shadowsocks | AEAD-2022 padding of 1 to 900 bytes under 900-byte payloads | None | PR citing sing-shadowsocks |
 | shadowsocks | `set_clock`; split halves; owned in-place writes | None | Last, as one design discussion: the largest and most Concord-specific |
+| shadowsocks | Cache a UDP cipher by key bytes, and only after its packet opens | None | Bug-fix PR: unauthenticated datagrams fill the cache |
 | tokio | Notify peer workers only after `transition_from_parked` removes self from `idle.sleepers` | None | Bug-fix PR |
 | tokio | Check pending queues in `transition_worker_from_searching` before waking a parked worker | None | Bug-fix PR |
 | tokio | Notify peer workers on `yield_now` only when `should_notify_others()` is true | None | Bug-fix PR |
@@ -257,6 +258,17 @@ Upgrade `quinn`, `quinn-proto` and `quinn-udp` together; replay these changes an
     each seals at most one chunk (`8f40a78`).
 - `src/relay/tcprelay/aead_2022.rs`, `src/relay/tcprelay/mod.rs`: `set_clock` replaces the system clock for AEAD-2022
   timestamps; `concord-proxy` points it at the engine's NTP-corrected clock (`f53191e`).
+- `src/relay/udprelay/aead_2022.rs`: the session ID is read with `u64::from_be_bytes` instead of through a `&[u64]`
+  made from a byte pointer, which is undefined behaviour when the datagram does not start 8-byte aligned; a
+  server's datagram, which follows its listener's headroom, does not.
+- `src/relay/udprelay/aead_2022.rs`, `src/relay/udprelay/crypto_io.rs`: the per-thread UDP cipher cache is keyed by a
+  hash of the key's bytes instead of its address, and a decrypted packet's cipher is cached only once the packet
+  opens, so datagrams that do not authenticate leave nothing behind (sing-shadowsocks drops the session of a first
+  packet that fails, `shadowaead_2022/service.go:429-445`). Upstream cached one cipher per random session id: 100,000
+  random packets grew a thread's heap by 15.5 MiB, of which 2.3 MiB is the cache's index allocated up front.
+  `crypto_io::cipher_cache_len` reads the cache's size for tests.
+- `src/relay/udprelay/aead_2022.rs`, `src/relay/tcprelay/aead_2022.rs`, `src/relay/tcprelay/mod.rs`: UDP timestamps
+  read the clock `set_clock` installs, as the TCP relay's do.
 - `Cargo.toml`, `tests/`: the `[[test]]` targets, their sources and the `env_logger` dev-dependency are removed.
 - `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`: crates.io packaging metadata, omitted.
 

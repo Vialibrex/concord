@@ -868,6 +868,30 @@ fn inbound_conditions() {
 }
 
 #[test]
+fn in_type_matches_every_inbound_kind_by_its_rule_name() {
+    use concord_common::InboundKind;
+    let kit = Kit::new();
+    for kind in InboundKind::ALL {
+        let rule = format!("IN-TYPE,{},HIT", kind.rule_name().to_lowercase());
+        let program = kit.compile(&[rule.as_str(), "MATCH,MISS"], 8);
+        let mut flow = Flow::domain("a.com");
+        for other in InboundKind::ALL {
+            flow.kind = other;
+            let want = if other == kind {
+                pick(0, "HIT")
+            } else {
+                pick(1, "MISS")
+            };
+            assert_eq!(
+                accepted(&kit, &program, &flow),
+                want,
+                "{kind:?} against {other:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn rematch_restarts_a_named_list_and_keeps_its_rule_identity() {
     use crate::{MatchCtx, Step};
     use concord_common::RouteState;

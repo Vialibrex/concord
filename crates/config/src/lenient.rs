@@ -455,10 +455,16 @@ impl<'a> Fields<'a> {
     }
 
     pub fn finish(self) -> Result<()> {
+        self.unset()
+    }
+
+    /// The `finish` error for the fields required so far, for a caller that may stop
+    /// before it finishes.
+    pub fn unset(&self) -> Result<()> {
         if self.missing.is_empty() {
             return Ok(());
         }
-        let mut missing = self.missing;
+        let mut missing = self.missing.clone();
         missing.sort();
         Err(ConfigError::new(format!(
             "'{}' has unset fields: {}",

@@ -1,5 +1,6 @@
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::addr::{Address, Host, Network};
 
@@ -13,9 +14,31 @@ pub enum InboundKind {
     TProxy,
     Tun,
     Inner,
+    Shadowsocks,
+    Vmess,
+    Vless,
+    Trojan,
+    Tunnel,
 }
 
 impl InboundKind {
+    pub const ALL: [InboundKind; 13] = [
+        InboundKind::Http,
+        InboundKind::Https,
+        InboundKind::Socks4,
+        InboundKind::Socks5,
+        InboundKind::Redir,
+        InboundKind::TProxy,
+        InboundKind::Tun,
+        InboundKind::Inner,
+        InboundKind::Shadowsocks,
+        InboundKind::Vmess,
+        InboundKind::Vless,
+        InboundKind::Trojan,
+        InboundKind::Tunnel,
+    ];
+
+    /// mihomo's `C.Type.String()` (`constant/metadata.go`).
     pub fn wire_name(self) -> &'static str {
         match self {
             InboundKind::Http => "HTTP",
@@ -26,6 +49,11 @@ impl InboundKind {
             InboundKind::TProxy => "TProxy",
             InboundKind::Tun => "Tun",
             InboundKind::Inner => "Inner",
+            InboundKind::Shadowsocks => "ShadowSocks",
+            InboundKind::Vmess => "Vmess",
+            InboundKind::Vless => "Vless",
+            InboundKind::Trojan => "Trojan",
+            InboundKind::Tunnel => "Tunnel",
         }
     }
 
@@ -40,8 +68,21 @@ impl InboundKind {
             InboundKind::TProxy => "TPROXY",
             InboundKind::Tun => "TUN",
             InboundKind::Inner => "INNER",
+            InboundKind::Shadowsocks => "SHADOWSOCKS",
+            InboundKind::Vmess => "VMESS",
+            InboundKind::Vless => "VLESS",
+            InboundKind::Trojan => "TROJAN",
+            InboundKind::Tunnel => "TUNNEL",
         }
     }
+}
+
+/// A listener's `rule` and `proxy`: the `sub-rules` list its flows start from, and the proxy
+/// they take past the rules.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Special {
+    pub proxy: Option<Arc<str>>,
+    pub rules: Option<Arc<str>>,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +95,7 @@ pub struct InboundInfo {
     pub host: bool,
     /// The User-Agent of the HTTP proxy CONNECT request that opened the flow.
     pub user_agent: Option<Arc<str>>,
+    pub special: Option<Arc<Special>>,
 }
 
 impl InboundInfo {
@@ -65,6 +107,7 @@ impl InboundInfo {
             user: None,
             host: false,
             user_agent: None,
+            special: None,
         }
     }
 }
@@ -85,9 +128,21 @@ pub struct FlowMeta {
 pub struct UdpFlow<'a> {
     pub inbound: &'a InboundInfo,
     pub src: SocketAddr,
+    /// The inbound connection the flow belongs to, which keys the NAT in place of `src`, as
+    /// mihomo keys it by a per-connection id (`listener/sing/sing.go:158`): the streams one
+    /// gun connection multiplexes share its peer address, and an AEAD-2022 session keeps its
+    /// flows when the client's address changes. `src` is then only shown and matched by
+    /// rules. 0 where the source alone keys the flow.
+    pub conn: u64,
     pub dst: Address,
     /// Read only by TProxy, as in [`FlowMeta::dscp`].
     pub dscp: u8,
+}
+
+/// A fresh [`UdpFlow::conn`] for an inbound connection that carries UDP.
+pub fn next_conn() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl UdpFlow<'_> {
@@ -108,9 +163,15 @@ impl FlowMeta {
     /// others. `None` when it is not a concrete address.
     pub fn arrived_at(&self) -> Option<SocketAddr> {
         let addr = match self.inbound.kind {
-            InboundKind::Http | InboundKind::Https | InboundKind::Socks4 | InboundKind::Socks5 => {
-                self.inbound.addr
-            }
+            InboundKind::Http
+            | InboundKind::Https
+            | InboundKind::Socks4
+            | InboundKind::Socks5
+            | InboundKind::Shadowsocks
+            | InboundKind::Vmess
+            | InboundKind::Vless
+            | InboundKind::Trojan
+            | InboundKind::Tunnel => self.inbound.addr,
             InboundKind::Tun | InboundKind::Redir | InboundKind::TProxy => match &self.dst {
                 Address::Socket(addr) => Some(*addr),
                 Address::Domain(..) => None,

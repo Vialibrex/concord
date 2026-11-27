@@ -166,7 +166,7 @@ async fn a_bind_conflict_is_reported_and_the_other_ports_stay_up() {
     let fake = Fake::echo();
     let errors = open(&listeners, &spec, fake.clone()).await;
     assert_eq!(errors.len(), 1, "{errors:?}");
-    assert_eq!(errors[0].kind, ListenerKind::Http);
+    assert_eq!(errors[0].kind(), Some(ListenerKind::Http));
     assert_eq!(errors[0].source.kind(), io::ErrorKind::AddrInUse);
     assert!(errors[0].to_string().starts_with("Start HTTP server error"));
 
@@ -287,7 +287,7 @@ async fn redir_and_tproxy_without_platform_support_are_reported() {
     let errors = listeners
         .reconcile(&spec, Fake::echo(), Tasks::default())
         .await;
-    let kinds: Vec<_> = errors.iter().map(|error| error.kind).collect();
+    let kinds: Vec<_> = errors.iter().filter_map(|error| error.kind()).collect();
     assert_eq!(kinds, [ListenerKind::Redir, ListenerKind::TProxy]);
     assert_eq!(errors[0].source.kind(), io::ErrorKind::Unsupported);
     assert_eq!(listeners.bound().await.len(), 1);

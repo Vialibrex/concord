@@ -64,13 +64,25 @@ impl Engine {
         let handler = Arc::new(self.shared.tunnel.clone());
         let errors = self
             .listeners
-            .reconcile(&spec, handler, self.shared.proxy_tasks.tasks())
+            .reconcile_with(
+                &spec,
+                applied.inbounds.clone(),
+                handler,
+                self.shared.proxy_tasks.tasks(),
+            )
             .await;
         for error in &errors {
             tracing::error!("{error}");
         }
+        #[cfg(feature = "server")]
+        self.shared.carried.retain(|keep| {
+            applied
+                .inbounds
+                .iter()
+                .any(|listener| crate::inbounds::keep_of(&listener.id).as_ref() == Some(keep))
+        });
         self.faults
-            .set_listeners(errors.iter().map(ServiceFault::listener).collect());
+            .set_listeners(errors.iter().filter_map(ServiceFault::listener).collect());
         if !self.shared.android {
             self.reconcile_tun(applied).await;
         }

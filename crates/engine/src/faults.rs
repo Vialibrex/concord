@@ -25,19 +25,22 @@ pub struct ServiceFault {
 }
 
 impl ServiceFault {
-    pub(crate) fn listener(error: &ListenError) -> Self {
-        ServiceFault {
-            service: match error.kind {
-                ListenerKind::Mixed => Service::Mixed,
-                ListenerKind::Http => Service::Http,
-                ListenerKind::Socks => Service::Socks,
-                ListenerKind::Redir => Service::Redir,
-                ListenerKind::TProxy => Service::TProxy,
-            },
+    /// Only the global ports are faults the host is told of; a profile listener that does
+    /// not start is logged, as mihomo logs it.
+    pub(crate) fn listener(error: &ListenError) -> Option<Self> {
+        let service = match error.kind()? {
+            ListenerKind::Mixed => Service::Mixed,
+            ListenerKind::Http => Service::Http,
+            ListenerKind::Socks => Service::Socks,
+            ListenerKind::Redir => Service::Redir,
+            ListenerKind::TProxy => Service::TProxy,
+        };
+        Some(ServiceFault {
+            service,
             address: error.addr.clone(),
             kind: error.source.kind(),
             message: error.to_string(),
-        }
+        })
     }
 }
 

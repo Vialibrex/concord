@@ -207,6 +207,7 @@ impl Engine {
             android: config.android,
             proxy_tasks,
             scripts: Arc::default(),
+            carried: Arc::default(),
         };
         Arc::new(Engine {
             home: ArcSwapOption::empty(),

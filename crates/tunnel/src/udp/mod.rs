@@ -54,15 +54,27 @@ const PENDING_CAPACITY: usize = 128;
 const OVERFLOW_CAPACITY: usize = 128;
 const MAX_FLOWS: usize = 16_384;
 
+/// The source a NAT key holds: the client's address, or none where `conn` names the
+/// inbound connection, so the flows of a client whose address changes stay its own.
+fn nat_src(src: SocketAddr, conn: u64) -> SocketAddr {
+    if conn == 0 {
+        src
+    } else {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct FlowId {
     src: SocketAddr,
+    conn: u64,
     dst: Address,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct SessionKey {
     src: SocketAddr,
+    conn: u64,
     outbound: usize,
     /// Set only for DIRECT, whose socket has one address family.
     v6: Option<bool>,
@@ -201,6 +213,46 @@ mod tests {
     use crate::table::ConnTable;
 
     mod alloc;
+
+    #[tokio::test]
+    async fn a_flow_named_by_its_connection_follows_the_client_and_no_other_connection() {
+        let (tunnel, inner) = inner();
+        tunnel.set_status(crate::runtime::TunnelStatus::Running);
+        let session = session(&inner, batching(), Arc::default(), 1);
+        let id = FlowId {
+            src: nat_src(source(), 7),
+            conn: 7,
+            dst: target(),
+        };
+        inner.nat.flows.insert(id, ready_flow(&session));
+        let inbound = InboundInfo::new(InboundKind::Shadowsocks);
+        let flow = |src, conn| UdpFlow {
+            inbound: &inbound,
+            src,
+            conn,
+            dst: target(),
+            dscp: 0,
+        };
+
+        let moved: Arc<dyn UdpReply> = Arc::new(Client::default());
+        let elsewhere = "10.0.0.9:2000".parse().unwrap();
+        handle(
+            &inner,
+            flow(elsewhere, 7),
+            UdpPayload::Borrowed(b"x"),
+            &moved,
+        );
+        assert!(Arc::ptr_eq(&**session.reply.load(), &moved));
+
+        let stranger: Arc<dyn UdpReply> = Arc::new(Client::default());
+        handle(
+            &inner,
+            flow(source(), 8),
+            UdpPayload::Borrowed(b"y"),
+            &stranger,
+        );
+        assert!(Arc::ptr_eq(&**session.reply.load(), &moved));
+    }
 
     #[derive(Default)]
     struct Wire {
@@ -457,6 +509,7 @@ mod tests {
         ));
         let key = SessionKey {
             src: source(),
+            conn: 0,
             outbound,
             v6: None,
             dst: None,
@@ -483,6 +536,7 @@ mod tests {
             .insert(key, Arc::new(OnceCell::new_with(Some(session.clone()))));
         let id = FlowId {
             src: source(),
+            conn: 0,
             dst: target(),
         };
         lock(&session.flows).insert(id.clone());
@@ -509,6 +563,7 @@ mod tests {
             .map(|port| {
                 let id = FlowId {
                     src: SocketAddr::from(([10, 0, 0, 2], port)),
+                    conn: 0,
                     dst: target(),
                 };
                 let flow = pending_flow();
@@ -679,6 +734,7 @@ mod tests {
         inner.nat.clock.store(42, Ordering::Relaxed);
         let id = FlowId {
             src: source(),
+            conn: 0,
             dst: target(),
         };
         let flow = inner.nat.flows.get(&id).unwrap().clone();
@@ -1048,42 +1104,43 @@ mod tests {
         let session = session(&inner, batching(), Arc::default(), 1);
         let id = FlowId {
             src: source(),
+            conn: 0,
             dst: target(),
         };
         let other = Address::Socket("9.9.9.9:53".parse().unwrap());
 
-        let (none, lease) = take_round_flow(source(), &target());
+        let (none, lease) = take_round_flow(source(), 0, &target());
         assert!(none.is_none());
         lease.keep(id.clone(), ready_flow(&session));
         assert!(
-            take_round_flow(source(), &target()).0.is_none(),
+            take_round_flow(source(), 0, &target()).0.is_none(),
             "outside a round"
         );
 
         let round = BatchRound::begin(&inner);
-        let (_, lease) = take_round_flow(source(), &target());
+        let (_, lease) = take_round_flow(source(), 0, &target());
         lease.keep(id.clone(), ready_flow(&session));
-        assert!(take_round_flow(source(), &other).0.is_none());
-        let (kept, lease) = take_round_flow(source(), &target());
+        assert!(take_round_flow(source(), 0, &other).0.is_none());
+        let (kept, lease) = take_round_flow(source(), 0, &target());
         let (kept_id, flow) = kept.expect("the round's flow");
         assert_eq!(kept_id, id);
         lease.keep(kept_id, flow);
 
-        let (taken, stale) = take_round_flow(source(), &target());
+        let (taken, stale) = take_round_flow(source(), 0, &target());
         let (taken_id, flow) = taken.unwrap();
         forget_round_flow();
         stale.keep(taken_id, flow);
         assert!(
-            take_round_flow(source(), &target()).0.is_none(),
+            take_round_flow(source(), 0, &target()).0.is_none(),
             "a flow forgotten while it was out does not come back"
         );
 
-        let (_, lease) = take_round_flow(source(), &target());
+        let (_, lease) = take_round_flow(source(), 0, &target());
         lease.keep(id, ready_flow(&session));
         drop(round);
         let _round = BatchRound::begin(&inner);
         assert!(
-            take_round_flow(source(), &target()).0.is_none(),
+            take_round_flow(source(), 0, &target()).0.is_none(),
             "a new round starts empty"
         );
     }
@@ -1099,15 +1156,16 @@ mod tests {
         let session = session(&inner, wire, Arc::default(), 1);
         let id = FlowId {
             src: source(),
+            conn: 0,
             dst: target(),
         };
 
         let _round = BatchRound::begin(&inner);
-        let (_, lease) = take_round_flow(source(), &target());
+        let (_, lease) = take_round_flow(source(), 0, &target());
         lease.keep(id, ready_flow(&session));
         retire(&inner, &session);
 
-        assert!(take_round_flow(source(), &target()).0.is_none());
+        assert!(take_round_flow(source(), 0, &target()).0.is_none());
     }
 
     fn adopted(payloads: &[Vec<u8>]) -> (Tunnel, Arc<Inner>, Arc<Session>, Arc<dyn ReplySource>) {

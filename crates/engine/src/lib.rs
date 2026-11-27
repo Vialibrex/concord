@@ -6,6 +6,7 @@ mod engine;
 mod error;
 mod fake_ip_store;
 mod faults;
+mod inbounds;
 mod lan;
 #[cfg(feature = "mitm")]
 pub mod mitm_types;

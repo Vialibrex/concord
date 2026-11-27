@@ -16,6 +16,7 @@ mod reality;
 mod record;
 mod record_io;
 mod rustls_backend;
+pub mod server;
 mod trust;
 
 #[cfg(test)]

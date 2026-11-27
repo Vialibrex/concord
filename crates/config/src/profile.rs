@@ -69,6 +69,7 @@ pub struct Profile {
     /// already merged in, their section lines are not.
     pub modules: Vec<AppliedModule>,
     pub tls: TlsConfig,
+    pub inbounds: crate::listener::InboundDefs,
     pub report: LoadReport,
 }
 
@@ -116,6 +117,7 @@ impl Profile {
             mitm: crate::mitm::MitmDef::default(),
             modules: Vec::new(),
             tls: TlsConfig::default(),
+            inbounds: crate::listener::InboundDefs::default(),
             report: LoadReport::default(),
         }
     }
@@ -572,16 +574,9 @@ pub fn load_raw(mut raw: RawConfig, options: &LoadOptions) -> Result<Profile> {
     };
     let (rules, sub_rules) =
         checked_rules(rules, &raw.lines.rules, &mut modules, &ctx, &mut report)?;
-    for rule in &dns.fake_ip_filter_rules {
-        let mut sets = Vec::new();
-        rule.cond.rule_sets(&mut sets);
-        if let Some(missing) = sets.into_iter().find(|name| !provider_names.contains(name)) {
-            return Err(ConfigError::new(format!(
-                "dns.fake-ip-filter [{}] error: rule-set '{missing}' not found",
-                rule.text
-            )));
-        }
-    }
+    check_fake_ip_filter(&dns, &provider_names)?;
+    let inbounds = crate::listener::from_general(&raw.general, &mut report)?;
+    crate::listener::check_refs(&inbounds, &names.known, &names.quarantined, &sub_rules)?;
 
     let flag = |map: &Map, key: &str| {
         map.get(key)
@@ -611,8 +606,23 @@ pub fn load_raw(mut raw: RawConfig, options: &LoadOptions) -> Result<Profile> {
         mitm,
         modules: modules.list,
         tls: TlsConfig::from_map(&raw.tls),
+        inbounds,
         report,
     })
+}
+
+fn check_fake_ip_filter(dns: &DnsConfig, provider_names: &HashSet<&str>) -> Result<()> {
+    for rule in &dns.fake_ip_filter_rules {
+        let mut sets = Vec::new();
+        rule.cond.rule_sets(&mut sets);
+        if let Some(missing) = sets.into_iter().find(|name| !provider_names.contains(name)) {
+            return Err(ConfigError::new(format!(
+                "dns.fake-ip-filter [{}] error: rule-set '{missing}' not found",
+                rule.text
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1176,18 +1186,31 @@ proxy-groups:
     }
 
     #[test]
-    fn tier_two_sections_warn_and_are_never_opened() {
-        let profile =
-            load_text("listeners:\n  - {name: l, type: socks, port: 1}\ntunnels: [tcp]\n").unwrap();
-        let report = profile.report.to_json();
-        let warned: Vec<&str> = report
-            .as_array()
-            .map(|items| items.iter().filter_map(|w| w["path"].as_str()).collect())
-            .unwrap_or_default();
-        assert!(
-            warned.contains(&"listeners") && warned.contains(&"tunnels"),
-            "{warned:?}"
+    fn listeners_and_tunnels_load_and_keep_the_profile_text() {
+        let text = "listeners:\n  - {name: l, type: socks, port: 1, proxy: a}\n\
+                    tunnels: ['tcp,:2,1.1.1.1:53,g']\nss-config: ''\n";
+        let profile = load_text(&format!("{BASE}{text}")).unwrap();
+        assert_eq!(profile.inbounds.listeners[0].name, "l");
+        assert_eq!(profile.inbounds.tunnels[0].proxy.as_deref(), Some("g"));
+        assert!(profile.report.warnings.is_empty(), "{:?}", profile.report);
+        let raw = crate::raw::parse_raw(text.as_bytes()).unwrap();
+        assert_eq!(raw.to_json()["listeners"][0]["name"], "l");
+    }
+
+    #[test]
+    fn inbound_references_must_exist() {
+        let listener = |extra: &str| {
+            format!("{BASE}listeners:\n  - {{name: l, type: http, port: 1, {extra}}}\n")
+        };
+        assert!(error(&listener("proxy: nope")).contains("listener l: proxy nope not found"));
+        assert!(error(&listener("rule: nope")).contains("listener l: sub-rule nope not found"));
+        let with_sub = format!(
+            "{}sub-rules:\n  inner: [\"MATCH,DIRECT\"]\n",
+            listener("rule: inner")
         );
+        load_text(&with_sub).unwrap();
+        let tunnel = format!("{BASE}tunnels: ['tcp,:2,1.1.1.1:53,nope']\n");
+        assert!(error(&tunnel).contains("tunnel proxy nope not found"));
     }
 
     #[test]

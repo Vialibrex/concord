@@ -86,6 +86,9 @@ impl FlowState {
         };
         let port = meta.dst.port();
         let inner = meta.inbound.kind == InboundKind::Inner;
+        let special = meta.inbound.special.as_deref();
+        let special_proxy = special.and_then(|special| special.proxy.clone());
+        let special_rules = special.and_then(|special| special.rules.clone());
         FlowState {
             meta,
             host,
@@ -93,8 +96,8 @@ impl FlowState {
             port,
             dns_mode: None,
             sniff_host: None,
-            special_proxy: None,
-            special_rules: None,
+            special_proxy,
+            special_rules,
             rematch_name: None,
             process: inner.then(|| {
                 Arc::new(ProcessInfo {
