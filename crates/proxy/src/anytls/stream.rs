@@ -340,7 +340,7 @@ impl AsyncWrite for WriteHalf {
 
 impl Stream for AnyTlsStream {
     concord_common::stream_policy!(own: into_split, poll_read_buffer, write_requirements, poll_write_buffer;
-        default: read_requirements, raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp);
+        default: read_requirements, tcp, peer_addr, needs_handshake, direct, into_tcp);
 
     fn poll_read_buffer(
         &mut self,

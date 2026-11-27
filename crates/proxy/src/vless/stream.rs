@@ -144,7 +144,7 @@ impl<S: Stream> Stream for ResponseSkip<S> {
     concord_common::stream_policy!(inner;
         forward: peer_addr;
         default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer,
-            raw_socket, tcp, needs_handshake, direct, into_tcp;
+            tcp, needs_handshake, direct, into_tcp;
         own: into_split);
 
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
@@ -684,7 +684,7 @@ impl<R: VisionRead, W: VisionWrite> AsyncWrite for Vision<R, W> {
 
 impl<R: VisionRead, W: VisionWrite> Stream for Vision<R, W> {
     concord_common::stream_policy!(own: into_split;
-        default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp);
+        default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, tcp, peer_addr, needs_handshake, direct, into_tcp);
 
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
         let Vision { reader, writer } = *self;

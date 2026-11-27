@@ -112,7 +112,7 @@ impl<S: Stream> Stream for HeadFirst<S> {
     concord_common::stream_policy!(inner;
         forward: read_requirements, poll_read_buffer, peer_addr;
         own: into_split, write_requirements, poll_write_buffer;
-        default: raw_socket, tcp, needs_handshake, direct, into_tcp);
+        default: tcp, needs_handshake, direct, into_tcp);
 
     fn write_requirements(&self) -> BufferRequirements {
         BufferRequirements {
@@ -353,7 +353,7 @@ impl<S: Stream> Stream for Kick<S> {
     concord_common::stream_policy!(inner;
         forward: read_requirements, write_requirements, peer_addr;
         own: into_split, poll_read_buffer, poll_write_buffer, needs_handshake;
-        default: raw_socket, tcp, direct, into_tcp);
+        default: tcp, direct, into_tcp);
 
     fn poll_read_buffer(
         &mut self,

@@ -286,7 +286,7 @@ impl Stream for Padded {
     concord_common::stream_policy!(inner;
         forward: peer_addr;
         own: into_split, poll_write_buffer;
-        default: read_requirements, write_requirements, poll_read_buffer, raw_socket, tcp, needs_handshake, direct, into_tcp);
+        default: read_requirements, write_requirements, poll_read_buffer, tcp, needs_handshake, direct, into_tcp);
 
     fn poll_write_buffer(
         &mut self,

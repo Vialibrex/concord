@@ -1065,7 +1065,6 @@ async fn an_owned_attachment_keeps_its_ticket_until_the_engine_closes_the_socket
     let dropped = Arc::<AtomicUsize>::default();
     let mut socket = Some(OwnedTcp::new(
         near,
-        None,
         Some(Arc::new(AttachmentTicket(dropped.clone()))),
     ));
     let attached = server.attach_owned(&mut socket).unwrap();
@@ -1098,7 +1097,6 @@ async fn refusing_an_owned_socket_after_reset_preserves_its_ticket_and_payload()
     let dropped = Arc::<AtomicUsize>::default();
     let mut socket = Some(OwnedTcp::new(
         near,
-        None,
         Some(Arc::new(AttachmentTicket(dropped.clone()))),
     ));
     assert!(server.attach_owned(&mut socket).is_none());

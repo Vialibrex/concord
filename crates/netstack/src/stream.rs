@@ -342,7 +342,7 @@ impl AsyncWrite for NetWriteHalf {
 
 impl concord_common::Stream for NetStream {
     concord_common::stream_policy!(own: direct, into_split;
-        default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, raw_socket, tcp, peer_addr, needs_handshake, into_tcp);
+        default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, tcp, peer_addr, needs_handshake, into_tcp);
 
     fn direct(&mut self) -> Option<&mut dyn DirectIo> {
         Some(self)

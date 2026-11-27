@@ -220,7 +220,7 @@ impl Stream for FastOpenStream {
     stream_policy!(stream;
         forward: read_requirements, write_requirements, poll_read_buffer;
         own: tcp, into_tcp, peer_addr, needs_handshake, into_split;
-        default: poll_write_buffer, raw_socket, direct);
+        default: poll_write_buffer, direct);
 
     fn tcp(&self) -> Option<&TcpStream> {
         self.is_open().then_some(&self.stream)

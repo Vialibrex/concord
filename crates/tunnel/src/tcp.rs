@@ -607,7 +607,7 @@ impl Stream for MeteredStream {
     concord_common::stream_policy!(inner;
         forward: read_requirements, write_requirements, peer_addr;
         own: into_split, poll_read_buffer, poll_write_buffer;
-        default: raw_socket, tcp, needs_handshake, direct, into_tcp);
+        default: tcp, needs_handshake, direct, into_tcp);
 
     fn poll_read_buffer(
         &mut self,

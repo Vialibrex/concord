@@ -8,26 +8,17 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::net::tcp::OwnedReadHalf;
 
-use crate::{BoxRead, BoxStream, BoxWrite, RawSocket, Stream};
+use crate::{BoxRead, BoxStream, BoxWrite, Stream};
 
 /// Keeps a socket's lifetime ticket with every owner of the socket.
 pub struct OwnedTcp {
     stream: TcpStream,
-    raw_socket: Option<RawSocket>,
     guard: Option<Arc<dyn Send + Sync>>,
 }
 
 impl OwnedTcp {
-    pub fn new(
-        stream: TcpStream,
-        raw_socket: Option<RawSocket>,
-        guard: Option<Arc<dyn Send + Sync>>,
-    ) -> Self {
-        OwnedTcp {
-            stream,
-            raw_socket,
-            guard,
-        }
+    pub fn new(stream: TcpStream, guard: Option<Arc<dyn Send + Sync>>) -> Self {
+        OwnedTcp { stream, guard }
     }
 
     pub fn stream(&self) -> &TcpStream {
@@ -36,7 +27,7 @@ impl OwnedTcp {
 
     /// A duplicate may close before the original during a concurrent reset.
     pub fn share_guard(&self, stream: TcpStream) -> Self {
-        Self::new(stream, None, self.guard.clone())
+        Self::new(stream, self.guard.clone())
     }
 
     pub fn into_std(self) -> io::Result<(std::net::TcpStream, Option<Arc<dyn Send + Sync>>)> {
@@ -60,7 +51,7 @@ impl OwnedTcp {
 
 impl From<TcpStream> for OwnedTcp {
     fn from(stream: TcpStream) -> Self {
-        Self::new(stream, None, None)
+        Self::new(stream, None)
     }
 }
 
@@ -115,12 +106,8 @@ impl AsyncWrite for OwnedTcp {
 impl Stream for OwnedTcp {
     crate::stream_policy!(stream;
         forward: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, peer_addr;
-        own: raw_socket, tcp, into_tcp, into_split;
+        own: tcp, into_tcp, into_split;
         default: needs_handshake, direct);
-
-    fn raw_socket(&self) -> Option<RawSocket> {
-        self.raw_socket
-    }
 
     fn tcp(&self) -> Option<&TcpStream> {
         Some(&self.stream)
@@ -226,7 +213,7 @@ mod tests {
         for duplicate_first in [false, true] {
             let dropped = Arc::<AtomicUsize>::default();
             let (original, _peer) = pair().await;
-            let original = OwnedTcp::new(original, None, Some(Arc::new(Ticket(dropped.clone()))));
+            let original = OwnedTcp::new(original, Some(Arc::new(Ticket(dropped.clone()))));
             let (duplicate, _peer) = pair().await;
             let duplicate = original.share_guard(duplicate);
             let (first, last) = if duplicate_first {
@@ -250,7 +237,7 @@ mod tests {
         for read_first in [false, true] {
             let dropped = Arc::<AtomicUsize>::default();
             let (socket, mut peer) = pair().await;
-            let socket = OwnedTcp::new(socket, None, Some(Arc::new(Ticket(dropped.clone()))));
+            let socket = OwnedTcp::new(socket, Some(Arc::new(Ticket(dropped.clone()))));
             let (mut read, mut write) = Stream::into_split(Box::new(socket));
             write.write_all(b"ping").await.unwrap();
             let mut buf = [0; 4];
@@ -275,7 +262,7 @@ mod tests {
     async fn a_ticket_survives_deregistering_the_socket() {
         let dropped = Arc::<AtomicUsize>::default();
         let (stream, _peer) = pair().await;
-        let socket = OwnedTcp::new(stream, None, Some(Arc::new(Ticket(dropped.clone()))));
+        let socket = OwnedTcp::new(stream, Some(Arc::new(Ticket(dropped.clone()))));
         let (socket, ticket) = socket.into_std().unwrap();
         drop(socket);
         assert_eq!(dropped.load(Ordering::Relaxed), 0);

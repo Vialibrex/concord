@@ -659,7 +659,7 @@ impl AsyncWrite for H2Body {
 
 impl Stream for H2Body {
     concord_common::stream_policy!(own: into_split, poll_write_buffer;
-        default: read_requirements, write_requirements, poll_read_buffer, raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp);
+        default: read_requirements, write_requirements, poll_read_buffer, tcp, peer_addr, needs_handshake, direct, into_tcp);
 
     fn poll_write_buffer(
         &mut self,

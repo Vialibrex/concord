@@ -861,7 +861,7 @@ impl RecordStream {
 impl concord_common::Stream for RecordStream {
     concord_common::stream_policy!(own: into_split;
         default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer,
-            raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp);
+            tcp, peer_addr, needs_handshake, direct, into_tcp);
 
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
         RecordStream::into_split(*self)

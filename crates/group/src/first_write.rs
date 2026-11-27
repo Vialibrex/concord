@@ -76,7 +76,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FirstWrite<S> {
 
 impl<S: Stream> Stream for FirstWrite<S> {
     concord_common::stream_policy!(inner;
-        forward: read_requirements, write_requirements, poll_read_buffer, raw_socket, tcp, peer_addr,
+        forward: read_requirements, write_requirements, poll_read_buffer, tcp, peer_addr,
             needs_handshake, direct;
         own: into_split, poll_write_buffer;
         default: into_tcp);

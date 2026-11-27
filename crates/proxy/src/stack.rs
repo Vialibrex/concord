@@ -539,7 +539,7 @@ impl Stream for TcpConn {
     concord_common::stream_policy!(stream;
         forward: direct;
         default: into_split, read_requirements, write_requirements, poll_read_buffer, poll_write_buffer,
-            raw_socket, tcp, peer_addr, needs_handshake, into_tcp);
+            tcp, peer_addr, needs_handshake, into_tcp);
 }
 
 pub(crate) struct UdpPort {

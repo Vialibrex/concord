@@ -375,7 +375,7 @@ impl AsyncWrite for Encrypted {
 impl Stream for Encrypted {
     concord_common::stream_policy!(own: into_split;
         default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer,
-            raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp);
+            tcp, peer_addr, needs_handshake, direct, into_tcp);
 
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
         (Box::new(self.reader), Box::new(self.writer))

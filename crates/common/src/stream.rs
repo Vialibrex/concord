@@ -125,7 +125,20 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for LockedWrite<T> {
     }
 }
 
-pub trait Stream: AsyncRead + AsyncWrite + Send + Unpin + 'static {
+/// Supertrait so `Stream::into_tcp`'s default impl can unsize `Box<Self>` into `BoxStream`
+/// without re-boxing (`Self` is `?Sized` inside a trait default method).
+#[doc(hidden)]
+pub trait IntoBoxStream {
+    fn into_box_stream(self: Box<Self>) -> BoxStream;
+}
+
+impl<T: Stream> IntoBoxStream for T {
+    fn into_box_stream(self: Box<Self>) -> BoxStream {
+        self
+    }
+}
+
+pub trait Stream: AsyncRead + AsyncWrite + IntoBoxStream + Send + Unpin + 'static {
     fn read_requirements(&self) -> BufferRequirements {
         BufferRequirements::default()
     }
@@ -154,11 +167,6 @@ pub trait Stream: AsyncRead + AsyncWrite + Send + Unpin + 'static {
         poll_write_buffer(self, cx, buffer)
     }
 
-    /// Some only on a bare TCP socket. `relay` splices when both ends have one.
-    fn raw_socket(&self) -> Option<RawSocket> {
-        None
-    }
-
     /// Some only on a bare TCP socket, which `relay` may move bytes between with splice.
     fn tcp(&self) -> Option<&tokio::net::TcpStream> {
         None
@@ -167,7 +175,7 @@ pub trait Stream: AsyncRead + AsyncWrite + Send + Unpin + 'static {
     /// Transfers stream-local ownership. Relay must first drain both halves' buffers,
     /// read/write queues and pending flushes before calling this handoff.
     fn into_tcp(self: Box<Self>) -> Result<OwnedTcp, BoxStream> {
-        Err(Box::new(self))
+        Err(self.into_box_stream())
     }
 
     /// What `remoteDestination` shows for a stream that dials straight to its target.
@@ -205,7 +213,7 @@ pub type BoxStream = Box<dyn Stream>;
 ///     stream_policy!(inner;
 ///         forward: read_requirements, poll_read_buffer, peer_addr;
 ///         own: write_requirements, poll_write_buffer;
-///         default: raw_socket, tcp, needs_handshake, direct, into_split, into_tcp);
+///         default: tcp, needs_handshake, direct, into_split, into_tcp);
 /// }
 /// ```
 #[macro_export]
@@ -224,7 +232,6 @@ macro_rules! stream_policy {
         $crate::stream_policy!(@forward [$($pre)*] [$($post)*] write_requirements);
         $crate::stream_policy!(@forward [$($pre)*] [$($post)*] poll_read_buffer);
         $crate::stream_policy!(@forward [$($pre)*] [$($post)*] poll_write_buffer);
-        $crate::stream_policy!(@forward [$($pre)*] [$($post)*] raw_socket);
         $crate::stream_policy!(@forward [$($pre)*] [$($post)*] tcp);
         $crate::stream_policy!(@forward [$($pre)*] [$($post)*] into_tcp);
         $crate::stream_policy!(@forward [$($pre)*] [$($post)*] peer_addr);
@@ -236,7 +243,6 @@ macro_rules! stream_policy {
     (@known write_requirements) => {};
     (@known poll_read_buffer) => {};
     (@known poll_write_buffer) => {};
-    (@known raw_socket) => {};
     (@known tcp) => {};
     (@known into_tcp) => {};
     (@known peer_addr) => {};
@@ -280,11 +286,6 @@ macro_rules! stream_policy {
             buffer: &mut $crate::stream_buffer::StreamBuffer,
         ) -> ::std::task::Poll<::std::io::Result<usize>> {
             $crate::Stream::poll_write_buffer(&mut $($pre)* self $($post)*, cx, buffer)
-        }
-    };
-    (@forward [$($pre:tt)*] [$($post:tt)*] raw_socket) => {
-        fn raw_socket(&self) -> ::std::option::Option<$crate::RawSocket> {
-            $crate::Stream::raw_socket(&$($pre)* self $($post)*)
         }
     };
     (@forward [$($pre:tt)*] [$($post:tt)*] tcp) => {
@@ -333,7 +334,7 @@ macro_rules! stream_policy {
 }
 
 impl Stream for tokio::net::TcpStream {
-    stream_policy!(own: poll_read_buffer, raw_socket, tcp, peer_addr, into_split, into_tcp;
+    stream_policy!(own: poll_read_buffer, tcp, peer_addr, into_split, into_tcp;
         default: read_requirements, write_requirements, poll_write_buffer, needs_handshake, direct);
 
     fn poll_read_buffer(
@@ -354,10 +355,6 @@ impl Stream for tokio::net::TcpStream {
                 Err(err) => return Poll::Ready(Err(err)),
             }
         }
-    }
-
-    fn raw_socket(&self) -> Option<RawSocket> {
-        None
     }
 
     fn tcp(&self) -> Option<&tokio::net::TcpStream> {
@@ -506,7 +503,7 @@ impl<S: Stream> Stream for PeekedStream<S> {
     stream_policy!(inner;
         forward: read_requirements, write_requirements, poll_write_buffer;
         own: into_split, poll_read_buffer, tcp, direct, into_tcp;
-        default: raw_socket, peer_addr, needs_handshake);
+        default: peer_addr, needs_handshake);
 
     fn poll_read_buffer(
         &mut self,
@@ -720,6 +717,15 @@ mod tests {
             .unwrap();
         assert_eq!(buffer.as_slice(), b"kept");
         assert_eq!(buffer.as_slice().as_ptr(), pointer);
+    }
+
+    #[test]
+    fn default_into_tcp_returns_the_same_box_without_reboxing() {
+        let stream: BoxStream = Box::new(OwnedOnly(None));
+        let before = (&*stream as *const dyn Stream).cast::<()>();
+        let returned = stream.into_tcp().err().expect("the reader is not bare TCP");
+        let after = (&*returned as *const dyn Stream).cast::<()>();
+        assert_eq!(after, before);
     }
 
     #[tokio::test]

@@ -191,7 +191,7 @@ impl AsyncWrite for Body {
 impl Stream for Body {
     concord_common::stream_policy!(
         default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer,
-            raw_socket, tcp, peer_addr, needs_handshake, into_tcp, direct;
+            tcp, peer_addr, needs_handshake, into_tcp, direct;
         own: into_split);
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
         (Box::new(self.read), Box::new(self.write))

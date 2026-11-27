@@ -44,7 +44,7 @@ impl<T: Send + Sync + 'static> Stream for IpStream<T> {
     concord_common::stream_policy!(conn;
         forward: direct;
         default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer,
-            raw_socket, tcp, peer_addr, needs_handshake, into_tcp;
+            tcp, peer_addr, needs_handshake, into_tcp;
         own: into_split);
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
         let IpStream { conn, _tunnel } = *self;

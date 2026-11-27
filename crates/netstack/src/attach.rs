@@ -534,7 +534,6 @@ mod reactor_tests {
             let _owner = first.enter();
             OwnedTcp::new(
                 TcpStream::from_std(original).unwrap(),
-                None,
                 Some(Arc::new(Ticket(Arc::clone(&released)))),
             )
         };
@@ -626,7 +625,6 @@ mod reactor_tests {
             let _entered = runtime.enter();
             OwnedTcp::new(
                 TcpStream::from_std(original).unwrap(),
-                None,
                 Some(Arc::new(Ticket(Arc::clone(&tickets)))),
             )
         };

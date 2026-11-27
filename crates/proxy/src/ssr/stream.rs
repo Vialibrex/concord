@@ -149,7 +149,7 @@ impl<S: Stream, L: Layer> Stream for CodecStream<S, L> {
     concord_common::stream_policy!(inner;
         forward: peer_addr;
         default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer,
-            raw_socket, tcp, needs_handshake, direct, into_tcp;
+            tcp, needs_handshake, direct, into_tcp;
         own: into_split);
 
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {

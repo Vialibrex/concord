@@ -126,7 +126,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for FastOpen<S> {
 
 impl<S: Stream> Stream for FastOpen<S> {
     concord_common::stream_policy!(own: into_split;
-        default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp);
+        default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, tcp, peer_addr, needs_handshake, direct, into_tcp);
     fn into_split(self: Box<Self>) -> (BoxRead, BoxWrite) {
         let FastOpen { inner, phase } = *self;
         let (read, write) = Box::new(inner).into_split();

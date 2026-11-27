@@ -5,8 +5,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use concord_common::addr::unmap;
-use concord_common::{BoxRead, BoxStream, BoxWrite, CoreError, OwnedTcp, RawSocket, Stream};
-use concord_platform::raw_socket_of;
+use concord_common::{BoxRead, BoxStream, BoxWrite, CoreError, OwnedTcp, Stream};
 use dashmap::{DashMap, DashSet};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -175,12 +174,8 @@ impl AsyncWrite for TrackedTcp {
 impl Stream for TrackedTcp {
     concord_common::stream_policy!(inner;
         forward: poll_read_buffer, peer_addr;
-        own: into_split, raw_socket, tcp, into_tcp;
+        own: into_split, tcp, into_tcp;
         default: read_requirements, write_requirements, poll_write_buffer, needs_handshake, direct);
-
-    fn raw_socket(&self) -> Option<RawSocket> {
-        Some(raw_socket_of(&self.inner))
-    }
 
     fn tcp(&self) -> Option<&TcpStream> {
         Some(&self.inner)
@@ -188,10 +183,8 @@ impl Stream for TrackedTcp {
 
     fn into_tcp(self: Box<Self>) -> Result<OwnedTcp, BoxStream> {
         let TrackedTcp { inner, registered } = *self;
-        let raw = raw_socket_of(&inner);
         Ok(OwnedTcp::new(
             inner,
-            Some(raw),
             registered.map(|ticket| Arc::new(ticket) as Arc<dyn Send + Sync>),
         ))
     }
@@ -406,7 +399,7 @@ mod tests {
         let mut buf = [0u8; 4];
         server.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"ping");
-        assert!(tracked.raw_socket().is_some());
+        assert!(tracked.tcp().is_some());
     }
 
     #[tokio::test]

@@ -144,7 +144,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for CryptoIo<S> {
 impl<S: Stream> Stream for CryptoIo<S> {
     concord_common::stream_policy!(
         own: into_split, write_requirements, peer_addr;
-        default: read_requirements, poll_read_buffer, poll_write_buffer, raw_socket, tcp,
+        default: read_requirements, poll_read_buffer, poll_write_buffer, tcp,
             needs_handshake, direct, into_tcp);
 
     fn write_requirements(&self) -> BufferRequirements {
@@ -357,7 +357,7 @@ impl<S: Stream> AsyncWrite for ClientStream<S> {
 impl<S: Stream> Stream for ClientStream<S> {
     concord_common::stream_policy!(
         own: into_split, write_requirements, poll_write_buffer, peer_addr;
-        default: read_requirements, poll_read_buffer, raw_socket, tcp, needs_handshake, direct, into_tcp);
+        default: read_requirements, poll_read_buffer, tcp, needs_handshake, direct, into_tcp);
 
     fn write_requirements(&self) -> BufferRequirements {
         self.requirements

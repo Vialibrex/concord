@@ -192,7 +192,7 @@ impl<S: Stream> GunStream<S> {
 impl<S: Stream> Stream for GunStream<S> {
     concord_common::stream_policy!(io;
         own: into_split, write_requirements, poll_write_buffer;
-        default: read_requirements, poll_read_buffer, raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp);
+        default: read_requirements, poll_read_buffer, tcp, peer_addr, needs_handshake, direct, into_tcp);
 
     fn write_requirements(&self) -> BufferRequirements {
         // gun.Conn advertises 6 + binary.MaxVarintLen64 bytes and no writer MTU.

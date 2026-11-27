@@ -682,7 +682,7 @@ async fn an_owned_refusal_restores_the_original_guarded_socket() {
     assert!(guard.check_flow(local, Some(peer)).is_err());
     let socket = b.as_mut().unwrap();
     assert_eq!(socket.peer_addr(), Some(peer));
-    assert!(socket.raw_socket().is_some());
+    assert!(socket.tcp().is_some());
     socket.write_all(b"request").await.unwrap();
     socket.shutdown().await.unwrap();
     let mut request = Vec::new();

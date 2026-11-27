@@ -93,5 +93,5 @@ impl AsyncWrite for RealityStream {
 
 impl Stream for RealityStream {
     concord_common::stream_policy!(inner; forward: into_split;
-        default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp);
+        default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, tcp, peer_addr, needs_handshake, direct, into_tcp);
 }

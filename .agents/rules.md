@@ -22,7 +22,7 @@
 - A `Stream` impl over another stream declares every capability once with `concord_common::stream_policy!`:
   `forward` hands it unchanged to the inner stream, `own` names the methods the impl writes, and `default` keeps the
   trait default, which copies through the type's own `AsyncRead`/`AsyncWrite` and exposes nothing beneath it. A
-  wrapper that frames or meters must not forward `tcp`, `raw_socket` or `direct`, which let the relay bypass it.
+  wrapper that frames or meters must not forward `tcp` or `direct`, which let the relay bypass it.
   A missing forward compiles and silently takes the slower path, so xtask's `stream_policy` test rejects a wrapper
   without a policy, a capability left out or named twice, and a hand-written plain forward. A new `Stream` method
   gets a forwarding arm in the macro and a decision in every policy.

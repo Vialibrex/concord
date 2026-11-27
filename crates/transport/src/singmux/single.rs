@@ -194,7 +194,7 @@ mod tests {
     }
 
     impl concord_common::Stream for Tracked {
-        concord_common::stream_policy!(default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, raw_socket, tcp, peer_addr, needs_handshake, direct, into_tcp, into_split);
+        concord_common::stream_policy!(default: read_requirements, write_requirements, poll_read_buffer, poll_write_buffer, tcp, peer_addr, needs_handshake, direct, into_tcp, into_split);
     }
 
     #[tokio::test(start_paused = true)]

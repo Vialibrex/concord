@@ -674,7 +674,7 @@ impl<S: Stream> Stream for VmessStream<S> {
     concord_common::stream_policy!(io;
         forward: peer_addr;
         own: into_split, write_requirements, poll_write_buffer;
-        default: read_requirements, poll_read_buffer, raw_socket, tcp, needs_handshake, direct,
+        default: read_requirements, poll_read_buffer, tcp, needs_handshake, direct,
             into_tcp);
 
     fn write_requirements(&self) -> BufferRequirements {
@@ -1023,7 +1023,7 @@ mod tests {
     impl Stream for RecordingStream {
         concord_common::stream_policy!(
             own: write_requirements, poll_write_buffer;
-            default: into_split, read_requirements, poll_read_buffer, raw_socket, tcp, peer_addr,
+            default: into_split, read_requirements, poll_read_buffer, tcp, peer_addr,
                 needs_handshake, direct, into_tcp);
 
         fn write_requirements(&self) -> BufferRequirements {
