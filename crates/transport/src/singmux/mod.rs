@@ -22,10 +22,17 @@ use self::padding::{encode_request, padding_conn, protocol_conn};
 use self::smux::SmuxSession;
 use self::wire::{Kind, client_stream, mux_destination};
 use self::yamux::YamuxSession;
+use crate::h2io::StreamGuard;
 use crate::http1::invalid;
 
 trait MuxSession: Send + Sync {
     fn open(&self) -> BoxFuture<'_, io::Result<BoxStream>>;
+    fn open_reserved(&self, _guard: Option<StreamGuard>) -> BoxFuture<'_, io::Result<BoxStream>> {
+        self.open()
+    }
+    fn reserve(&self) -> Option<StreamGuard> {
+        None
+    }
     fn streams(&self) -> usize;
     fn is_closed(&self) -> bool;
     fn close(&self);
@@ -156,14 +163,14 @@ impl SingMuxClient {
     async fn open_stream(&self) -> io::Result<BoxStream> {
         let mut last = io::Error::other("no attempt was made");
         for _ in 0..2 {
-            let session = match self.offer().await {
-                Ok(session) => session,
+            let (session, guard) = match self.offer().await {
+                Ok(picked) => picked,
                 Err(err) => {
                     last = err;
                     continue;
                 }
             };
-            match tokio::time::timeout(self.opts.tcp_timeout, session.open()).await {
+            match tokio::time::timeout(self.opts.tcp_timeout, session.open_reserved(guard)).await {
                 Ok(Ok(stream)) => return Ok(stream),
                 Ok(Err(err)) => last = err,
                 Err(_) => last = io::ErrorKind::TimedOut.into(),
@@ -172,7 +179,7 @@ impl SingMuxClient {
         Err(last)
     }
 
-    async fn offer(&self) -> io::Result<Arc<dyn MuxSession>> {
+    async fn offer(&self) -> io::Result<(Arc<dyn MuxSession>, Option<StreamGuard>)> {
         let mut sessions = self.sessions.lock().await;
         sessions.retain(|session| {
             if session.is_closed() {
@@ -185,7 +192,8 @@ impl SingMuxClient {
         if self.opts.brutal.is_some()
             && let Some(first) = sessions.first()
         {
-            return Ok(first.clone());
+            let guard = first.reserve();
+            return Ok((first.clone(), guard));
         }
         let best = sessions
             .iter()
@@ -201,14 +209,16 @@ impl SingMuxClient {
                     self.opts.max_streams > 0 && streams < self.opts.max_streams
                 };
             if reuse {
-                return Ok(session);
+                let guard = session.reserve();
+                return Ok((session, guard));
             }
         }
         let session = tokio::time::timeout(self.opts.tcp_timeout, self.new_session())
             .await
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+        let guard = session.reserve();
         sessions.push(session.clone());
-        Ok(session)
+        Ok((session, guard))
     }
 
     async fn new_session(&self) -> io::Result<Arc<dyn MuxSession>> {

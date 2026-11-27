@@ -16,7 +16,11 @@ use tokio::time::{Instant, Sleep, sleep};
 use crate::ended::Ended;
 
 mod checked;
+mod slot;
 pub use checked::checked_handshake;
+pub(crate) use slot::{ClientSlot, SafeSender, StreamGuard, reserve_stream};
+#[cfg(test)]
+use slot::{Live, sender_max_streams};
 
 const PING_TIMEOUT: Duration = Duration::from_secs(15);
 const AT_RISK: Duration = Duration::from_secs(10);
@@ -26,6 +30,8 @@ const RESET_DRAIN: Duration = HUNG;
 pub(crate) const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 pub(crate) const CONN_WINDOW: u32 = 65_535 + (1 << 30);
 pub(crate) const MAX_FRAME_SIZE: u32 = 1 << 20;
+pub(crate) const INITIAL_MAX_SEND_STREAMS: usize = 100;
+pub(crate) const DEFAULT_MAX_SEND_STREAMS: usize = 1000;
 
 pub fn h2_io_error(err: h2::Error) -> io::Error {
     if err.is_io() {
@@ -47,6 +53,7 @@ pub fn client_builder() -> h2::client::Builder {
         .initial_window_size(STREAM_WINDOW)
         .initial_connection_window_size(CONN_WINDOW)
         .max_frame_size(MAX_FRAME_SIZE)
+        .initial_max_send_streams(INITIAL_MAX_SEND_STREAMS)
         .enable_push(false);
     builder
 }
@@ -90,7 +97,7 @@ impl Activity {
     }
 
     pub fn ended(&self) -> bool {
-        self.ended.load(Ordering::Relaxed)
+        self.ended.load(Ordering::Acquire)
     }
 
     /// For a connection from [`checked_handshake`]: a stream about to open on a
@@ -125,6 +132,14 @@ impl Activity {
     }
 }
 
+struct EndOnDrop(Arc<Activity>);
+
+impl Drop for EndOnDrop {
+    fn drop(&mut self) {
+        self.0.ended.store(true, Ordering::Release);
+    }
+}
+
 pub fn spawn_connection(
     tasks: &Tasks,
     conn: h2::client::SplitConnection<BoxRead, Bytes>,
@@ -132,8 +147,8 @@ pub fn spawn_connection(
     activity: Arc<Activity>,
 ) {
     tasks.spawn(async move {
+        let _end = EndOnDrop(activity.clone());
         drive(conn, ping_interval, &activity).await;
-        activity.ended.store(true, Ordering::Relaxed);
     });
 }
 

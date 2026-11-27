@@ -70,8 +70,12 @@ struct Side {
 
 impl Side {
     fn lease(&self) -> Lease {
+        self.lease_streams(1)
+    }
+
+    fn lease_streams(&self, need: usize) -> Lease {
         match &self.manager {
-            Some(manager) => manager.lease(),
+            Some(manager) => manager.lease(need),
             None => Lease::owned((self.make)()),
         }
     }
@@ -213,7 +217,8 @@ impl XhttpClient {
 
     async fn start_download(&self, session: &str) -> io::Result<(Pending, Lease)> {
         let down = self.down.as_ref().unwrap_or(&self.up);
-        let lease = down.lease();
+        let need = if self.down.is_none() { 2 } else { 1 };
+        let lease = down.lease_streams(need);
         let req = down.factory.stream_request("GET", session, false);
         let pending = lease.start_download(&req).await?;
         Ok((pending, lease))
@@ -505,5 +510,92 @@ mod tests {
         assert!(!released.load(Ordering::SeqCst));
         drop(read);
         assert!(released.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn packet_up_reuse_opens_another_connection_so_uploads_never_stall() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Duration;
+
+        use bytes::Bytes;
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let (posted_tx, mut posted_rx) = tokio::sync::mpsc::unbounded_channel();
+        let dial: DialFn = {
+            let connections = connections.clone();
+            Arc::new(move || {
+                let connections = connections.clone();
+                let posted_tx = posted_tx.clone();
+                Box::pin(async move {
+                    let (near, far) = duplex(1 << 20);
+                    connections.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let Ok(mut conn) = h2::server::Builder::new()
+                            .max_concurrent_streams(2)
+                            .handshake::<_, Bytes>(far)
+                            .await
+                        else {
+                            return;
+                        };
+                        while let Some(Ok((request, mut respond))) = conn.accept().await {
+                            let posted_tx = posted_tx.clone();
+                            tokio::spawn(async move {
+                                let is_get = request.method() == http::Method::GET;
+                                let mut body = request.into_body();
+                                if is_get {
+                                    let Ok(mut send) = respond.send_response(
+                                        http::Response::builder().status(200).body(()).unwrap(),
+                                        false,
+                                    ) else {
+                                        return;
+                                    };
+                                    let _ = send.send_data(Bytes::from_static(b"d"), false);
+                                    std::future::pending::<()>().await;
+                                }
+                                let mut got = Vec::new();
+                                while let Some(Ok(chunk)) = body.data().await {
+                                    got.extend_from_slice(&chunk);
+                                    let _ = body.flow_control().release_capacity(chunk.len());
+                                }
+                                let _ = posted_tx.send(got);
+                                let _ = respond.send_response(
+                                    http::Response::builder().status(200).body(()).unwrap(),
+                                    true,
+                                );
+                            });
+                        }
+                    });
+                    Ok(Box::new(near) as BoxStream)
+                })
+            })
+        };
+        let opts = XhttpOptions {
+            host: "example.com".into(),
+            path: "/xh".into(),
+            mode: "packet-up".into(),
+            reuse: Some(XhttpReuse::default()),
+            ..XhttpOptions::default()
+        };
+        let client = XhttpClient::new(opts, dial, None, Tasks::default()).unwrap();
+
+        let mut conn1 = client.dial().await.unwrap();
+        let mut mark = [0u8; 1];
+        conn1.read_exact(&mut mark).await.unwrap();
+        assert_eq!(&mark, b"d");
+
+        let mut conn2 = client.dial().await.unwrap();
+        conn2.read_exact(&mut mark).await.unwrap();
+        assert_eq!(&mark, b"d");
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            conn1.write_all(b"hello").await.unwrap();
+            conn1.shutdown().await.unwrap();
+            assert_eq!(posted_rx.recv().await.as_deref(), Some(b"hello".as_slice()));
+        })
+        .await
+        .expect("packet-up upload stalled behind another lease's GET");
+
+        drop((conn1, conn2));
     }
 }

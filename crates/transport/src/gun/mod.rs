@@ -1,7 +1,6 @@
 mod frame;
 
 use std::io;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,7 +11,7 @@ use h2::client::SendRequest;
 use http::{Method, Request, Uri};
 
 use crate::DialFn;
-use crate::h2io::{Activity, H2Body, Incoming, h2_io_error, handshake_split, spawn_connection};
+use crate::h2io::{Activity, ClientSlot, H2Body, Incoming, StreamGuard, h2_io_error};
 pub(crate) use frame::gun_framed;
 
 const DEFAULT_SERVICE: &str = "GunService";
@@ -51,31 +50,15 @@ pub fn service_path(service_name: &str) -> String {
     }
 }
 
-struct Transport {
-    streams: Arc<AtomicI64>,
-    sender: tokio::sync::Mutex<Option<SendRequest<Bytes>>>,
-    activity: Arc<Activity>,
-}
-
-impl Transport {
-    fn new() -> Arc<Transport> {
-        Arc::new(Transport {
-            streams: Arc::new(AtomicI64::new(0)),
-            sender: tokio::sync::Mutex::new(None),
-            activity: Activity::new(),
-        })
-    }
-}
-
-/// One node's gun client. Streams share a small pool of HTTP/2 connections the
-/// way `gun.Client` shares `http.Transport`s: `max_connections` bounds the pool,
-/// `min_streams` fills a connection before another opens, and without a connection
-/// bound `max_streams` caps streams per connection.
+/// One node's gun client. Streams share a pool of HTTP/2 connections the way
+/// `gun.Client` shares non-strict `http.Transport`s: `max_connections`,
+/// `min_streams`, and `max_streams` balance across connections that still have
+/// capacity under the peer's advertised stream limit, and once every pooled
+/// connection is full another connection opens.
 pub struct GunClient {
     opts: GrpcOptions,
-    max_connections: usize,
     dial: DialFn,
-    pool: Mutex<Vec<Arc<Transport>>>,
+    pool: Mutex<Vec<Arc<ClientSlot>>>,
     tasks: Tasks,
 }
 
@@ -83,12 +66,7 @@ impl GunClient {
     /// `dial` returns a stream ready for HTTP/2: TCP, then TLS offering `h2` when the
     /// node uses TLS. Reuse `tls_dial` for the TLS case.
     pub fn new(opts: GrpcOptions, dial: DialFn, tasks: Tasks) -> Arc<GunClient> {
-        let mut opts = opts;
-        if opts.max_connections == 0 && opts.min_streams == 0 && opts.max_streams == 0 {
-            opts.max_connections = 1;
-        }
         Arc::new(GunClient {
-            max_connections: opts.max_connections,
             opts,
             dial,
             pool: Mutex::new(Vec::new()),
@@ -96,72 +74,47 @@ impl GunClient {
         })
     }
 
-    fn pick(&self) -> Arc<Transport> {
+    fn default_pool(&self) -> bool {
+        self.opts.max_connections == 0 && self.opts.min_streams == 0 && self.opts.max_streams == 0
+    }
+
+    fn pick(&self) -> (Arc<ClientSlot>, StreamGuard) {
         let mut pool = lock(&self.pool);
-        let mut best: Option<&Arc<Transport>> = None;
-        for transport in pool.iter() {
-            let fewer = best.is_none_or(|b| {
-                transport.streams.load(Ordering::Relaxed) < b.streams.load(Ordering::Relaxed)
-            });
-            if fewer {
-                best = Some(transport);
-            }
-        }
-        let chosen = best.cloned();
-        let reuse = chosen.filter(|transport| {
-            let streams = transport.streams.load(Ordering::Relaxed);
-            if streams == 0 {
+        pool.retain(|slot| !slot.is_dead());
+        let available = pool
+            .iter()
+            .filter(|slot| slot.has_capacity())
+            .min_by_key(|slot| slot.streams())
+            .cloned();
+        let reuse = available.filter(|slot| {
+            let streams = slot.streams();
+            if streams == 0 || self.default_pool() {
                 return true;
             }
-            if self.max_connections > 0 {
-                pool.len() >= self.max_connections
-                    || usize::try_from(streams).is_ok_and(|s| s < self.opts.min_streams)
+            if self.opts.max_connections > 0 {
+                pool.len() >= self.opts.max_connections || streams < self.opts.min_streams
             } else {
-                self.opts.max_streams > 0
-                    && usize::try_from(streams).is_ok_and(|s| s < self.opts.max_streams)
+                self.opts.max_streams > 0 && streams < self.opts.max_streams
             }
         });
-        let transport = reuse.unwrap_or_else(|| {
-            let fresh = Transport::new();
+        let slot = reuse.unwrap_or_else(|| {
+            let fresh = Arc::new(ClientSlot::new());
             pool.push(fresh.clone());
             fresh
         });
-        transport.streams.fetch_add(1, Ordering::Relaxed);
-        transport
+        let guard = slot.reserve();
+        (slot, guard)
     }
 
-    async fn sender(&self, transport: &Transport) -> io::Result<SendRequest<Bytes>> {
-        let mut slot = transport.sender.lock().await;
-        for attempt in 0..2 {
-            if slot.is_none() {
-                let io = (self.dial)().await?;
-                let (sender, conn) = handshake_split(&client_builder(), io).await?;
-                let interval = Duration::from_secs(u64::from(self.opts.ping_interval));
-                transport.activity.touch();
-                spawn_connection(
-                    &self.tasks,
-                    conn,
-                    Some(interval),
-                    transport.activity.clone(),
-                );
-                *slot = Some(sender);
-            }
-            let Some(current) = slot.clone() else {
-                continue;
-            };
-            match current.ready().await {
-                Ok(ready) => return Ok(ready),
-                Err(err) if attempt == 1 => return Err(h2_io_error(err)),
-                Err(_) => *slot = None,
-            }
-        }
-        Err(io::ErrorKind::NotConnected.into())
+    async fn sender(&self, slot: &ClientSlot) -> io::Result<(SendRequest<Bytes>, Arc<Activity>)> {
+        let interval = Duration::from_secs(u64::from(self.opts.ping_interval));
+        slot.ready_sender(&self.dial, &client_builder(), &self.tasks, Some(interval))
+            .await
     }
 
     pub async fn dial(&self) -> io::Result<BoxStream> {
-        let transport = self.pick();
-        let guard = StreamCount(transport.streams.clone());
-        let mut sender = self.sender(&transport).await?;
+        let (slot, guard) = self.pick();
+        let (mut sender, activity) = self.sender(&slot).await?;
         let user_agent = if self.opts.user_agent.is_empty() {
             DEFAULT_USER_AGENT
         } else {
@@ -182,17 +135,9 @@ impl GunClient {
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
         let (response, send) = sender.send_request(request, false).map_err(h2_io_error)?;
         let body = H2Body::new(send, Incoming::Response(response))
-            .with_activity(transport.activity.clone())
+            .with_activity(activity)
             .on_drop(move || drop(guard));
         Ok(gun_framed(body))
-    }
-}
-
-struct StreamCount(Arc<AtomicI64>);
-
-impl Drop for StreamCount {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 

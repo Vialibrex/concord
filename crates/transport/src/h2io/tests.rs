@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::Poll;
+use std::task::{Poll, Wake, Waker};
 
 use concord_common::stream_buffer::ReadBufferOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
@@ -8,6 +8,82 @@ use super::*;
 
 mod cancellation;
 mod direct_write;
+
+struct PanicWake;
+
+impl Wake for PanicWake {
+    fn wake(self: Arc<Self>) {
+        panic!("poison h2 streams lock");
+    }
+}
+
+pub(crate) fn panic_waker() -> Waker {
+    Waker::from(Arc::new(PanicWake))
+}
+
+#[tokio::test]
+async fn client_slot_reports_dead_for_poisoned_sender_even_before_activity_ends() {
+    let (near, far) = duplex(1 << 20);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let server_release = release.clone();
+    let server = tokio::spawn(async move {
+        let mut conn = h2::server::Builder::new()
+            .handshake::<_, Bytes>(far)
+            .await
+            .unwrap();
+        if let Some(Ok((_req, mut respond))) = conn.accept().await {
+            server_release.notified().await;
+            let _ = respond.send_response(
+                http::Response::builder().status(200).body(()).unwrap(),
+                false,
+            );
+            while conn.accept().await.is_some() {}
+        }
+    });
+    let (mut sender, conn) = handshake_split(&client_builder(), Box::new(near))
+        .await
+        .unwrap();
+    let driver = tokio::spawn(conn);
+    let (mut response, send) = sender.send_request(http::Request::new(()), false).unwrap();
+    let waker = panic_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(Pin::new(&mut response).poll(&mut cx).is_pending());
+    release.notify_one();
+    assert!(driver.await.is_err());
+
+    let slot = ClientSlot::new();
+    let live_activity = Activity::new();
+    assert!(!live_activity.ended());
+    *concord_common::sync::lock(&slot.live) = Some(Live::new(sender, live_activity));
+    assert!(slot.is_dead());
+    assert_eq!(slot.peer_max_streams(), INITIAL_MAX_SEND_STREAMS);
+    assert!(slot.current().is_none());
+    assert!(!slot.is_dead());
+    server.abort();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop((response, send))));
+}
+
+#[tokio::test]
+async fn initial_and_unadvertised_peer_stream_limits_match_go() {
+    let (near, mut far) = duplex(1 << 16);
+    let (sender, conn) = handshake_split(&client_builder(), Box::new(near))
+        .await
+        .unwrap();
+    assert_eq!(sender_max_streams(&sender), Some(INITIAL_MAX_SEND_STREAMS));
+
+    let driver = tokio::spawn(conn);
+    far.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await.unwrap();
+    far.flush().await.unwrap();
+    for _ in 0..40 {
+        if sender_max_streams(&sender) == Some(DEFAULT_MAX_SEND_STREAMS) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(sender_max_streams(&sender), Some(DEFAULT_MAX_SEND_STREAMS));
+    drop(sender);
+    driver.abort();
+}
 
 #[test]
 fn the_last_read_releases_data_storage_before_the_next_frame_arrives() {

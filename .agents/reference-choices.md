@@ -275,6 +275,25 @@ Concord already takes these from the references; keep them unless the reference 
   like `GunConn.FrontHeadroom`. The owned path prepends its gRPC and protobuf header and hands the storage to h2; h2's
   codec and TLS can still copy.
 
+- [language-neutral] **Pooled HTTP/2 client stream limits** follow Go's non-strict HTTP/2 pool, which mihomo `v1.19.33`
+  (`3f27ef39`) runs through `metacubex/http` `v0.1.8` (`h2_bundle.go:784-815`, `:7370-7374`, `:8116`, `:8348-8380`,
+  `:10238-10244`, `transport.go:713-716`) and `sing-mux` `v0.3.12` (`h2mux.go:20`, `:260-262`, `client.go:172-175`,
+  `golang.org/x/net` `v0.35.0` `http2/transport.go:55-59`): each pooled client (`gun`, `xhttp` reuse, `singmux::h2mux`)
+  initializes `SETTINGS_MAX_CONCURRENT_STREAMS` to 100 until the peer's initial SETTINGS arrives, defaults an
+  unadvertised peer limit (`usize::MAX` in h2) to 1000, reserves HTTP/2 stream slots on each connection under the pool
+  lock, treats any connection without enough remaining slots under its peer limit as full, and opens another connection
+  without queueing even when `max-connections` is set. For `xhttp` reuse, each Concord entry holds one HTTP/2
+  connection where mihomo's entry wraps a growable `http.Transport` (`transport/xhttp/client.go:210-228`), so split
+  modes (`packet-up`, `stream-up`) without `download-settings` reserve 2 streams at lease time so later uploads on that
+  connection cannot stall behind other leases' downloads. Dropping mihomo's forced `maxConnections = 1` for all-zero
+  `grpc-opts` (`transport/gun/gun.go:398-401`) is equivalent in TCP connection count because each Go `gun.Transport`
+  wraps a growable non-strict `http.Transport` pool, whereas each Concord `ClientSlot` is one HTTP/2 connection. Like
+  Go (`h2_bundle.go:7993-8022`), streams opened concurrently before the server's first SETTINGS arrives are bounded by
+  the initial 100 and are not retried if a lower-limit server rejects them in the first RTT; streams whose request is
+  sent after a lower SETTINGS arrives wait as pending opens instead of failing over (`h2_bundle.go:9069-9091`). Concord
+  picks the least-loaded connection with capacity where Go picks the first available (`h2_bundle.go:797-806`), opening
+  the same connection count at peak. Dead or poisoned connections are evicted from the pool before selection.
+
 - [language-neutral] **HTTP/2 client outbound writes** follow Go's synchronous flow-control-and-socket-coupled model.
   mihomo `v1.19.33` (`3f27ef39`) connects `gun` (`transport/gun/gun.go:339`, `:348`, `:368`, `:146`, `:170`) and VMess
   HTTP/2 (`transport/vmess/h2.go:30`, `:49`, `:56`, `:83`, `:89`), sing-box `v1.15.0-alpha.13` connects
@@ -875,7 +894,9 @@ MiB, GiB, ns, µs, ms, s, min, h), or as the source text in backticks; `cfg` var
 | `transport::gun::MAX_HEADER_LIST_SIZE` | 10485760 | B | Gun h2 max header list 10 MiB = Go HTTP/2 client default mihomo runs: metacubex/http v0.1.8 `h2_bundle.go:7522` maxHeaderListSize returns 10 << 20. |
 | `transport::h2io::AT_RISK` | 10 s | B | Chromium sends a preface PING before a new stream on a session idle for kSpdyDefaultConnectionAtRiskOfLossSeconds = 10 (naiveproxy `d04efe1e` `src/net/spdy/spdy_session.h:111`, `src/net/spdy/spdy_session.cc:857-859`); same value. |
 | `transport::h2io::CONN_WINDOW` | 1073807359 | B | Go HTTP/2 client default 65535 + transportDefaultConnFlow 1 GiB, which mihomo runs for xhttp, h2, gun, and masque/h2 (metacubex/http v0.1.8 `h2_bundle.go:7358`, `:3553`, mihomo `transport/xhttp/client.go:210-228`, `adapter/outbound/masque.go:189-207`). |
+| `transport::h2io::DEFAULT_MAX_SEND_STREAMS` | 1000 | B | Default HTTP/2 client concurrent-stream cap 1000 when the peer's initial SETTINGS omits `SETTINGS_MAX_CONCURRENT_STREAMS`; Go HTTP/2 client http2defaultMaxConcurrentStreams = 1000 (metacubex/http v0.1.8 `h2_bundle.go:7374`, `:10238-10244`, used by mihomo; golang.org/x/net v0.35.0 `http2/transport.go:59`, used by sing-mux). |
 | `transport::h2io::HUNG` | 10 s | B | Chromium closes a session that has read nothing for kHungIntervalSeconds = 10 after a preface PING (naiveproxy `d04efe1e` `src/net/spdy/spdy_session.cc:102`, `:2531-2547`); same value. |
+| `transport::h2io::INITIAL_MAX_SEND_STREAMS` | 100 | B | Initial HTTP/2 client concurrent-stream bound 100 before the server's initial SETTINGS arrives; Go HTTP/2 client http2initialMaxConcurrentStreams = 100 (metacubex/http v0.1.8 `h2_bundle.go:7370`, `:8116`, used by mihomo; golang.org/x/net v0.35.0 `http2/transport.go:55`, used by sing-mux `h2mux.go:20`; RFC 9113 §6.5.2 minimum recommended value). |
 | `transport::h2io::MAX_FRAME_SIZE` | 1048576 | B | h2 SETTINGS_MAX_FRAME_SIZE 1 MiB = Go HTTP/2 default mihomo runs across xhttp (`transport/xhttp/client.go:210-228`), h2 (`transport/vmess/h2.go:114-121`), gun (`transport/gun/gun.go:299-313`), and masque/h2 (`adapter/outbound/masque.go:189-207`, `transport/masque/client_h2.go:19, 31-42`): metacubex/http v0.1.8 `h2_bundle.go:1133, 3555, 8171` http2defaultMaxReadFrameSize = 1 << 20. |
 | `transport::h2io::PING_TIMEOUT` | 15 s | B | h2 keepalive ping answer timeout 15 s; Go HTTP/2 PingTimeout default 15 s (metacubex/http v0.1.8 `h2_bundle.go:1134`, used by mihomo). |
 | `transport::h2io::RESET_DRAIN` | 10 s | B | How long a tunnel that ends with RST_STREAM waits for its queued DATA. naiveproxy `d04efe1e` disconnects the server side only once its pending write completes and bounds that wait by nothing of its own (`src/net/tools/naive/naive_connection.cc:416-446`); the nearest analogue is the session's hung limit, kHungIntervalSeconds = 10, after which Chromium closes a session that has read nothing (`src/net/spdy/spdy_session.cc:102`, `:2531-2547`). |

@@ -19,8 +19,7 @@ use super::request::Built;
 use super::{BoxRead, BoxWrite};
 use crate::DialFn;
 use crate::h2io::{
-    Activity, H2Reader, H2Writer, Incoming, client_builder, h2_io_error, handshake_split,
-    spawn_connection,
+    ClientSlot, H2Reader, H2Writer, Incoming, StreamGuard, client_builder, h2_io_error,
 };
 use crate::http1::invalid;
 
@@ -34,29 +33,15 @@ pub(crate) struct H2Transport {
     dial: DialFn,
     tasks: Tasks,
     keep_alive: Option<Duration>,
-    sender: tokio::sync::Mutex<Option<SendRequest<Bytes>>>,
+    slot: ClientSlot,
 }
 
 impl H2Transport {
     async fn sender(&self) -> io::Result<SendRequest<Bytes>> {
-        let mut slot = self.sender.lock().await;
-        for attempt in 0..2 {
-            if slot.is_none() {
-                let io = (self.dial)().await?;
-                let (sender, conn) = handshake_split(&client_builder(), io).await?;
-                spawn_connection(&self.tasks, conn, self.keep_alive, Activity::new());
-                *slot = Some(sender);
-            }
-            let Some(current) = slot.clone() else {
-                continue;
-            };
-            match current.ready().await {
-                Ok(ready) => return Ok(ready),
-                Err(err) if attempt == 1 => return Err(h2_io_error(err)),
-                Err(_) => *slot = None,
-            }
-        }
-        Err(io::ErrorKind::NotConnected.into())
+        self.slot
+            .ready_sender(&self.dial, &client_builder(), &self.tasks, self.keep_alive)
+            .await
+            .map(|(sender, _)| sender)
     }
 
     fn request(req: &Built) -> io::Result<Request<()>> {
@@ -147,7 +132,7 @@ impl Transport {
             dial,
             tasks,
             keep_alive,
-            sender: tokio::sync::Mutex::new(None),
+            slot: ClientSlot::new(),
         }))
     }
 
@@ -179,10 +164,29 @@ impl Transport {
         if let Transport::H3(t) = self {
             t.close();
         }
-        if let Transport::H2(t) = self
-            && let Ok(mut slot) = t.sender.try_lock()
-        {
-            slot.take();
+        if let Transport::H2(t) = self {
+            t.slot.close();
+        }
+    }
+
+    fn has_h2_capacity(&self, need: usize) -> bool {
+        match self {
+            Transport::H2(t) => t.slot.has_capacity_for(need),
+            Transport::H1(_) | Transport::H3(_) => true,
+        }
+    }
+
+    fn reserve_h2_streams(&self, count: usize) -> Option<StreamGuard> {
+        match self {
+            Transport::H2(t) => Some(t.slot.reserve_streams(count)),
+            Transport::H1(_) | Transport::H3(_) => None,
+        }
+    }
+
+    fn is_dead(&self) -> bool {
+        match self {
+            Transport::H2(t) => t.slot.is_dead(),
+            Transport::H1(_) | Transport::H3(_) => false,
         }
     }
 }
@@ -226,6 +230,7 @@ impl Entry {
 pub(crate) struct Lease {
     transport: Arc<Transport>,
     entry: Option<Arc<Entry>>,
+    _reserved: Option<StreamGuard>,
 }
 
 impl Lease {
@@ -233,6 +238,7 @@ impl Lease {
         Lease {
             transport,
             entry: None,
+            _reserved: None,
         }
     }
 
@@ -251,6 +257,7 @@ impl Deref for Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
+        self._reserved = None;
         if let Some(entry) = &self.entry {
             entry.release();
         }
@@ -297,6 +304,10 @@ impl ReuseManager {
             if entry.closed.load(Ordering::SeqCst) {
                 return false;
             }
+            if entry.transport.is_dead() {
+                entry.close();
+                return false;
+            }
             let idle = entry.open_usage.load(Ordering::SeqCst) == 0;
             if (entry.left_requests.load(Ordering::SeqCst) <= 0 && idle)
                 || (idle && entry.unreusable_at.is_some_and(|t| now > t))
@@ -308,16 +319,18 @@ impl ReuseManager {
         });
     }
 
-    fn pick(&self, entries: &[Arc<Entry>]) -> Option<Arc<Entry>> {
+    fn pick(&self, entries: &[Arc<Entry>], need: usize) -> Option<Arc<Entry>> {
         let mut best: Option<&Arc<Entry>> = None;
         for entry in entries {
             if entry.closed.load(Ordering::SeqCst)
+                || entry.transport.is_dead()
                 || entry.left_requests.load(Ordering::SeqCst) <= 0
                 || (entry.max_reuse_times > 0
                     && entry.reuse_count.load(Ordering::SeqCst) >= entry.max_reuse_times)
                 || (self.max_concurrency > 0
                     && usize::try_from(entry.open_usage.load(Ordering::SeqCst))
                         .is_ok_and(|n| n >= self.max_concurrency))
+                || !entry.transport.has_h2_capacity(need)
             {
                 continue;
             }
@@ -330,7 +343,7 @@ impl ReuseManager {
         best.cloned()
     }
 
-    pub fn lease(&self) -> Lease {
+    pub fn lease(&self, need: usize) -> Lease {
         let now = Instant::now();
         let mut entries = lock(&self.entries);
         Self::cleanup(&mut entries, now);
@@ -339,7 +352,7 @@ impl ReuseManager {
         let picked = if should_create {
             None
         } else {
-            self.pick(&entries)
+            self.pick(&entries, need)
         };
         let reused = picked.is_some();
         let entry = picked.unwrap_or_else(|| {
@@ -371,9 +384,11 @@ impl ReuseManager {
         if entry.left_requests.load(Ordering::SeqCst) > 0 {
             entry.left_requests.fetch_sub(1, Ordering::SeqCst);
         }
+        let reserved = entry.transport.reserve_h2_streams(need);
         Lease {
             transport: entry.transport.clone(),
             entry: Some(entry),
+            _reserved: reserved,
         }
     }
 }
@@ -398,7 +413,7 @@ mod tests {
     #[tokio::test]
     async fn without_limits_everything_shares_one_transport() {
         let (m, made) = manager(XhttpReuse::default());
-        let leases: Vec<Lease> = (0..5).map(|_| m.lease()).collect();
+        let leases: Vec<Lease> = (0..5).map(|_| m.lease(1)).collect();
         assert_eq!(made.load(Ordering::SeqCst), 1);
         drop(leases);
     }
@@ -409,9 +424,9 @@ mod tests {
             max_concurrency: "2".into(),
             ..XhttpReuse::default()
         });
-        let a: Vec<Lease> = (0..2).map(|_| m.lease()).collect();
+        let a: Vec<Lease> = (0..2).map(|_| m.lease(1)).collect();
         assert_eq!(made.load(Ordering::SeqCst), 1);
-        let _third = m.lease();
+        let _third = m.lease(1);
         assert_eq!(made.load(Ordering::SeqCst), 2);
         drop(a);
     }
@@ -422,7 +437,7 @@ mod tests {
             max_connections: "3".into(),
             ..XhttpReuse::default()
         });
-        let leases: Vec<Lease> = (0..5).map(|_| m.lease()).collect();
+        let leases: Vec<Lease> = (0..5).map(|_| m.lease(1)).collect();
         assert_eq!(made.load(Ordering::SeqCst), 3);
         drop(leases);
     }
@@ -433,10 +448,10 @@ mod tests {
             h_max_request_times: "2".into(),
             ..XhttpReuse::default()
         });
-        drop(m.lease());
-        drop(m.lease());
+        drop(m.lease(1));
+        drop(m.lease(1));
         assert_eq!(made.load(Ordering::SeqCst), 1);
-        drop(m.lease());
+        drop(m.lease(1));
         assert_eq!(made.load(Ordering::SeqCst), 2);
     }
 
@@ -446,10 +461,10 @@ mod tests {
             c_max_reuse_times: "1".into(),
             ..XhttpReuse::default()
         });
-        let _a = m.lease();
-        let _b = m.lease();
+        let _a = m.lease(1);
+        let _b = m.lease(1);
         assert_eq!(made.load(Ordering::SeqCst), 1);
-        let _c = m.lease();
+        let _c = m.lease(1);
         assert_eq!(made.load(Ordering::SeqCst), 2);
     }
 
@@ -463,5 +478,368 @@ mod tests {
             ..XhttpReuse::default()
         };
         assert!(ReuseManager::new(&bad, maker).is_err());
+    }
+
+    #[tokio::test]
+    async fn h2_reuse_opens_another_transport_at_peer_stream_limit() {
+        use tokio::io::{AsyncWriteExt, duplex};
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let dial: DialFn = {
+            let connections = connections.clone();
+            Arc::new(move || {
+                let connections = connections.clone();
+                Box::pin(async move {
+                    let (near, far) = duplex(1 << 20);
+                    connections.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let Ok(mut conn) = h2::server::Builder::new()
+                            .max_concurrent_streams(2)
+                            .handshake::<_, Bytes>(far)
+                            .await
+                        else {
+                            return;
+                        };
+                        while let Some(Ok((request, mut respond))) = conn.accept().await {
+                            tokio::spawn(async move {
+                                let mut body = request.into_body();
+                                let Ok(mut send) = respond.send_response(
+                                    http::Response::builder().status(200).body(()).unwrap(),
+                                    false,
+                                ) else {
+                                    return;
+                                };
+                                while let Some(Ok(chunk)) = body.data().await {
+                                    let _ = body.flow_control().release_capacity(chunk.len());
+                                    if send.send_data(chunk, false).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    Ok(Box::new(near) as concord_common::BoxStream)
+                })
+            })
+        };
+        let maker: Maker =
+            Arc::new(move || Transport::new(false, dial.clone(), 0, Default::default()));
+        let manager = ReuseManager::new(&XhttpReuse::default(), maker).unwrap();
+        let req = Built::test_new(
+            "POST",
+            "example.com",
+            "/x",
+            crate::http1::HeaderMap::default(),
+        );
+        let mut held = Vec::new();
+        for idx in 0..3u8 {
+            let (lease, wr, rd) = tokio::time::timeout(Duration::from_secs(2), async {
+                let lease = manager.lease(1);
+                let (mut wr, pending) = lease.stream(&req).await.unwrap();
+                wr.write_all(&[idx]).await.unwrap();
+                let (status, mut rd) = pending.await.unwrap();
+                assert_eq!(status, 200);
+                let mut back = [0u8; 1];
+                rd.read_exact(&mut back).await.unwrap();
+                assert_eq!(back[0], idx);
+                (lease, wr, rd)
+            })
+            .await
+            .expect("xhttp h2 stream stalled past peer concurrent-stream limit");
+            held.push((lease, wr, rd));
+        }
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn h2_reuse_counts_two_streams_per_lease_in_split_upload_download_mode() {
+        use tokio::io::{AsyncWriteExt, duplex};
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let dial: DialFn = {
+            let connections = connections.clone();
+            Arc::new(move || {
+                let connections = connections.clone();
+                Box::pin(async move {
+                    let (near, far) = duplex(1 << 20);
+                    connections.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let Ok(mut conn) = h2::server::Builder::new()
+                            .max_concurrent_streams(2)
+                            .handshake::<_, Bytes>(far)
+                            .await
+                        else {
+                            return;
+                        };
+                        while let Some(Ok((request, mut respond))) = conn.accept().await {
+                            tokio::spawn(async move {
+                                let is_get = request.method() == http::Method::GET;
+                                let mut body = request.into_body();
+                                let Ok(mut send) = respond.send_response(
+                                    http::Response::builder().status(200).body(()).unwrap(),
+                                    false,
+                                ) else {
+                                    return;
+                                };
+                                if is_get {
+                                    let _ = send.send_data(Bytes::from_static(b"d"), false);
+                                    std::future::pending::<()>().await;
+                                }
+                                while let Some(Ok(chunk)) = body.data().await {
+                                    let _ = body.flow_control().release_capacity(chunk.len());
+                                    if send.send_data(chunk, false).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    Ok(Box::new(near) as concord_common::BoxStream)
+                })
+            })
+        };
+        let maker: Maker =
+            Arc::new(move || Transport::new(false, dial.clone(), 0, Default::default()));
+        let manager = ReuseManager::new(&XhttpReuse::default(), maker).unwrap();
+        let get = Built::test_new(
+            "GET",
+            "example.com",
+            "/x",
+            crate::http1::HeaderMap::default(),
+        );
+        let post = Built::test_new(
+            "POST",
+            "example.com",
+            "/x",
+            crate::http1::HeaderMap::default(),
+        );
+
+        let lease1 = manager.lease(2);
+        let download1 = lease1.start_download(&get).await.unwrap();
+        let (status, mut dl_rd1) = download1.await.unwrap();
+        assert_eq!(status, 200);
+        let mut mark = [0u8; 1];
+        dl_rd1.read_exact(&mut mark).await.unwrap();
+        assert_eq!(&mark, b"d");
+
+        let upload1 = Lease::owned(lease1.shared());
+        let (mut up_wr1, up_pending1) = upload1.stream(&post).await.unwrap();
+        up_wr1.write_all(b"u").await.unwrap();
+        let (up_status, mut up_rd1) = up_pending1.await.unwrap();
+        assert_eq!(up_status, 200);
+        up_rd1.read_exact(&mut mark).await.unwrap();
+        assert_eq!(&mark, b"u");
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+
+        let lease2 = manager.lease(2);
+        let (up_wr2, up_pending2) = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut wr, pending) = lease2.stream(&post).await.unwrap();
+            wr.write_all(b"2").await.unwrap();
+            let (status, mut rd) = pending.await.unwrap();
+            assert_eq!(status, 200);
+            let mut back = [0u8; 1];
+            rd.read_exact(&mut back).await.unwrap();
+            assert_eq!(&back, b"2");
+            (wr, rd)
+        })
+        .await
+        .expect("second lease stalled after first split lease filled peer stream limit");
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        drop((
+            lease1,
+            dl_rd1,
+            upload1,
+            up_wr1,
+            up_rd1,
+            lease2,
+            up_wr2,
+            up_pending2,
+        ));
+    }
+
+    #[tokio::test]
+    async fn h2_reuse_packet_up_reserves_upload_stream_slot_at_lease_time() {
+        use tokio::io::duplex;
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let dial: DialFn = {
+            let connections = connections.clone();
+            Arc::new(move || {
+                let connections = connections.clone();
+                Box::pin(async move {
+                    let (near, far) = duplex(1 << 20);
+                    connections.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let Ok(mut conn) = h2::server::Builder::new()
+                            .max_concurrent_streams(2)
+                            .handshake::<_, Bytes>(far)
+                            .await
+                        else {
+                            return;
+                        };
+                        while let Some(Ok((request, mut respond))) = conn.accept().await {
+                            tokio::spawn(async move {
+                                let is_get = request.method() == http::Method::GET;
+                                let mut body = request.into_body();
+                                if is_get {
+                                    let Ok(mut send) = respond.send_response(
+                                        http::Response::builder().status(200).body(()).unwrap(),
+                                        false,
+                                    ) else {
+                                        return;
+                                    };
+                                    let _ = send.send_data(Bytes::from_static(b"d"), false);
+                                    std::future::pending::<()>().await;
+                                }
+                                while let Some(Ok(chunk)) = body.data().await {
+                                    let _ = body.flow_control().release_capacity(chunk.len());
+                                }
+                                let _ = respond.send_response(
+                                    http::Response::builder().status(200).body(()).unwrap(),
+                                    true,
+                                );
+                            });
+                        }
+                    });
+                    Ok(Box::new(near) as concord_common::BoxStream)
+                })
+            })
+        };
+        let maker: Maker =
+            Arc::new(move || Transport::new(false, dial.clone(), 0, Default::default()));
+        let manager = ReuseManager::new(&XhttpReuse::default(), maker).unwrap();
+        let get = Built::test_new(
+            "GET",
+            "example.com",
+            "/x",
+            crate::http1::HeaderMap::default(),
+        );
+        let post = Built::test_new(
+            "POST",
+            "example.com",
+            "/x",
+            crate::http1::HeaderMap::default(),
+        );
+
+        let lease1 = manager.lease(2);
+        let download1 = lease1.start_download(&get).await.unwrap();
+        let (status, mut dl_rd1) = download1.await.unwrap();
+        assert_eq!(status, 200);
+        let mut mark = [0u8; 1];
+        dl_rd1.read_exact(&mut mark).await.unwrap();
+        assert_eq!(&mark, b"d");
+
+        let lease2 = manager.lease(2);
+        let download2 = lease2.start_download(&get).await.unwrap();
+        let (status, mut dl_rd2) = download2.await.unwrap();
+        assert_eq!(status, 200);
+        dl_rd2.read_exact(&mut mark).await.unwrap();
+        assert_eq!(&mark, b"d");
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+
+        let upload1 = Lease::owned(lease1.shared());
+        let post_status =
+            tokio::time::timeout(Duration::from_secs(2), upload1.fixed(&post, b"p".to_vec()))
+                .await
+                .expect("packet-up POST stalled behind another lease's GET")
+                .unwrap();
+        assert_eq!(post_status, 200);
+
+        drop((upload1, dl_rd1, lease1));
+        let lease3 = manager.lease(2);
+        let download3 = lease3.start_download(&get).await.unwrap();
+        let (status, mut dl_rd3) = download3.await.unwrap();
+        assert_eq!(status, 200);
+        dl_rd3.read_exact(&mut mark).await.unwrap();
+        assert_eq!(&mark, b"d");
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        drop((dl_rd2, lease2, dl_rd3, lease3));
+    }
+
+    #[tokio::test]
+    async fn h2_reuse_evicts_a_poisoned_transport() {
+        use std::task::Context;
+        use tokio::io::{AsyncWriteExt, duplex};
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let dial: DialFn = {
+            let connections = connections.clone();
+            let release = release.clone();
+            Arc::new(move || {
+                let connections = connections.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    let (near, far) = duplex(1 << 20);
+                    let idx = connections.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let Ok(mut conn) =
+                            h2::server::Builder::new().handshake::<_, Bytes>(far).await
+                        else {
+                            return;
+                        };
+                        if idx == 0 {
+                            if let Some(Ok((_req, mut respond))) = conn.accept().await {
+                                release.notified().await;
+                                let _ = respond.send_response(
+                                    http::Response::builder().status(200).body(()).unwrap(),
+                                    false,
+                                );
+                                while conn.accept().await.is_some() {}
+                            }
+                            return;
+                        }
+                        while let Some(Ok((request, mut respond))) = conn.accept().await {
+                            tokio::spawn(async move {
+                                let mut body = request.into_body();
+                                let Ok(mut send) = respond.send_response(
+                                    http::Response::builder().status(200).body(()).unwrap(),
+                                    false,
+                                ) else {
+                                    return;
+                                };
+                                while let Some(Ok(chunk)) = body.data().await {
+                                    let _ = body.flow_control().release_capacity(chunk.len());
+                                    if send.send_data(chunk, false).is_err() {
+                                        break;
+                                    }
+                                }
+                            });
+                        }
+                    });
+                    Ok(Box::new(near) as concord_common::BoxStream)
+                })
+            })
+        };
+        let maker: Maker =
+            Arc::new(move || Transport::new(false, dial.clone(), 0, Default::default()));
+        let manager = ReuseManager::new(&XhttpReuse::default(), maker).unwrap();
+        let req = Built::test_new(
+            "POST",
+            "example.com",
+            "/x",
+            crate::http1::HeaderMap::default(),
+        );
+        let first_lease = manager.lease(1);
+        let (first_wr, mut first_pending) = first_lease.stream(&req).await.unwrap();
+        let waker = crate::h2io::tests::panic_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(first_pending.as_mut().poll(&mut cx).is_pending());
+        release.notify_one();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let second_lease = manager.lease(1);
+        let (mut wr, pending) = second_lease.stream(&req).await.unwrap();
+        wr.write_all(b"k").await.unwrap();
+        let (status, mut rd) = pending.await.unwrap();
+        assert_eq!(status, 200);
+        let mut back = [0u8; 1];
+        rd.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"k");
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            drop((first_wr, first_pending, first_lease))
+        }));
     }
 }

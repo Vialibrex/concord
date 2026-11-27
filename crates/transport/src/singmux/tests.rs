@@ -279,3 +279,167 @@ async fn a_closed_client_dials_a_new_session_for_the_next_stream() {
     client.connect_tcp(&target).await.unwrap();
     assert_eq!(lock(&peers).len(), 2);
 }
+
+#[tokio::test]
+async fn h2mux_opens_another_session_at_peer_stream_limit() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let connections = Arc::new(AtomicUsize::new(0));
+    let dial: MuxDialFn = {
+        let connections = connections.clone();
+        Arc::new(move |_| {
+            let connections = connections.clone();
+            Box::pin(async move {
+                let (near, mut far) = duplex(1 << 20);
+                connections.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut req = [0u8; 2];
+                    if far.read_exact(&mut req).await.is_err() {
+                        return;
+                    }
+                    let Ok(mut conn) = h2::server::Builder::new()
+                        .max_concurrent_streams(2)
+                        .handshake::<_, bytes::Bytes>(far)
+                        .await
+                    else {
+                        return;
+                    };
+                    while let Some(Ok((request, mut respond))) = conn.accept().await {
+                        tokio::spawn(async move {
+                            let mut body = request.into_body();
+                            let Ok(mut send) = respond.send_response(
+                                http::Response::builder().status(200).body(()).unwrap(),
+                                false,
+                            ) else {
+                                return;
+                            };
+                            let _ = send.send_data(bytes::Bytes::from_static(&[0]), false);
+                            while let Some(Ok(chunk)) = body.data().await {
+                                let _ = body.flow_control().release_capacity(chunk.len());
+                                if send.send_data(chunk, false).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                });
+                Ok(Box::new(near) as BoxStream)
+            })
+        })
+    };
+    let options = SingMuxOptions {
+        protocol: MuxProtocol::H2Mux,
+        max_streams: 10,
+        ..SingMuxOptions::default()
+    };
+    let client = SingMuxClient::new(options, dial, Default::default());
+    let target = Address::new("1.2.3.4", 80);
+    let mut streams = Vec::new();
+    for idx in 0..3u8 {
+        let stream = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut s = client.connect_tcp(&target).await.unwrap();
+            s.write_all(&[idx]).await.unwrap();
+            let mut header = [0u8; 10];
+            s.read_exact(&mut header).await.unwrap();
+            s
+        })
+        .await
+        .expect("h2mux stream stalled past peer concurrent-stream limit");
+        streams.push(stream);
+    }
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
+    drop(streams);
+}
+
+#[tokio::test]
+async fn h2mux_evicts_a_session_whose_h2_streams_lock_is_poisoned() {
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Context;
+    use tokio::io::ReadBuf;
+
+    let connections = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let dial: MuxDialFn = {
+        let connections = connections.clone();
+        let release = release.clone();
+        Arc::new(move |_| {
+            let connections = connections.clone();
+            let release = release.clone();
+            Box::pin(async move {
+                let (near, mut far) = duplex(1 << 20);
+                let idx = connections.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut req = [0u8; 2];
+                    if far.read_exact(&mut req).await.is_err() {
+                        return;
+                    }
+                    let Ok(mut conn) = h2::server::Builder::new()
+                        .handshake::<_, bytes::Bytes>(far)
+                        .await
+                    else {
+                        return;
+                    };
+                    if idx == 0 {
+                        if let Some(Ok((_req, mut respond))) = conn.accept().await {
+                            release.notified().await;
+                            let _ = respond.send_response(
+                                http::Response::builder().status(200).body(()).unwrap(),
+                                false,
+                            );
+                            while conn.accept().await.is_some() {}
+                        }
+                        return;
+                    }
+                    while let Some(Ok((request, mut respond))) = conn.accept().await {
+                        tokio::spawn(async move {
+                            let mut body = request.into_body();
+                            let Ok(mut send) = respond.send_response(
+                                http::Response::builder().status(200).body(()).unwrap(),
+                                false,
+                            ) else {
+                                return;
+                            };
+                            let _ = send.send_data(bytes::Bytes::from_static(&[0]), false);
+                            while let Some(Ok(chunk)) = body.data().await {
+                                let _ = body.flow_control().release_capacity(chunk.len());
+                                if send.send_data(chunk, false).is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                });
+                Ok(Box::new(near) as BoxStream)
+            })
+        })
+    };
+    let options = SingMuxOptions {
+        protocol: MuxProtocol::H2Mux,
+        max_streams: 10,
+        ..SingMuxOptions::default()
+    };
+    let client = SingMuxClient::new(options, dial, Default::default());
+    let target = Address::new("1.2.3.4", 80);
+    let mut first = client.connect_tcp(&target).await.unwrap();
+    let waker = crate::h2io::tests::panic_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut byte = [0u8; 1];
+    let mut buf = ReadBuf::new(&mut byte);
+    assert!(
+        Pin::new(&mut first)
+            .poll_read(&mut cx, &mut buf)
+            .is_pending()
+    );
+    release.notify_one();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut second = client.connect_tcp(&target).await.unwrap();
+    second.write_all(b"z").await.unwrap();
+    let mut reply = [0u8; 10];
+    second.read_exact(&mut reply).await.unwrap();
+    assert_eq!(connections.load(Ordering::SeqCst), 2);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(first)));
+}
