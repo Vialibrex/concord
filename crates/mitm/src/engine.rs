@@ -32,7 +32,7 @@ use crate::task::Tasks;
 /// its reads one fresh window as long.
 pub(crate) const SNIFF_WINDOW: Duration = Duration::from_secs(1);
 pub(crate) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const ACCEPT_TIMEOUT: Duration = Duration::from_secs(15);
+pub(crate) const ACCEPT_TIMEOUT: Duration = Duration::from_secs(15);
 const QUIC_MEMORY: Duration = Duration::from_secs(60);
 const QUIC_CACHE_SIZE: usize = 4096;
 const TASK_CONCURRENCY: usize = 2;
@@ -482,17 +482,26 @@ impl MitmEngine {
             );
             return declined(peeker);
         }
-        let config = match ca.server_config_async(&server_name, protocols).await {
-            Ok(config) => config,
-            Err(err) => {
-                tracing::debug!("[MITM] no certificate for {server_name}: {err}");
-                session.release();
-                return Offer::Taken;
-            }
-        };
+        let deadline = tokio::time::Instant::now() + ACCEPT_TIMEOUT;
+        let config =
+            match timeout_at(deadline, ca.server_config_async(&server_name, protocols)).await {
+                Ok(Ok(config)) => config,
+                Ok(Err(err)) => {
+                    tracing::debug!("[MITM] no certificate for {server_name}: {err}");
+                    session.release();
+                    return Offer::Taken;
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        "[MITM] certificate for {} ({server_name}) timed out",
+                        flow.meta.src
+                    );
+                    session.release();
+                    return Offer::Taken;
+                }
+            };
         let io = PeekedStream::new(peeker.buf, peeker.stream);
-        let accepted =
-            tokio::time::timeout(ACCEPT_TIMEOUT, TlsAcceptor::from(config).accept(io)).await;
+        let accepted = timeout_at(deadline, TlsAcceptor::from(config).accept(io)).await;
         match accepted {
             Ok(Ok(tls)) => {
                 session.decrypted();

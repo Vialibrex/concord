@@ -1985,3 +1985,66 @@ async fn header_rewrite_comes_before_the_url_rewrite_as_in_surge() {
         "the header rewrite matched the URL the client asked for"
     );
 }
+
+#[test]
+fn leaf_signing_times_out_when_the_blocking_pool_is_full() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (_server, rig) = rig(api_or_echo(), true, &["http/1.1"]).await;
+        let errors = rig.config(json!({
+            "enable": true,
+            "hostname": ["example.test"],
+            "skip-server-cert-verify": true,
+        }));
+        assert!(errors.is_empty(), "{errors:?}");
+        let ca = rig.mitm.authority().current().unwrap();
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let blocker = tokio::task::spawn_blocking(move || {
+            let _ = entered_tx.send(());
+            let _ = release_rx.recv();
+        });
+        entered_rx.await.unwrap();
+
+        let (mut near, offer) = offer_on(rig.mitm.interceptor(), flow("example.test", 443));
+        near.write_all(&hello("example.test", &["http/1.1"]))
+            .await
+            .unwrap();
+        assert!(
+            eventually(|| ca.inflight_len() == 1).await,
+            "offer_tls should reach leaf signing"
+        );
+
+        tokio::time::pause();
+        tokio::time::advance(crate::engine::ACCEPT_TIMEOUT + Duration::from_millis(100)).await;
+        for _ in 0..16 {
+            if offer.is_finished() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        tokio::time::resume();
+        assert!(
+            offer.is_finished(),
+            "offer_tls hung past ACCEPT_TIMEOUT while blocking pool was full"
+        );
+        let outcome = offer.await.unwrap();
+        assert!(matches!(outcome, Offer::Taken));
+        assert_eq!(rig.dialer.marks(), vec![Some(ConnMark::Plain)]);
+
+        drop(release_tx);
+        blocker.await.unwrap();
+        assert!(eventually(|| ca.inflight_len() == 0).await);
+        assert_eq!(ca.cached_leaves(), 1);
+
+        let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+            .await
+            .unwrap();
+        assert_eq!(client.get("/ok").await.text(), "example.test|/ok||");
+    });
+}

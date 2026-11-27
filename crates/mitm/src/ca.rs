@@ -190,6 +190,11 @@ impl Ca {
         lock(&self.leaves).leaves.len()
     }
 
+    #[cfg(test)]
+    pub(crate) fn inflight_len(&self) -> usize {
+        lock(&self.inflight).len()
+    }
+
     /// Cancelled once the CA is replaced, so that the clients of its decrypted
     /// connections reconnect and are handed a certificate of the new one.
     pub fn retired(&self) -> &CancellationToken {
