@@ -190,7 +190,9 @@ impl RecvStream {
     /// If no data is available for reading, the method returns `Poll::Pending`
     /// and arranges for the current task (via cx.waker()) to receive a notification
     /// when the stream becomes readable or is closed.
-    fn poll_read_chunk(
+    ///
+    /// Concord: public, so h3-quinn can read without moving the stream into a future.
+    pub fn poll_read_chunk(
         &mut self,
         cx: &mut Context,
         max_length: usize,

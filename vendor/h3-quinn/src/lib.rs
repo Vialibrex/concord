@@ -26,7 +26,6 @@ use h3::{
     error::Code,
     quic::{self, ConnectionErrorIncoming, StreamErrorIncoming, StreamId, WriteBuf},
 };
-use tokio_util::sync::ReusableBoxFuture;
 
 #[cfg(feature = "tracing")]
 use tracing::instrument;
@@ -343,26 +342,14 @@ where
 ///
 /// Implements a [`quic::RecvStream`] backed by a [`quinn::RecvStream`].
 pub struct RecvStream {
-    stream: Option<quinn::RecvStream>,
-    read_chunk_fut: ReadChunkFuture,
+    // Concord: the stream stays here while a read waits, so stop_sending and recv_id find it.
+    stream: quinn::RecvStream,
 }
-
-type ReadChunkFuture = ReusableBoxFuture<
-    'static,
-    (
-        quinn::RecvStream,
-        Result<Option<quinn::Chunk>, quinn::ReadError>,
-    ),
->;
 
 impl RecvStream {
     /// Concord: public, so a server can read the start of a stream before h3 takes it.
     pub fn new(stream: quinn::RecvStream) -> Self {
-        Self {
-            stream: Some(stream),
-            // Should only allocate once the first time it's used
-            read_chunk_fut: ReusableBoxFuture::new(async { unreachable!() }),
-        }
+        Self { stream }
     }
 }
 
@@ -374,15 +361,7 @@ impl quic::RecvStream for RecvStream {
         &mut self,
         cx: &mut task::Context<'_>,
     ) -> Poll<Result<Option<Self::Buf>, StreamErrorIncoming>> {
-        if let Some(mut stream) = self.stream.take() {
-            self.read_chunk_fut.set(async move {
-                let chunk = stream.read_chunk(usize::MAX, true).await;
-                (stream, chunk)
-            })
-        };
-
-        let (stream, chunk) = ready!(self.read_chunk_fut.poll(cx));
-        self.stream = Some(stream);
+        let chunk = ready!(self.stream.poll_read_chunk(cx, usize::MAX, true));
         Poll::Ready(Ok(chunk
             .map_err(|e| convert_read_error_to_stream_error(e))?
             .map(|c| c.bytes)))
@@ -391,15 +370,13 @@ impl quic::RecvStream for RecvStream {
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     fn stop_sending(&mut self, error_code: u64) {
         self.stream
-            .as_mut()
-            .unwrap()
             .stop(VarInt::from_u64(error_code).expect("invalid error_code"))
             .ok();
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     fn recv_id(&self) -> StreamId {
-        let num: u64 = self.stream.as_ref().unwrap().id().into();
+        let num: u64 = self.stream.id().into();
 
         num.try_into().expect("invalid stream id")
     }

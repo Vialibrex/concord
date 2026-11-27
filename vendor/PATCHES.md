@@ -33,6 +33,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | h3 | Discard unknown frames as they arrive; bound HEADERS and SETTINGS before buffering | None; quic-go bounds both (`http3/frames.go:134`, `:182`) | Propose to hyperium/h3 with the decoder tests |
 | h3 | Allow warnings in the manifest | None | None planned: it gives the path dependency a crates.io dependency's lint cap |
 | h3-quinn | Public `SendStream::new` and `RecvStream::new` | None | Propose to hyperium/h3 |
+| h3-quinn | `RecvStream` keeps its quinn stream while a read waits, so `stop_sending` and `recv_id` do not panic | None | Issue and PR to hyperium/h3 with the NaiveProxy stop-while-reading test |
 | gotatun | Deliver already-ready encrypted IP packets to the bounded UDP queue together | None yet | Propose the batch handoff to mullvad/gotatun |
 | h2 | Ignore DATA and HEADERS on forgotten client streams | None as of 0.4.20 | Issue and PR to hyperium/h2 with the delayed-DATA-after-reset transport test |
 | h2 | Opt-in split-I/O client direct DATA writes | None as of 0.4.20 | Propose split-transport client API to hyperium/h2 once framing and multi-stream contracts settle |
@@ -44,6 +45,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | quinn | Lease receive scratch for a socket poll instead of an endpoint lifetime | None | Propose to quinn-rs/quinn with the endpoint sharing regression and receive-buffer lease contracts |
 | quinn | A connection whose driver has ended lets go of its socket | None | Propose to quinn-rs/quinn with the release contract of `crates/quic/src/release.rs` |
 | quinn | Hold one UDP_GRO socket for the process so per-connection sockets do not flip the kernel's encapsulation static keys | None | Propose to quinn-rs/quinn, or to quinn-udp where `UdpSocketState::new` sets UDP_GRO |
+| quinn | Public `RecvStream::poll_read_chunk` | None | Propose with the h3-quinn change; quinn's `read_chunk` future already wraps it |
 | quinn-proto | `send_quantum`, `on_packet_lost`, `min_pacing_delay` and explicit-rate pacing | quinn-rs/quinn#2481; merged as noq#611 | Follow #2481. `min_pacing_delay` is Concord's own addition and needs its own proposal; the pacer changes cannot move into `quic/src/congestion.rs` while the controller API lacks these hooks |
 | quinn-proto | Requeue unacknowledged STREAM data on a PTO; withdraw acknowledged copies | None; quinn `main` `765abecf` requeues only control frames | PR with the recovery contracts of `crates/proxy/tests/quinn_pto.rs` |
 | quinn-proto | A DATAGRAM-only packet does not bundle a pending ACK | None | PR citing quic-go's default path and the `quinn_pto.rs` ACK contracts |
@@ -178,6 +180,8 @@ The package archive checksum is `7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c
   closed runs until the destination closes. Until then a listener stopped by a reload could not free its port for
   the listener built in its place. The endpoint itself is released by `crates/quic/src/release.rs`; its contract
   `a_drained_connection_kept_by_a_handle_frees_the_port` holds a server handle past the drain.
+- `src/recv_stream.rs`: `RecvStream::poll_read_chunk` is public, unchanged otherwise; the vendored h3-quinn reads
+  through it so its `RecvStream` never gives up the stream while a read waits.
 - `Cargo.toml`, `benches/`, `examples/`, `tests/`: the `[[example]]`, `[[test]]` and `[[bench]]` targets are removed
   with their sources.
 - `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`: crates.io packaging metadata, omitted.
@@ -411,3 +415,9 @@ The package archive checksum is `10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662
   bidirectional stream opens with before h3 sees it, since sing-quic routes TCP requests (`0x401`) away from
   HTTP/3 that way (`hysteria2/service.go:337-355`), and hands h3 the other streams with those bytes in front.
   Nothing else changes; the clients build their streams as before.
+- `src/lib.rs`: `RecvStream` holds its `quinn::RecvStream` and reads through `poll_read_chunk` instead of moving
+  the stream into a boxed `read_chunk` future. Upstream leaves `stream` empty while a read waits, so
+  `stop_sending` or `recv_id` on a stream whose read is pending unwraps `None` and panics; a NaiveProxy tunnel
+  that ends while its reader waits stops its stream that way. `read_chunk` is cancel-safe and the poll keeps no
+  state between calls, so a dropped read loses nothing; dropping `RecvStream` drops the quinn stream as before.
+  Contract: `naive::tests::a_quic_tunnel_ended_while_its_reader_waits_stops_the_stream_cancelled`.

@@ -523,6 +523,49 @@ async fn quic_tunnels_share_one_connection() {
 }
 
 #[tokio::test]
+async fn a_quic_tunnel_ended_while_its_reader_waits_stops_the_stream_cancelled() {
+    let (hold, mut held) = tokio::sync::mpsc::unbounded_channel();
+    let (_seen, port, _endpoint) = h3_server(Some(hold)).await;
+    let node = quic_node(port);
+    let env = test_env();
+    let cx = DialCx::new(&env, Initiator::Direct, None);
+    let stream = node
+        .connect(&cx, &Address::Domain("example.com".into(), 443))
+        .await
+        .unwrap();
+    let (mut read, mut write) = tokio::io::split(stream);
+    let patience = std::time::Duration::from_secs(5);
+    let reader = tokio::spawn(async move {
+        let mut rest = Vec::new();
+        read.read_to_end(&mut rest).await.map(|_| rest)
+    });
+    write.write_all(b"hello").await.unwrap();
+    write.flush().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!reader.is_finished());
+    tokio::time::timeout(patience, write.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(patience, reader)
+        .await
+        .unwrap()
+        .expect("the reader panicked")
+        .unwrap();
+    let held = tokio::time::timeout(patience, held.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(held.got, b"hello");
+    assert!(held.fin);
+    assert!(
+        held.write_error.contains("H3_REQUEST_CANCELLED"),
+        "{}",
+        held.write_error
+    );
+}
+
+#[tokio::test]
 async fn a_closed_quic_tunnel_sends_its_writes_then_stops_the_stream() {
     let (hold, mut held) = tokio::sync::mpsc::unbounded_channel();
     let (_seen, port, _endpoint) = h3_server(Some(hold)).await;
