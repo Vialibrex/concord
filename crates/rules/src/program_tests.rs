@@ -1384,3 +1384,70 @@ fn a_url_run_rejects_a_bad_pattern_as_a_lone_rule_does() {
     });
     assert_eq!(errors[0], errors[1]);
 }
+
+#[test]
+fn a_broken_url_run_matches_lone_rule_demands_and_error_order() {
+    let kit = Kit::new();
+    let oversized = r"(?:\w{500}){500}";
+    assert!(concord_config::mitm::check_pattern(oversized).is_ok());
+
+    for bad_at in [0usize, 7] {
+        let mut entries: Vec<String> = (0..8).map(|_| "URL-REGEX,/ok".to_string()).collect();
+        entries[bad_at] = format!("URL-REGEX,{oversized}");
+        let merged = RuleSet::from_entries(Behavior::Classical, &entries, &kit.env(8));
+        let lone = RuleSet::from_entries(Behavior::Classical, &entries, &kit.env(1000));
+        assert_eq!(
+            merged.set.demands().http,
+            lone.set.demands().http,
+            "classical bad_at={bad_at}"
+        );
+        assert!(merged.set.demands().http, "classical bad_at={bad_at}");
+    }
+
+    let env_known = |merge: usize| {
+        let mut env = kit.env(merge);
+        env.known_target = Some(Box::new(|target| target == "A"));
+        env
+    };
+    let bad_rule = format!("URL-REGEX,{oversized},A");
+    let cases: [&[&str]; 2] = [
+        &[bad_rule.as_str(), "URL-REGEX,/ok,UNKNOWN"],
+        &[bad_rule.as_str(), "DOMAIN,a.test,UNKNOWN"],
+    ];
+    for lines in cases {
+        let rules = defs(lines);
+        let merged = RouteProgram::compile(&rules, &IndexMap::new(), &env_known(8))
+            .err()
+            .unwrap();
+        let lone = RouteProgram::compile(&rules, &IndexMap::new(), &env_known(1))
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&merged, CompileError::Invalid { index: 0, .. }),
+            "{merged}"
+        );
+        assert_eq!(merged.to_string(), lone.to_string());
+    }
+
+    let sub_lines = defs(&[bad_rule.as_str(), "URL-REGEX,/ok,UNKNOWN"]);
+    let sub_rules = IndexMap::from([("inner".to_string(), sub_lines)]);
+    let main_rules = defs(&["SUB-RULE,(DOMAIN,a.test),inner"]);
+    let merged = RouteProgram::compile(&main_rules, &sub_rules, &env_known(8))
+        .err()
+        .unwrap();
+    let lone = RouteProgram::compile(&main_rules, &sub_rules, &env_known(1))
+        .err()
+        .unwrap();
+    assert!(
+        matches!(
+            &merged,
+            CompileError::Invalid {
+                section,
+                index: 0,
+                ..
+            } if section == "sub-rules[inner]"
+        ),
+        "{merged}"
+    );
+    assert_eq!(merged.to_string(), lone.to_string());
+}

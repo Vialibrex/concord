@@ -19,7 +19,7 @@ use crate::cron::CronSchedule;
 use crate::heads::HeadConditions;
 use crate::limits::Limits;
 use crate::pattern::Pattern;
-use crate::rules::read_resource;
+use crate::rules::{ResourceSeen, read_resource};
 use crate::view::{LineView, ScriptView, ScriptViewKind};
 
 pub(crate) const DEFAULT_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -198,12 +198,20 @@ impl ScriptHost {
         &self,
         resources: &Path,
         name: &str,
+        seen: &mut Option<Result<ResourceSeen, LineError>>,
     ) -> Result<(Arc<dyn ScriptProgram>, [u8; 32]), LineError> {
         let runtime = lock(&self.runtime)
             .clone()
             .ok_or_else(|| LineError::unsupported("this build runs no scripts"))?;
-        let source = read_resource(resources, "script-path", name)?;
+        let source = match read_resource(resources, "script-path", name) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                *seen = Some(Err(err.clone()));
+                return Err(err);
+            }
+        };
         let key: [u8; 32] = Sha256::digest(&source).into();
+        *seen = Some(Ok(ResourceSeen::Content(key)));
         let cached = lock(&self.programs).get(&key).cloned();
         if let Some(program) = cached {
             return Ok((program, key));
@@ -321,6 +329,7 @@ pub(crate) fn compile_script(
     def: &ScriptDef,
     resources: &Path,
     host: &ScriptHost,
+    seen: &mut Option<Result<ResourceSeen, LineError>>,
 ) -> Result<Script, LineError> {
     let cron = match def.kind {
         ScriptKind::Cron => Some(CronSchedule::parse(&def.cronexp)?),
@@ -336,7 +345,7 @@ pub(crate) fn compile_script(
     });
     let pattern = def.pattern.as_deref().map(Pattern::new).transpose()?;
     let conditions = HeadConditions::compile(&def.conditions)?;
-    let (program, key) = host.compile(resources, &def.path)?;
+    let (program, key) = host.compile(resources, &def.path, seen)?;
     Ok(Script {
         name: def.name.clone(),
         path: def.path.clone(),
@@ -364,7 +373,12 @@ pub(crate) fn parse_script(
     resources: &Path,
     host: &ScriptHost,
 ) -> Result<Script, LineError> {
-    compile_script(&concord_config::mitm::parse_script(line)?, resources, host)
+    compile_script(
+        &concord_config::mitm::parse_script(line)?,
+        resources,
+        host,
+        &mut None,
+    )
 }
 
 #[cfg(test)]
@@ -456,12 +470,12 @@ mod tests {
         let (_home, resources, host) = setup();
         concord_test_support::poison(&host.runtime);
         concord_test_support::poison(&host.programs);
-        let (first, _) = host.compile(&resources, "a.js").unwrap();
-        let (again, _) = host.compile(&resources, "a.js").unwrap();
+        let (first, _) = host.compile(&resources, "a.js", &mut None).unwrap();
+        let (again, _) = host.compile(&resources, "a.js", &mut None).unwrap();
         assert!(Arc::ptr_eq(&first, &again), "the program was cached");
         host.set_runtime(None);
         assert_eq!(
-            host.compile(&resources, "a.js").err(),
+            host.compile(&resources, "a.js", &mut None).err(),
             Some(LineError::unsupported("this build runs no scripts"))
         );
     }

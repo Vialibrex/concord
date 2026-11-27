@@ -1019,7 +1019,6 @@ async fn the_certificate_cache_follows_the_limit() {
     }
     assert_eq!(ca.cached_leaves(), 2);
 
-    // Custom cache size stays enforced across CA reload and renew without hot-path set_cache_size.
     rig.mitm.authority().reload().unwrap();
     let reloaded = rig.mitm.authority().current().unwrap();
     for host in ["d.test", "e.test", "f.test"] {
@@ -1039,7 +1038,6 @@ async fn the_certificate_cache_follows_the_limit() {
 async fn sni_recheck_declines_tls_on_port_80_and_mismatched_ip_443() {
     let server = start_server(false, &[], api_or_echo()).await;
     let rig = rig_for(&server, None);
-    // Empty hostname list, but plain HTTP rule admits TCP:80 to peek.
     rig.config(json!({
         "enable": true,
         "url-rewrite": [r"^http://example\.test/ad _ reject"],
@@ -1048,7 +1046,6 @@ async fn sni_recheck_declines_tls_on_port_80_and_mismatched_ip_443() {
         rig.mitm.interceptor(),
         flow_of(InboundKind::Tun, Address::new("example.test", 80)),
     );
-    // Minimal valid TLS ClientHello carrying SNI "example.test".
     let sni_hello = build_client_hello("example.test");
     near.write_all(&sni_hello).await.unwrap();
     let Offer::Declined { head, .. } = offer.await.unwrap() else {
@@ -1056,7 +1053,6 @@ async fn sni_recheck_declines_tls_on_port_80_and_mismatched_ip_443() {
     };
     assert_eq!(head, sni_hello);
 
-    // Pure IP:443 admitted by includes_any must still decline when SNI does not match hostlist.
     rig.config(json!({
         "enable": true,
         "hostname": ["allowed.a.test"],
@@ -1077,24 +1073,24 @@ fn build_client_hello(sni: &str) -> Vec<u8> {
     let name = sni.as_bytes();
     let mut sni_ext = Vec::new();
     let list_len = (1 + 2 + name.len()) as u16;
-    sni_ext.extend_from_slice(&0u16.to_be_bytes()); // server_name extension
+    sni_ext.extend_from_slice(&0u16.to_be_bytes());
     sni_ext.extend_from_slice(&(2 + list_len).to_be_bytes());
     sni_ext.extend_from_slice(&list_len.to_be_bytes());
-    sni_ext.push(0); // host_name
+    sni_ext.push(0);
     sni_ext.extend_from_slice(&(name.len() as u16).to_be_bytes());
     sni_ext.extend_from_slice(name);
 
     let mut body = Vec::new();
-    body.extend_from_slice(&[0x03, 0x03]); // TLS 1.2
-    body.extend_from_slice(&[0u8; 32]); // random
-    body.push(0); // session id len
-    body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]); // cipher suites
-    body.extend_from_slice(&[0x01, 0x00]); // compression methods
+    body.extend_from_slice(&[0x03, 0x03]);
+    body.extend_from_slice(&[0u8; 32]);
+    body.push(0);
+    body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01]);
+    body.extend_from_slice(&[0x01, 0x00]);
     body.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
     body.extend_from_slice(&sni_ext);
 
     let mut hs = Vec::new();
-    hs.push(0x01); // ClientHello
+    hs.push(0x01);
     let len = body.len() as u32;
     hs.extend_from_slice(&[(len >> 16) as u8, (len >> 8) as u8, len as u8]);
     hs.extend_from_slice(&body);

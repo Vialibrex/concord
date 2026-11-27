@@ -225,7 +225,10 @@ struct OpenRun<D> {
 }
 
 impl<D: Borrow<RuleDef>> OpenRun<D> {
-    fn new(class: Class, start: usize) -> Self {
+    fn new(class: Class, start: usize, cx: &mut Cx<'_>) -> Self {
+        if class == Class::Url {
+            cx.demands.http = true;
+        }
         OpenRun {
             class,
             start,
@@ -240,7 +243,7 @@ impl<D: Borrow<RuleDef>> OpenRun<D> {
     fn add(&mut self, def: D, merge_min: usize, section: &str) -> Result<(), CompileError> {
         let index = self.start + self.count;
         self.count += 1;
-        if self.count > merge_min {
+        if self.class == Class::Url || self.count > merge_min {
             return self.add_item(def.borrow(), index, section);
         }
         self.held.push(def);
@@ -321,6 +324,21 @@ impl ListBuilder {
         section: &str,
     ) -> Result<(), CompileError> {
         let (start, end) = (run.start as u32, (run.start + run.count) as u32);
+        if run.class == Class::Url {
+            if run.count < merge_min {
+                for (idx, regex) in run.urls {
+                    self.nodes.push(Node::Url(Box::new(regex)));
+                    self.ops.push(Op::Leaf {
+                        idx,
+                        node: self.nodes.len() as u32 - 1,
+                    });
+                }
+            } else {
+                self.url_runs.push(UrlRun::build(start, end, run.urls));
+                self.ops.push(Op::Url(self.url_runs.len() as u32 - 1));
+            }
+            return Ok(());
+        }
         if run.count < merge_min {
             for (i, def) in run.held.iter().enumerate() {
                 self.leaf(cx, def.borrow(), run.start + i, section)?;
@@ -343,12 +361,7 @@ impl ListBuilder {
                     .push(IpRun::build(start, end, src, resolves, &run.nets));
                 self.ops.push(Op::Ip(self.ip_runs.len() as u32 - 1));
             }
-            Class::Url => {
-                cx.demands.http = true;
-                self.url_runs.push(UrlRun::build(start, end, run.urls));
-                self.ops.push(Op::Url(self.url_runs.len() as u32 - 1));
-            }
-            Class::Other => {}
+            Class::Url | Class::Other => {}
         }
         Ok(())
     }
@@ -386,7 +399,7 @@ fn compile_list<D: Borrow<RuleDef>>(
         if class == Class::Other {
             list.leaf(cx, rule, index, section)?;
         } else {
-            open.get_or_insert_with(|| OpenRun::new(class, index))
+            open.get_or_insert_with(|| OpenRun::new(class, index, cx))
                 .add(def, merge_min, section)?;
         }
     }

@@ -57,14 +57,38 @@ struct LineIssue {
     unread: bool,
 }
 
-/// What the files a section names in the resources directory held, in the order its lines
-/// name them, taken before they are read for compiling so that a file changing meanwhile
-/// makes the next apply compile again; and the script runtime that compiles its scripts.
+/// What the files a section names in the resources directory held as compiling read them,
+/// in the order its lines name them, and the script runtime that compiled its scripts.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Resources {
     dir: PathBuf,
     runtime: u64,
     files: Vec<Result<ResourceSeen, LineError>>,
+}
+
+/// The spelling, resources and errors of the last apply that kept an engine.
+pub(crate) struct Applied {
+    def: MitmDef,
+    resources: Resources,
+    errors: Vec<LineIssue>,
+}
+
+impl Applied {
+    pub(crate) fn compiles_from(&self, def: &MitmDef, env: &ParseEnv) -> bool {
+        self.def.written_the_same(def) && self.resources.still_matches(def, env)
+    }
+
+    pub(crate) fn errors(&self, unread: bool) -> Vec<String> {
+        filter_errors(&self.errors, unread)
+    }
+}
+
+fn filter_errors(issues: &[LineIssue], unread: bool) -> Vec<String> {
+    issues
+        .iter()
+        .filter(|issue| unread || !issue.unread)
+        .map(|issue| issue.text.clone())
+        .collect()
 }
 
 /// The files of `lines`, each with whether it is base64, which the compile reads whole.
@@ -79,38 +103,46 @@ fn local_files(lines: &[MitmLine<Read<MapLocalDef>>]) -> impl Iterator<Item = (&
 }
 
 impl Resources {
-    pub(crate) fn read(def: &MitmDef, env: &ParseEnv) -> Resources {
-        let runtime = env.scripts.generation();
-        let jq = def.body_rewrite.iter().filter_map(|line| match &line.read {
-            Ok(BodyRewriteDef {
+    pub(crate) fn still_matches(&self, def: &MitmDef, env: &ParseEnv) -> bool {
+        if self.dir != env.resources || self.runtime != env.scripts.generation() {
+            return false;
+        }
+        let mut recorded = self.files.iter();
+        let mut next = |live: &dyn Fn() -> Result<ResourceSeen, LineError>| -> bool {
+            let Some(seen) = recorded.next() else {
+                return false;
+            };
+            matches!(seen, Ok(ResourceSeen::NotRead)) || seen == &live()
+        };
+        for line in &def.body_rewrite {
+            if let Ok(BodyRewriteDef {
                 action: BodyActionDef::JqFile(name),
                 ..
-            }) => Some(name.as_str()),
-            _ => None,
-        });
-        let scripts = def.script.iter().filter_map(|line| match &line.read {
-            Ok(script) => Some(script.path.as_str()),
-            Err(_) => None,
-        });
-        let locals = local_files(&def.map_local)
-            .chain(local_files(&def.request_body_mock))
-            .map(|(name, base64)| {
-                if base64 {
-                    resource_digest(&env.resources, name)
-                } else {
-                    local_file_seen(&env.resources, name)
-                }
-            });
-        let files = jq
-            .chain(scripts)
-            .map(|name| resource_digest(&env.resources, name))
-            .chain(locals)
-            .collect();
-        Resources {
-            dir: env.resources.clone(),
-            runtime,
-            files,
+            }) = &line.read
+                && !next(&|| resource_digest(&env.resources, "jq file", name))
+            {
+                return false;
+            }
         }
+        for (name, base64) in local_files(&def.map_local).chain(local_files(&def.request_body_mock))
+        {
+            let matched = if base64 {
+                next(&|| resource_digest(&env.resources, "data", name))
+            } else {
+                next(&|| local_file_seen(&env.resources, name))
+            };
+            if !matched {
+                return false;
+            }
+        }
+        for line in &def.script {
+            if let Ok(script) = &line.read
+                && !next(&|| resource_digest(&env.resources, "script-path", &script.path))
+            {
+                return false;
+            }
+        }
+        recorded.next().is_none()
     }
 }
 
@@ -195,7 +227,8 @@ impl Config {
     }
 
     /// Puts each line of `def` in force, list by list, and hands it with how it read to `visit`.
-    fn add_lines(&mut self, def: &MitmDef, env: &ParseEnv, visit: &mut Visit<'_>) {
+    fn add_lines(&mut self, def: &MitmDef, env: &ParseEnv, visit: &mut Visit<'_>) -> Resources {
+        let runtime = env.scripts.generation();
         each("hostname", &def.hostname, visit, |read, _| {
             read_hosts(&mut self.hosts, read)
         });
@@ -225,7 +258,22 @@ impl Config {
                 items(read, view)
             },
         );
+        let files = self.add_rules(def, env, visit);
+        Resources {
+            dir: env.resources.clone(),
+            runtime,
+            files,
+        }
+    }
+
+    fn add_rules(
+        &mut self,
+        def: &MitmDef,
+        env: &ParseEnv,
+        visit: &mut Visit<'_>,
+    ) -> Vec<Result<ResourceSeen, LineError>> {
         let rules = &mut self.rules;
+        let mut files = Vec::new();
         each("url-rewrite", &def.url_rewrite, visit, |read, module| {
             compiled(read, compile_url_rewrite, |mut rule| {
                 rule.module = module.cloned();
@@ -248,46 +296,71 @@ impl Config {
             },
         );
         each("body-rewrite", &def.body_rewrite, visit, |read, module| {
-            let body = |def: &_| compile_body_rewrite(def, &env.resources);
-            compiled(read, body, |mut rule| {
-                rule.module = module.cloned();
-                let view = rule.view();
-                rules.body_rewrites.push(Arc::new(rule));
-                view
-            })
+            let mut seen = None;
+            let out = compiled(
+                read,
+                |def| compile_body_rewrite(def, &env.resources, &mut seen),
+                |mut rule| {
+                    rule.module = module.cloned();
+                    let view = rule.view();
+                    rules.body_rewrites.push(Arc::new(rule));
+                    view
+                },
+            );
+            files.extend(seen);
+            out
         });
-        let local = |def: &_| compile_map_local(def, &env.resources);
         each("map-local", &def.map_local, visit, |read, module| {
-            compiled(read, local, |(mut rule, view)| {
-                rule.module = module.cloned();
-                rules.map_locals.push(rule);
-                view
-            })
+            let mut seen = None;
+            let out = compiled(
+                read,
+                |def| compile_map_local(def, &env.resources, &mut seen),
+                |(mut rule, view)| {
+                    rule.module = module.cloned();
+                    rules.map_locals.push(rule);
+                    view
+                },
+            );
+            files.extend(seen);
+            out
         });
         each(
             "request-body-mock",
             &def.request_body_mock,
             visit,
             |read, module| {
-                compiled(read, local, |(mut rule, view)| {
-                    rule.module = module.cloned();
-                    rules.request_mocks.push(rule);
-                    view
-                })
+                let mut seen = None;
+                let out = compiled(
+                    read,
+                    |def| compile_map_local(def, &env.resources, &mut seen),
+                    |(mut rule, view)| {
+                        rule.module = module.cloned();
+                        rules.request_mocks.push(rule);
+                        view
+                    },
+                );
+                files.extend(seen);
+                out
             },
         );
         each("script", &def.script, visit, |read, module| {
-            compiled(
+            let mut seen = None;
+            let out = compiled(
                 read,
-                |def| compile_script(def, &env.resources, &env.scripts),
+                |def| compile_script(def, &env.resources, &env.scripts, &mut seen),
                 |mut script| {
                     script.module = module.cloned();
                     let view = script.view();
                     rules.scripts.push(Arc::new(script));
                     view
                 },
-            )
+            );
+            if read.is_ok() {
+                files.push(seen.unwrap_or(Ok(ResourceSeen::NotRead)));
+            }
+            out
         });
+        files
     }
 
     /// Lines that cannot be read are skipped and named in the errors.
@@ -298,20 +371,9 @@ impl Config {
     /// The section in force, and the lines that could not be compiled, with those that
     /// could not be read when `unread`.
     pub(crate) fn compile(def: MitmDef, env: &ParseEnv, unread: bool) -> (Config, Vec<String>) {
-        let resources = Resources::read(&def, env);
-        Config::compile_from(def, env, resources, unread)
-    }
-
-    /// As [Config::compile], from `resources` taken of `def` beforehand.
-    pub(crate) fn compile_from(
-        def: MitmDef,
-        env: &ParseEnv,
-        resources: Resources,
-        unread: bool,
-    ) -> (Config, Vec<String>) {
         let mut config = Config::empty(&def);
         let mut errors = Vec::new();
-        config.add_lines(&def, env, &mut |key, _, text, origin, read| {
+        let resources = config.add_lines(&def, env, &mut |key, _, text, origin, read| {
             if let Some(err) = read.error {
                 let line = format!("{key} {}: {err}", quote(text));
                 errors.push(LineIssue {
@@ -337,11 +399,7 @@ impl Config {
 
     /// The lines that could not be compiled, with those that could not be read when `unread`.
     pub(crate) fn errors(&self, unread: bool) -> Vec<String> {
-        self.errors
-            .iter()
-            .filter(|issue| unread || !issue.unread)
-            .map(|issue| issue.text.clone())
-            .collect()
+        filter_errors(&self.errors, unread)
     }
 
     /// Whether `other` puts the same section in force from the same resource contents.
@@ -349,9 +407,17 @@ impl Config {
         self.def.reads_the_same(&other.def) && self.resources == other.resources
     }
 
-    /// Whether compiling `def` from `resources` would give this section and these errors.
-    pub(crate) fn compiles_from(&self, def: &MitmDef, resources: &Resources) -> bool {
-        self.resources == *resources && self.def.written_the_same(def)
+    /// Whether compiling `def` against `env` would give this section and these errors.
+    pub(crate) fn compiles_from(&self, def: &MitmDef, env: &ParseEnv) -> bool {
+        self.def.written_the_same(def) && self.resources.still_matches(def, env)
+    }
+
+    pub(crate) fn into_applied(self) -> Applied {
+        Applied {
+            def: self.def,
+            resources: self.resources,
+            errors: self.errors,
+        }
     }
 
     pub fn script_names(&self) -> Vec<&str> {
@@ -648,5 +714,69 @@ mod tests {
         assert_eq!(normalize_fingerprint("AA:BB:CC:DD"), "AA:BB:CC:DD");
         assert_eq!(normalize_fingerprint("abc"), "AB:C");
         assert_eq!(normalize_fingerprint(""), "");
+    }
+
+    #[test]
+    fn compile_records_resource_digests_from_read_bytes_and_not_read_scripts() {
+        use sha2::{Digest, Sha256};
+
+        let (_home, env) = env();
+        std::fs::create_dir_all(&env.resources).unwrap();
+        let small = b"small-local";
+        let large = vec![b'x'; crate::rules::LOCAL_PIECE + 5];
+        let b64_file = b"aGVsbG8=";
+        let jq_file = b".a";
+        std::fs::write(env.resources.join("small.txt"), small).unwrap();
+        std::fs::write(env.resources.join("large.bin"), &large).unwrap();
+        std::fs::write(env.resources.join("enc.b64"), b64_file).unwrap();
+        std::fs::write(env.resources.join("f.jq"), jq_file).unwrap();
+        std::fs::write(env.resources.join("bad_cron.js"), b"AA").unwrap();
+
+        let raw: RawConfig = serde_json::from_value(serde_json::json!({
+            "enable": true,
+            "body-rewrite": [r"http-request-jq ^https://a\.test/ '.'"],
+            "map-local": [
+                r#"^https://a\.test/s data-type=file data="small.txt""#,
+                r#"^https://a\.test/l data-type=file data="large.bin""#,
+                r#"^https://a\.test/b data-type=base64 data="aGVsbG8=""#,
+                r#"^https://a\.test/m data-type=file data="missing.txt""#,
+            ],
+            "script": [
+                r#"BadCron = type=cron,cronexp="0 9 * *",script-path=bad_cron.js"#,
+            ],
+        }))
+        .unwrap();
+        let mut def = MitmDef::read(&raw);
+        def.body_rewrite[0].read.as_mut().unwrap().action = BodyActionDef::JqFile("f.jq".into());
+        def.map_local[2].read.as_mut().unwrap().body = MapLocalBody::File { base64: true };
+        def.map_local[2].read.as_mut().unwrap().data = "enc.b64".into();
+
+        let (config, errors) = Config::compile(def.clone(), &env, true);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(config.resources.files.len(), 6);
+        assert_eq!(
+            config.resources.files[0],
+            Ok(ResourceSeen::Content(Sha256::digest(jq_file).into()))
+        );
+        assert_eq!(
+            config.resources.files[1],
+            Ok(ResourceSeen::Content(Sha256::digest(small).into()))
+        );
+        assert_eq!(config.resources.files[2], Ok(ResourceSeen::ReadAtAnswer));
+        assert_eq!(
+            config.resources.files[3],
+            Ok(ResourceSeen::Content(Sha256::digest(b64_file).into()))
+        );
+        assert!(config.resources.files[4].is_err());
+        assert_eq!(config.resources.files[5], Ok(ResourceSeen::NotRead));
+        assert!(config.compiles_from(&def, &env));
+
+        std::fs::write(env.resources.join("bad_cron.js"), b"CHANGED").unwrap();
+        assert!(
+            config.compiles_from(&def, &env),
+            "a script that failed before reading its file stays matched"
+        );
+        std::fs::write(env.resources.join("enc.b64"), b"d29ybGQ=").unwrap();
+        assert!(!config.compiles_from(&def, &env));
     }
 }

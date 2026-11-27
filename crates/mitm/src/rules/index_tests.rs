@@ -339,7 +339,7 @@ fn non_http_scripts_are_excluded_from_http_indexes_and_hooks_take_first() {
     );
     let make = |line: &str| -> std::sync::Arc<Script> {
         let def = concord_config::mitm::parse_script(line).unwrap();
-        std::sync::Arc::new(compile_script(&def, dir.path(), &host).unwrap())
+        std::sync::Arc::new(compile_script(&def, dir.path(), &host, &mut None).unwrap())
     };
     let mut rules = Rules::default();
     rules.scripts.push(make(

@@ -835,12 +835,10 @@ mod tests {
         };
         check(&list);
 
-        // Removing an exact entry invalidates and updates the index accurately.
         let (disabled, _) = HostList::parse(&lines(&["-api.a.test:443", "exact.a.test:0"]));
         list.remove(&disabled);
         check(&list);
 
-        // Extending appends after existing entries and updates the index.
         let (more, _) = HostList::parse(&lines(&["-m1*.a.test:8443", "new.a.test:53"]));
         list.extend(more);
         check(&list);

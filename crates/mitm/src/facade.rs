@@ -14,7 +14,7 @@ use concord_config::mitm::MitmDef;
 use concord_config::mitm::module::ModuleInput;
 
 use crate::config::{
-    Config, ParseEnv, RawConfig, Resources, Validation, check, normalize_fingerprint,
+    Applied, Config, ParseEnv, RawConfig, Validation, check, normalize_fingerprint,
 };
 use crate::cron::LocalClock;
 use crate::engine::{MitmEngine, Shared};
@@ -38,6 +38,7 @@ pub struct MitmEnv {
 #[derive(Default)]
 struct State {
     running: bool,
+    last: Option<Applied>,
 }
 
 pub struct Mitm {
@@ -180,9 +181,10 @@ impl Mitm {
     }
 
     fn apply_def(&self, def: Option<MitmDef>, unread: bool) -> Vec<String> {
-        let state = lock(&self.state);
+        let mut state = lock(&self.state);
         let previous = self.current.load_full();
         let Some(def) = def.filter(|def| def.enable) else {
+            state.last = None;
             self.current.store(None);
             self.shared.captures.clear();
             if let Some(previous) = previous {
@@ -192,27 +194,35 @@ impl Mitm {
             return Vec::new();
         };
         let env = self.parse_env();
-        let resources = Resources::read(&def, &env);
         let kept = previous
             .as_ref()
             .filter(|previous| previous.trusts(&self.shared.trust.load()));
-        if let Some(previous) = kept
-            && previous.config().compiles_from(&def, &resources)
-        {
-            if state.running {
-                previous.notify(EVENT_PROFILE_RELOADED);
+        if let Some(previous) = kept {
+            let hit = match &state.last {
+                Some(last) if last.compiles_from(&def, &env) => Some(last.errors(unread)),
+                None if previous.config().compiles_from(&def, &env) => {
+                    Some(previous.config().errors(unread))
+                }
+                _ => None,
+            };
+            if let Some(errors) = hit {
+                if state.running {
+                    previous.notify(EVENT_PROFILE_RELOADED);
+                }
+                return errors;
             }
-            return previous.config().errors(unread);
         }
-        let (config, errors) = Config::compile_from(def, &env, resources, unread);
+        let (config, errors) = Config::compile(def, &env, unread);
         if let Some(previous) = kept
             && previous.config().same(&config)
         {
+            state.last = Some(config.into_applied());
             if state.running {
                 previous.notify(EVENT_PROFILE_RELOADED);
             }
             return errors;
         }
+        state.last = None;
         let engine = Arc::new(MitmEngine::new(
             config,
             self.shared.clone(),

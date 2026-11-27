@@ -235,6 +235,7 @@ impl HeaderRewrite {
 pub(crate) fn compile_body_rewrite(
     def: &BodyRewriteDef,
     resources: &Path,
+    seen: &mut Option<Result<ResourceSeen, LineError>>,
 ) -> Result<BodyRewrite, LineError> {
     let action = match &def.action {
         BodyActionDef::Replace(pairs) => BodyAction::Replace(
@@ -250,7 +251,16 @@ pub(crate) fn compile_body_rewrite(
         ),
         BodyActionDef::Jq(expression) => BodyAction::Jq(Jq::compile(expression)?),
         BodyActionDef::JqFile(name) => {
-            let code = read_resource(resources, "jq file", name)?;
+            let code = match read_resource_seen(resources, "jq file", name) {
+                Ok((bytes, digest)) => {
+                    *seen = Some(Ok(digest));
+                    bytes
+                }
+                Err(err) => {
+                    *seen = Some(Err(err.clone()));
+                    return Err(err);
+                }
+            };
             let code = String::from_utf8(code).map_err(|_| {
                 LineError::resource(format!("jq file {} is not UTF-8", quote(name)))
             })?;
@@ -320,7 +330,17 @@ pub(crate) fn read_resource(dir: &Path, param: &str, name: &str) -> Result<Vec<u
         .map_err(|_| LineError::resource(format!("{param} {} cannot be read", quote(name))))
 }
 
-/// What compiling a section would take from one of its files.
+pub(crate) fn read_resource_seen(
+    dir: &Path,
+    param: &str,
+    name: &str,
+) -> Result<(Vec<u8>, ResourceSeen), LineError> {
+    let bytes = read_resource(dir, param, name)?;
+    let digest = ResourceSeen::Content(Sha256::digest(&bytes).into());
+    Ok((bytes, digest))
+}
+
+/// What compiling a section took from one of its files.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ResourceSeen {
     /// The SHA-256 of a file the compile reads whole.
@@ -328,14 +348,20 @@ pub(crate) enum ResourceSeen {
     /// A `map-local` file larger than [LOCAL_PIECE]: each answer reads it from disk, so its
     /// content is not part of what the compile made.
     ReadAtAnswer,
+    /// The line failed before reading its file, so the file's content did not enter the compile.
+    NotRead,
 }
 
 /// What [read_resource] finds of `name` now, hashed piece by piece, or why it cannot be read.
-pub(crate) fn resource_digest(dir: &Path, name: &str) -> Result<ResourceSeen, LineError> {
-    let (path, _) = resource_file(dir, "file", name)?;
+pub(crate) fn resource_digest(
+    dir: &Path,
+    param: &str,
+    name: &str,
+) -> Result<ResourceSeen, LineError> {
+    let (path, _) = resource_file(dir, param, name)?;
     digest_file(&path)
         .map(ResourceSeen::Content)
-        .map_err(|_| LineError::resource(format!("file {} cannot be read", quote(name))))
+        .map_err(|_| LineError::resource(format!("{param} {} cannot be read", quote(name))))
 }
 
 /// As [resource_digest] for a raw `map-local` file, whose content counts only while
@@ -407,16 +433,16 @@ fn resource_file(dir: &Path, param: &str, name: &str) -> Result<(PathBuf, u64), 
     Ok((path, info.len()))
 }
 
-fn local_file(dir: &Path, name: &str) -> Result<LocalBody, LineError> {
+fn local_file(dir: &Path, name: &str) -> Result<(LocalBody, ResourceSeen), LineError> {
     let (path, len) = resource_file(dir, "data", name)?;
     let unreadable = |_| LineError::resource(format!("data {} cannot be read", quote(name)));
     if len <= LOCAL_PIECE as u64 {
-        return std::fs::read(&path)
-            .map(|bytes| LocalBody::Bytes(bytes.into()))
-            .map_err(unreadable);
+        let bytes = std::fs::read(&path).map_err(unreadable)?;
+        let seen = ResourceSeen::Content(Sha256::digest(&bytes).into());
+        return Ok((LocalBody::Bytes(bytes.into()), seen));
     }
     std::fs::File::open(&path).map_err(unreadable)?;
-    Ok(LocalBody::File(path))
+    Ok((LocalBody::File(path), ResourceSeen::ReadAtAnswer))
 }
 
 /// A `map-local` or `request-body-mock` line's rule, its body read from the resources
@@ -424,14 +450,33 @@ fn local_file(dir: &Path, name: &str) -> Result<LocalBody, LineError> {
 pub(crate) fn compile_map_local(
     def: &MapLocalDef,
     resources: &Path,
+    seen: &mut Option<Result<ResourceSeen, LineError>>,
 ) -> Result<(MapLocal, LineView), LineError> {
     let body = match &def.body {
         MapLocalBody::Text => LocalBody::Bytes(Bytes::copy_from_slice(def.data.as_bytes())),
         MapLocalBody::TinyGif => LocalBody::Bytes(tiny_gif().into()),
         MapLocalBody::Base64(bytes) => LocalBody::Bytes(bytes.clone().into()),
-        MapLocalBody::File { base64: false } => local_file(resources, &def.data)?,
+        MapLocalBody::File { base64: false } => match local_file(resources, &def.data) {
+            Ok((body, digest)) => {
+                *seen = Some(Ok(digest));
+                body
+            }
+            Err(err) => {
+                *seen = Some(Err(err.clone()));
+                return Err(err);
+            }
+        },
         MapLocalBody::File { base64: true } => {
-            let text = read_resource(resources, "data", &def.data)?;
+            let text = match read_resource_seen(resources, "data", &def.data) {
+                Ok((bytes, digest)) => {
+                    *seen = Some(Ok(digest));
+                    bytes
+                }
+                Err(err) => {
+                    *seen = Some(Err(err.clone()));
+                    return Err(err);
+                }
+            };
             let text = String::from_utf8_lossy(&text);
             LocalBody::Bytes(
                 decode_base64(text.trim())
@@ -475,6 +520,7 @@ pub(crate) fn parse_body_rewrite(line: &str) -> Result<BodyRewrite, LineError> {
     compile_body_rewrite(
         &concord_config::mitm::parse_body_rewrite(line)?,
         Path::new(""),
+        &mut None,
     )
 }
 
@@ -487,6 +533,7 @@ pub(crate) fn parse_map_local(
     compile_map_local(
         &concord_config::mitm::parse_map_local(line, request)?,
         resources,
+        &mut None,
     )
 }
 
@@ -1151,7 +1198,7 @@ mod tests {
         std::fs::write(dir.path().join("small"), b"small").unwrap();
         let whole: [u8; 32] = Sha256::digest(&content).into();
         assert_eq!(
-            resource_digest(dir.path(), "large"),
+            resource_digest(dir.path(), "file", "large"),
             Ok(ResourceSeen::Content(whole))
         );
         assert_eq!(

@@ -339,3 +339,165 @@ async fn a_script_larger_than_a_piece_rewritten_in_place_runs_its_new_content() 
     assert!(rig.config(scripted("s.js")).is_empty());
     assert_eq!(added(&rig).await, "b");
 }
+
+type CompileHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+struct CountingRuntime {
+    inner: FakeRuntime,
+    compiles: Arc<std::sync::atomic::AtomicUsize>,
+    on_compile: Option<CompileHook>,
+}
+
+impl ScriptRuntime for CountingRuntime {
+    fn compile(
+        &self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<Arc<dyn ScriptProgram>, crate::script::CompileError> {
+        self.compiles
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(hook) = &self.on_compile {
+            hook(name);
+        }
+        self.inner.compile(name, source)
+    }
+}
+
+#[tokio::test]
+async fn the_first_shortcut_hits_again_after_the_second_keeps_the_engine() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let server = start_server(true, &["http/1.1"], echo()).await;
+    let compiles = Arc::new(AtomicUsize::new(0));
+    let runtime = CountingRuntime {
+        inner: FakeRuntime::default(),
+        compiles: compiles.clone(),
+        on_compile: None,
+    };
+    let rig = rig_for(&server, Some(Arc::new(runtime) as Arc<dyn ScriptRuntime>));
+    std::fs::create_dir_all(rig.resources()).unwrap();
+    std::fs::write(rig.resources().join("s.js"), "ZZ").unwrap();
+
+    let raw_for = |script_line: &str| -> RawConfig {
+        serde_json::from_value(json!({
+            "enable": true,
+            "hostname": ["example.test"],
+            "url-rewrite": ["^https://a\\.test/( _ reject"],
+            "script": [script_line],
+        }))
+        .unwrap()
+    };
+    let def_for = |script_line: &str, origin: Option<&str>| {
+        let mut def = MitmDef::read(&raw_for(script_line));
+        if let Some(origin) = origin {
+            def.mark_origin(&Arc::from(origin));
+        }
+        Some(def)
+    };
+    let tasks = || concord_common::Tasks::current(Default::default(), Default::default());
+    let compact = r"add = type=http-request,pattern=^https://example\.test/,script-path=s.js";
+    let spaced = r"add = type=http-request,  pattern=^https://example\.test/,  script-path=s.js";
+
+    let first = rig
+        .mitm
+        .apply_section(def_for(compact, Some("One")), tasks());
+    assert_eq!(compiles.load(Ordering::SeqCst), 1);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].starts_with("module One:"), "{first:?}");
+    let engine = rig.mitm.engine().unwrap();
+
+    assert_eq!(
+        rig.mitm
+            .apply_section(def_for(compact, Some("One")), tasks()),
+        first
+    );
+    assert_eq!(compiles.load(Ordering::SeqCst), 1);
+
+    let renamed = rig
+        .mitm
+        .apply_section(def_for(compact, Some("Two")), tasks());
+    assert_eq!(compiles.load(Ordering::SeqCst), 2);
+    assert!(Arc::ptr_eq(&engine, &rig.mitm.engine().unwrap()));
+    assert_eq!(renamed.len(), 1, "{renamed:?}");
+    assert!(renamed[0].starts_with("module Two:"), "{renamed:?}");
+
+    assert_eq!(
+        rig.mitm
+            .apply_section(def_for(compact, Some("Two")), tasks()),
+        renamed
+    );
+    assert_eq!(
+        compiles.load(Ordering::SeqCst),
+        2,
+        "first shortcut must hit on repeated apply after second shortcut kept the engine"
+    );
+    assert!(Arc::ptr_eq(&engine, &rig.mitm.engine().unwrap()));
+
+    let respaced = rig.mitm.apply(Some(raw_for(spaced)));
+    assert_eq!(compiles.load(Ordering::SeqCst), 3);
+    assert!(Arc::ptr_eq(&engine, &rig.mitm.engine().unwrap()));
+    assert_eq!(respaced.len(), 2, "{respaced:?}");
+    assert!(respaced[1].contains("  pattern="), "{respaced:?}");
+
+    assert_eq!(rig.mitm.apply(Some(raw_for(spaced))), respaced);
+    assert_eq!(compiles.load(Ordering::SeqCst), 3);
+    let section_only = rig.mitm.apply_section(def_for(spaced, None), tasks());
+    assert_eq!(compiles.load(Ordering::SeqCst), 3);
+    assert_eq!(section_only, vec![respaced[1].clone()]);
+}
+
+#[tokio::test]
+async fn a_file_that_changes_during_compile_and_changes_back_compiles_again() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    let server = start_server(true, &["http/1.1"], echo()).await;
+    let mut inner = FakeRuntime::default();
+    inner.0.insert("HOOK".to_string(), adds("hook"));
+    inner.0.insert("AA".to_string(), adds("a"));
+    inner.0.insert("BB".to_string(), adds("b"));
+    let mutated = Arc::new(AtomicBool::new(false));
+    let target_path: Arc<std::sync::Mutex<Option<std::path::PathBuf>>> = Arc::default();
+    let hook = {
+        let mutated = mutated.clone();
+        let target_path = target_path.clone();
+        Arc::new(move |name: &str| {
+            if name == "hook.js" && !mutated.swap(true, Ordering::SeqCst) {
+                let path = lock(&target_path).clone().unwrap();
+                replace_in_place(&path, "BB");
+            }
+        })
+    };
+    let runtime = CountingRuntime {
+        inner,
+        compiles: Arc::new(AtomicUsize::new(0)),
+        on_compile: Some(hook),
+    };
+    let rig = rig_for(&server, Some(Arc::new(runtime) as Arc<dyn ScriptRuntime>));
+    std::fs::create_dir_all(rig.resources()).unwrap();
+    let hook_file = rig.resources().join("hook.js");
+    let script_file = rig.resources().join("s.js");
+    std::fs::write(&hook_file, "HOOK").unwrap();
+    std::fs::write(&script_file, "AA").unwrap();
+    *lock(&target_path) = Some(script_file.clone());
+
+    let section = json!({
+        "enable": true,
+        "hostname": ["example.test"],
+        "skip-server-cert-verify": true,
+        "script": [
+            r"hook = type=http-request,pattern=^https://never\.test/,script-path=hook.js",
+            r"add = type=http-request,pattern=^https://example\.test/,script-path=s.js",
+        ],
+    });
+    assert!(rig.config(section.clone()).is_empty());
+    assert!(mutated.load(Ordering::SeqCst));
+    assert_eq!(added(&rig).await, "b");
+
+    replace_in_place(&script_file, "AA");
+    assert!(rig.config(section).is_empty());
+    assert_eq!(
+        added(&rig).await,
+        "a",
+        "returning s.js to AA must recompile because the engine compiled BB"
+    );
+}
