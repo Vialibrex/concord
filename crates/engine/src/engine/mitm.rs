@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -91,6 +91,7 @@ impl Modules {
     /// the section again when a file in force changed and the apply is still the latest.
     async fn fetch(&self, mitm: &Mitm, applied: &Arc<Applied>, which: &Refetch) {
         let mut changed = false;
+        let mut batch: HashMap<String, Result<bool, FetchFailure>> = HashMap::new();
         for module in applied.modules.iter().filter(|module| module.in_force()) {
             let name = module.spec.name.as_str();
             if matches!(which, Refetch::Module(only) if only != name) {
@@ -112,7 +113,15 @@ impl Modules {
             let mut updated = false;
             let mut failed = None;
             for url in urls {
-                match self.resources.fetch(url).await {
+                let outcome = match batch.get(url) {
+                    Some(cached) => cached.clone(),
+                    None => {
+                        let outcome = self.resources.fetch(url).await;
+                        batch.insert(url.to_string(), outcome.clone());
+                        outcome
+                    }
+                };
+                match outcome {
                     Ok(stored) => updated |= stored,
                     Err(failure) => failed = Some(failure),
                 }

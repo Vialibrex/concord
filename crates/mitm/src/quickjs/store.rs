@@ -79,6 +79,12 @@ impl Store {
         }
         let mut inner = lock(&self.inner);
         self.load(&mut inner);
+        if inner.values.get(key).is_some_and(|old| old == value) {
+            if inner.dirty && !inner.scheduled {
+                self.schedule(&mut inner);
+            }
+            return true;
+        }
         let previous = inner.values.get(key).map_or(0, |old| key.len() + old.len());
         let size = inner.size + key.len() + value.len() - previous;
         if size > MAX_SIZE {
@@ -176,5 +182,39 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn writing_same_value_skips_dirty_and_preserves_pending_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(Arc::new(HomeDir::new(dir.path())));
+        assert!(store.write("k", "v1"));
+        store.flush();
+        {
+            let inner = lock(&store.inner);
+            assert!(!inner.dirty && !inner.scheduled);
+        }
+        assert!(store.write("k", "v1"));
+        {
+            let inner = lock(&store.inner);
+            assert!(!inner.dirty && !inner.scheduled);
+        }
+        assert!(store.write("k", "v2"));
+        assert!(lock(&store.inner).dirty);
+        assert!(store.write("k", "v2"));
+        assert!(lock(&store.inner).dirty);
+        {
+            let mut inner = lock(&store.inner);
+            inner.dirty = true;
+            inner.scheduled = false;
+        }
+        assert!(store.write("k", "v2"));
+        {
+            let inner = lock(&store.inner);
+            assert!(inner.dirty && inner.scheduled);
+        }
+        store.flush();
+        let reopened = Store::new(Arc::new(HomeDir::new(dir.path())));
+        assert_eq!(reopened.read("k").as_deref(), Some("v2"));
     }
 }

@@ -1,39 +1,27 @@
 /// The lines of `text` with their numbers from 1, ending at `\r\n`, `\r` or `\n`.
 pub(super) fn numbered(text: &str) -> impl Iterator<Item = (u32, &str)> {
     let has_cr = text.contains('\r');
-    let mut offset = 0usize;
-    let mut done = false;
+    let mut rest = Some(text);
     let mut number = 0u32;
-    let mut next_nl = if has_cr { text.find('\n') } else { None };
     std::iter::from_fn(move || {
-        if done {
-            return None;
-        }
-        let rest = text.get(offset..)?;
+        let current = rest?;
         number = number.saturating_add(1);
-        let end = if has_cr {
-            if next_nl.is_some_and(|nl| nl < offset) {
-                next_nl = rest.find('\n').map(|at| offset + at);
-            }
-            let limit = next_nl.map_or(rest.len(), |nl| nl - offset);
-            match rest.get(..limit).and_then(|head| head.find('\r')) {
-                Some(cr) => cr,
-                None if next_nl.is_some() => limit,
-                None => {
-                    done = true;
-                    return Some((number, rest));
-                }
-            }
+        let found = if has_cr {
+            current.find(['\r', '\n'])
         } else {
-            let Some(nl) = rest.find('\n') else {
-                done = true;
-                return Some((number, rest));
-            };
-            nl
+            current.find('\n')
         };
-        let (line, tail) = rest.split_at(end);
-        let step = if tail.starts_with("\r\n") { 2 } else { 1 };
-        offset += end + step;
+        let Some(end) = found else {
+            rest = None;
+            return Some((number, current));
+        };
+        let (line, tail) = current.split_at(end);
+        let step = if has_cr && tail.starts_with("\r\n") {
+            2
+        } else {
+            1
+        };
+        rest = tail.get(step..);
         Some((number, line))
     })
 }

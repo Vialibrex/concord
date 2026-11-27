@@ -62,7 +62,7 @@ pub use module_view::{IgnoredView, ModuleView, RuleView};
 pub use quickjs::QuickJs;
 pub use script::{
     CompileError, ConsoleSink, EVENT_ENGINE_STARTED, EVENT_NETWORK_CHANGED, EVENT_PROFILE_RELOADED,
-    HeaderList, ScriptDial, ScriptError, ScriptHost, ScriptInvocation, ScriptProgram,
+    HeaderList, ScriptBatch, ScriptDial, ScriptError, ScriptHost, ScriptInvocation, ScriptProgram,
     ScriptRequest, ScriptResponse, ScriptResult, ScriptRuntime,
 };
 pub use task::{ScriptOutput, ScriptRunError};

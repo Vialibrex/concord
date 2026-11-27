@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use concord_common::BoxStream;
 use concord_common::sync::lock;
 use concord_platform::HomeDir;
@@ -83,7 +84,7 @@ fn request_invocation() -> ScriptInvocation {
             ("User-Agent", &["App/1.0"]),
             ("Cookie", &["a=1"]),
         ]),
-        body: Some(br#"{"ad":true}"#.to_vec()),
+        body: Some(Bytes::from_static(br#"{"ad":true}"#)),
     });
     invocation
 }
@@ -103,7 +104,7 @@ fn response_invocation() -> ScriptInvocation {
                 &["a=1; Path=/", "b=2; Expires=Wed, 21 Oct 2026 07:28:00 GMT"],
             ),
         ]),
-        body: Some(br#"{"ad":true,"items":[1,2]}"#.to_vec()),
+        body: Some(Bytes::from_static(br#"{"ad":true,"items":[1,2]}"#)),
         trailers: None,
     });
     invocation
@@ -344,7 +345,7 @@ async fn binary_mode_hands_bytes_both_ways() {
     let rig = rig();
     let mut invocation = request_invocation();
     invocation.binary_body = true;
-    invocation.request.as_mut().unwrap().body = Some(vec![0, 1, 2, 255]);
+    invocation.request.as_mut().unwrap().body = Some(Bytes::from_static(&[0, 1, 2, 255]));
     let result = run(
         &rig,
         "const view = new Uint8Array($request.body); $done({body: new Uint8Array([view[3], view[0], view.length])})",
@@ -625,7 +626,7 @@ async fn ungzip_reads_a_gzip_view() {
     let packed = encoder.finish().unwrap();
     let mut invocation = request_invocation();
     invocation.binary_body = true;
-    invocation.request.as_mut().unwrap().body = Some(packed);
+    invocation.request.as_mut().unwrap().body = Some(Bytes::from(packed));
     let result = run(
         &rig,
         "const out = $utils.ungzip($request.body); $done({body: new TextDecoder().decode(out)})",
@@ -901,4 +902,79 @@ async fn run_phases() {
         "MM-PHASE a whole run of $done({{}}): {:.1} us",
         median(whole)
     );
+}
+
+#[test]
+fn build_input_serializes_request_response_and_optional_fields() {
+    let mut inv = response_invocation();
+    inv.event = Some(ScriptEvent {
+        name: "network-changed".into(),
+    });
+    inv.argument = Some(serde_json::json!({"k": "v"}));
+    inv.rule = Some(serde_json::json!({"host": "example.test"}));
+    inv.domain = Some("example.test".into());
+    inv.response.as_mut().unwrap().trailers = Some(headers(&[("Grpc-Status", &["0"])]));
+
+    let parsed: serde_json::Value = serde_json::from_str(&super::run::build_input(&inv)).unwrap();
+    assert_eq!(parsed["name"], "test");
+    assert_eq!(parsed["kind"], "http-response");
+    assert_eq!(parsed["event"], "network-changed");
+    assert_eq!(parsed["argument"], serde_json::json!({"k": "v"}));
+    assert_eq!(parsed["rule"], serde_json::json!({"host": "example.test"}));
+    assert_eq!(parsed["domain"], "example.test");
+    assert_eq!(parsed["request"]["scheme"], "https");
+    assert_eq!(parsed["request"]["path"], "/a?b=1");
+    assert_eq!(parsed["response"]["status"], 200);
+    assert_eq!(
+        parsed["response"]["body"],
+        serde_json::json!({"s": r#"{"ad":true,"items":[1,2]}"#})
+    );
+    assert_eq!(
+        parsed["response"]["trailers"]["Grpc-Status"],
+        serde_json::json!(["0"])
+    );
+
+    inv.binary_body = true;
+    inv.response.as_mut().unwrap().body = Some(Bytes::from_static(&[1, 2, 3]));
+    let bin: serde_json::Value = serde_json::from_str(&super::run::build_input(&inv)).unwrap();
+    assert_eq!(bin["response"]["body"], serde_json::json!({"b": "AQID"}));
+}
+
+#[tokio::test]
+async fn batch_compile_matches_single_compile_and_isolates_scripts() {
+    let rig = rig();
+    let scripts = [
+        (
+            "a.js",
+            "var g = 1; globalThis.leaked = 42; const X = 1; let Y = 2; $done({});",
+        ),
+        (
+            "b.js",
+            "const X = 99; let Y = 100; $done({body: typeof globalThis.leaked});",
+        ),
+        ("c.js", "function broken( {"),
+        ("d.js", "const DUP = 1; const DUP = 2;"),
+        ("e.js", "const X = 3; $done({body: 'ok'});"),
+        ("f.js", "invalid *** syntax"),
+    ];
+    let mut batch = rig
+        .runtime
+        .batch()
+        .expect("QuickJs provides a compile batch");
+    let mut compiled_b = None;
+    for (name, source) in scripts {
+        let single = rig.runtime.compile(name, source.as_bytes());
+        let batched = batch.compile(name, source.as_bytes());
+        match (single, batched) {
+            (Ok(_), Ok(prog)) => {
+                if name == "b.js" {
+                    compiled_b = Some(prog);
+                }
+            }
+            (Err(a), Err(b)) => assert_eq!(a.0, b.0, "{name}"),
+            (a, b) => panic!("{name}: single={} batch={}", a.is_ok(), b.is_ok()),
+        }
+    }
+    let result = compiled_b.unwrap().run(request_invocation()).await.unwrap();
+    assert_eq!(result.body.as_deref(), Some(&b"undefined"[..]));
 }

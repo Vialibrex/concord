@@ -74,20 +74,37 @@ impl Pattern {
 
     /// `None` when the pattern fails to run, which leaves the text as it was.
     pub fn replace(&self, text: &str, template: &str, all: bool) -> Option<String> {
+        match self.replace_if_matched(text, template, all)? {
+            Some(replaced) => Some(replaced),
+            None => Some(text.to_string()),
+        }
+    }
+
+    /// `None` when the pattern fails to run; `Some(None)` when nothing matched (no allocation);
+    /// `Some(Some(out))` when at least one match was replaced.
+    pub fn replace_if_matched(
+        &self,
+        text: &str,
+        template: &str,
+        all: bool,
+    ) -> Option<Option<String>> {
         let regex = self.regex()?;
-        let mut out = String::with_capacity(text.len());
+        let mut out: Option<String> = None;
         let mut last = 0;
         for caps in regex.captures_iter(text) {
             let caps = caps.ok()?;
             let whole = caps.get(0)?;
-            out.push_str(text.get(last..whole.start())?);
-            Self::expand(regex, &caps, template, text, &mut out);
+            let buf = out.get_or_insert_with(|| String::with_capacity(text.len()));
+            buf.push_str(text.get(last..whole.start())?);
+            Self::expand(regex, &caps, template, text, buf);
             last = whole.end();
             if !all {
                 break;
             }
         }
-        out.push_str(text.get(last..)?);
+        if let Some(buf) = &mut out {
+            buf.push_str(text.get(last..)?);
+        }
         Some(out)
     }
 
@@ -284,5 +301,24 @@ mod tests {
     fn a_runaway_pattern_matches_nothing() {
         let p = Pattern::new(r"(a+)+\1b").unwrap();
         assert!(!p.is_match(&"a".repeat(40)));
+        assert!(
+            p.replace_if_matched(&"a".repeat(40), "x", true)
+                .flatten()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn replace_if_matched_skips_allocating_when_nothing_matches() {
+        let p = Pattern::new(r"ad-\d+").unwrap();
+        assert_eq!(p.replace_if_matched("clean payload", "x", true), Some(None));
+        assert_eq!(
+            p.replace_if_matched("hit ad-1 and ad-2", "ok", false),
+            Some(Some("hit ok and ad-2".to_string()))
+        );
+        assert_eq!(
+            p.replace_if_matched("hit ad-1 and ad-2", "ok", true),
+            Some(Some("hit ok and ok".to_string()))
+        );
     }
 }

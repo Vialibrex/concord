@@ -1,4 +1,5 @@
-use std::path::{Component, Path, PathBuf};
+use std::borrow::Cow;
+use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -10,6 +11,7 @@ use concord_config::mitm::{
 };
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
 use crate::heads::{HeadConditions, Heads};
@@ -21,31 +23,22 @@ use crate::view::{HeaderAction, LineView};
 pub(crate) use concord_config::mitm::UrlAction;
 
 mod index;
+mod resource;
 mod views;
 
-const TINY_GIF_BASE64: &str = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+pub use resource::LocalBody;
+use resource::local_file;
+pub(crate) use resource::{
+    FileKind, FileRecord, FileRef, ResourceSeen, read_resource, read_resource_seen,
+};
+#[cfg(test)]
+pub(crate) use resource::{local_file_seen, resource_digest};
 
 /// The piece a map-local file is answered in. A file no larger than one piece stays in memory:
 /// answering it from disk would take its whole size per answer anyway.
 pub(crate) const LOCAL_PIECE: usize = 32 << 10;
 
-/// A `map-local` or `request-body-mock` body.
-#[derive(Debug, Clone)]
-pub enum LocalBody {
-    Bytes(Bytes),
-    /// A file in the resources directory larger than [LOCAL_PIECE], read at each answer.
-    File(PathBuf),
-}
-
-#[cfg(test)]
-impl LocalBody {
-    pub(crate) fn bytes(&self) -> &[u8] {
-        match self {
-            LocalBody::Bytes(bytes) => bytes,
-            LocalBody::File(_) => &[],
-        }
-    }
-}
+const TINY_GIF_BASE64: &str = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
 #[derive(Debug)]
 pub struct UrlRewrite {
@@ -209,21 +202,30 @@ impl HeaderRewrite {
                 if !header.contains_key(name) {
                     return false;
                 }
-                let values: Vec<HeaderValue> = header
-                    .get_all(name)
-                    .iter()
-                    .map(|value| {
-                        value
-                            .to_str()
-                            .ok()
-                            .and_then(|text| regex.replace(text, replacement, true))
-                            .and_then(|text| HeaderValue::from_str(&text).ok())
-                            .unwrap_or_else(|| value.clone())
-                    })
-                    .collect();
-                header.remove(name);
-                for value in values {
-                    header.append(name.clone(), value);
+                let mut changed = false;
+                let mut values: Vec<HeaderValue> = Vec::new();
+                for (at, value) in header.get_all(name).iter().enumerate() {
+                    let next = value
+                        .to_str()
+                        .ok()
+                        .and_then(|text| regex.replace_if_matched(text, replacement, true))
+                        .flatten()
+                        .and_then(|text| HeaderValue::from_str(&text).ok());
+                    if let Some(next) = next {
+                        if !changed {
+                            values.extend(header.get_all(name).iter().take(at).cloned());
+                            changed = true;
+                        }
+                        values.push(next);
+                    } else if changed {
+                        values.push(value.clone());
+                    }
+                }
+                if changed {
+                    header.remove(name);
+                    for value in values {
+                        header.append(name.clone(), value);
+                    }
                 }
             }
             HeaderEdit::Text(..) => return false,
@@ -235,7 +237,7 @@ impl HeaderRewrite {
 pub(crate) fn compile_body_rewrite(
     def: &BodyRewriteDef,
     resources: &Path,
-    seen: &mut Option<Result<ResourceSeen, LineError>>,
+    files: &mut Vec<FileRecord>,
 ) -> Result<BodyRewrite, LineError> {
     let action = match &def.action {
         BodyActionDef::Replace(pairs) => BodyAction::Replace(
@@ -251,13 +253,20 @@ pub(crate) fn compile_body_rewrite(
         ),
         BodyActionDef::Jq(expression) => BodyAction::Jq(Jq::compile(expression)?),
         BodyActionDef::JqFile(name) => {
+            let file = FileRef::new("jq file", name, FileKind::Whole);
             let code = match read_resource_seen(resources, "jq file", name) {
                 Ok((bytes, digest)) => {
-                    *seen = Some(Ok(digest));
+                    files.push(FileRecord {
+                        file,
+                        seen: Ok(digest),
+                    });
                     bytes
                 }
                 Err(err) => {
-                    *seen = Some(Err(err.clone()));
+                    files.push(FileRecord {
+                        file,
+                        seen: Err(err.clone()),
+                    });
                     return Err(err);
                 }
             };
@@ -277,18 +286,21 @@ pub(crate) fn compile_body_rewrite(
 }
 
 impl BodyRewrite {
-    pub(crate) fn apply(&self, body: String) -> String {
+    pub(crate) fn apply<'a>(&self, body: Cow<'a, str>) -> Cow<'a, str> {
         match &self.action {
             BodyAction::Replace(replacements) => {
                 replacements.iter().fold(body, |body, replacement| {
-                    replacement
+                    match replacement
                         .pattern
-                        .replace(&body, &replacement.with, true)
-                        .unwrap_or(body)
+                        .replace_if_matched(&body, &replacement.with, true)
+                    {
+                        Some(Some(replaced)) => Cow::Owned(replaced),
+                        Some(None) | None => body,
+                    }
                 })
             }
             BodyAction::Jq(jq) => match jq.run(&body) {
-                JqOutcome::Rewritten(rewritten) => rewritten,
+                JqOutcome::Rewritten(rewritten) => Cow::Owned(rewritten),
                 JqOutcome::NotJson => {
                     tracing::debug!("[MITM] jq rewrite skipped: the body is not JSON");
                     body
@@ -303,177 +315,51 @@ impl BodyRewrite {
     }
 }
 
-fn is_local(name: &str) -> bool {
-    if name.is_empty() || name.contains('\\') {
-        return false;
-    }
-    let mut depth: i32 = 0;
-    for component in Path::new(name).components() {
-        match component {
-            Component::Normal(_) => depth += 1,
-            Component::ParentDir => {
-                depth -= 1;
-                if depth < 0 {
-                    return false;
-                }
-            }
-            Component::CurDir => {}
-            _ => return false,
-        }
-    }
-    depth > 0
-}
-
-pub(crate) fn read_resource(dir: &Path, param: &str, name: &str) -> Result<Vec<u8>, LineError> {
-    let (path, _) = resource_file(dir, param, name)?;
-    std::fs::read(&path)
-        .map_err(|_| LineError::resource(format!("{param} {} cannot be read", quote(name))))
-}
-
-pub(crate) fn read_resource_seen(
-    dir: &Path,
-    param: &str,
-    name: &str,
-) -> Result<(Vec<u8>, ResourceSeen), LineError> {
-    let bytes = read_resource(dir, param, name)?;
-    let digest = ResourceSeen::Content(Sha256::digest(&bytes).into());
-    Ok((bytes, digest))
-}
-
-/// What compiling a section took from one of its files.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ResourceSeen {
-    /// The SHA-256 of a file the compile reads whole.
-    Content([u8; 32]),
-    /// A `map-local` file larger than [LOCAL_PIECE]: each answer reads it from disk, so its
-    /// content is not part of what the compile made.
-    ReadAtAnswer,
-    /// The line failed before reading its file, so the file's content did not enter the compile.
-    NotRead,
-}
-
-/// What [read_resource] finds of `name` now, hashed piece by piece, or why it cannot be read.
-pub(crate) fn resource_digest(
-    dir: &Path,
-    param: &str,
-    name: &str,
-) -> Result<ResourceSeen, LineError> {
-    let (path, _) = resource_file(dir, param, name)?;
-    digest_file(&path)
-        .map(ResourceSeen::Content)
-        .map_err(|_| LineError::resource(format!("{param} {} cannot be read", quote(name))))
-}
-
-/// As [resource_digest] for a raw `map-local` file, whose content counts only while
-/// [local_file] keeps it in memory.
-pub(crate) fn local_file_seen(dir: &Path, name: &str) -> Result<ResourceSeen, LineError> {
-    let (path, len) = resource_file(dir, "data", name)?;
-    let unreadable = |_| LineError::resource(format!("data {} cannot be read", quote(name)));
-    if len <= LOCAL_PIECE as u64 {
-        return digest_file(&path)
-            .map(ResourceSeen::Content)
-            .map_err(unreadable);
-    }
-    std::fs::File::open(&path).map_err(unreadable)?;
-    Ok(ResourceSeen::ReadAtAnswer)
-}
-
-fn digest_file(path: &Path) -> std::io::Result<[u8; 32]> {
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut piece = vec![0; LOCAL_PIECE];
-    loop {
-        match std::io::Read::read(&mut file, &mut piece) {
-            Ok(0) => return Ok(hasher.finalize().into()),
-            Ok(read) => hasher.update(piece.get(..read).unwrap_or_default()),
-            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
-    }
-}
-
-/// The path and length of a regular file in the resources directory.
-fn resource_file(dir: &Path, param: &str, name: &str) -> Result<(PathBuf, u64), LineError> {
-    if name.contains("://") {
-        return Err(LineError::resource(format!(
-            "{param} {} has not been downloaded",
-            quote(name)
-        )));
-    }
-    if !is_local(name) {
-        return Err(LineError::resource(format!(
-            "{param} {} is not a file in the resources directory",
-            quote(name)
-        )));
-    }
-    let map_io = |err: std::io::Error| {
-        let reason = match err.kind() {
-            std::io::ErrorKind::NotFound => "no such file or directory".to_string(),
-            std::io::ErrorKind::PermissionDenied => "permission denied".to_string(),
-            _ => "cannot be read".to_string(),
-        };
-        LineError::resource(format!("{param} {}: {reason}", quote(name)))
-    };
-    let canonical_dir = std::fs::canonicalize(dir).map_err(map_io)?;
-    let path = dir.join(name);
-    let canonical_path = std::fs::canonicalize(&path).map_err(map_io)?;
-    if !canonical_path.starts_with(&canonical_dir) {
-        return Err(LineError::resource(format!(
-            "{param} {} is not a file in the resources directory",
-            quote(name)
-        )));
-    }
-    let info = std::fs::metadata(&canonical_path).map_err(map_io)?;
-    if !info.is_file() {
-        return Err(LineError::resource(format!(
-            "{param} {} is not a regular file",
-            quote(name)
-        )));
-    }
-    Ok((path, info.len()))
-}
-
-fn local_file(dir: &Path, name: &str) -> Result<(LocalBody, ResourceSeen), LineError> {
-    let (path, len) = resource_file(dir, "data", name)?;
-    let unreadable = |_| LineError::resource(format!("data {} cannot be read", quote(name)));
-    if len <= LOCAL_PIECE as u64 {
-        let bytes = std::fs::read(&path).map_err(unreadable)?;
-        let seen = ResourceSeen::Content(Sha256::digest(&bytes).into());
-        return Ok((LocalBody::Bytes(bytes.into()), seen));
-    }
-    std::fs::File::open(&path).map_err(unreadable)?;
-    Ok((LocalBody::File(path), ResourceSeen::ReadAtAnswer))
-}
-
 /// A `map-local` or `request-body-mock` line's rule, its body read from the resources
 /// directory when the line names a file.
 pub(crate) fn compile_map_local(
     def: &MapLocalDef,
     resources: &Path,
-    seen: &mut Option<Result<ResourceSeen, LineError>>,
+    files: &mut Vec<FileRecord>,
 ) -> Result<(MapLocal, LineView), LineError> {
     let body = match &def.body {
         MapLocalBody::Text => LocalBody::Bytes(Bytes::copy_from_slice(def.data.as_bytes())),
         MapLocalBody::TinyGif => LocalBody::Bytes(tiny_gif().into()),
         MapLocalBody::Base64(bytes) => LocalBody::Bytes(bytes.clone().into()),
-        MapLocalBody::File { base64: false } => match local_file(resources, &def.data) {
-            Ok((body, digest)) => {
-                *seen = Some(Ok(digest));
-                body
+        MapLocalBody::File { base64: false } => {
+            let file = FileRef::new("data", &def.data, FileKind::LocalRaw);
+            match local_file(resources, &def.data) {
+                Ok((body, digest)) => {
+                    files.push(FileRecord {
+                        file,
+                        seen: Ok(digest),
+                    });
+                    body
+                }
+                Err(err) => {
+                    files.push(FileRecord {
+                        file,
+                        seen: Err(err.clone()),
+                    });
+                    return Err(err);
+                }
             }
-            Err(err) => {
-                *seen = Some(Err(err.clone()));
-                return Err(err);
-            }
-        },
+        }
         MapLocalBody::File { base64: true } => {
+            let file = FileRef::new("data", &def.data, FileKind::Whole);
             let text = match read_resource_seen(resources, "data", &def.data) {
                 Ok((bytes, digest)) => {
-                    *seen = Some(Ok(digest));
+                    files.push(FileRecord {
+                        file,
+                        seen: Ok(digest),
+                    });
                     bytes
                 }
                 Err(err) => {
-                    *seen = Some(Err(err.clone()));
+                    files.push(FileRecord {
+                        file,
+                        seen: Err(err.clone()),
+                    });
                     return Err(err);
                 }
             };
@@ -520,7 +406,7 @@ pub(crate) fn parse_body_rewrite(line: &str) -> Result<BodyRewrite, LineError> {
     compile_body_rewrite(
         &concord_config::mitm::parse_body_rewrite(line)?,
         Path::new(""),
-        &mut None,
+        &mut Vec::new(),
     )
 }
 
@@ -533,7 +419,7 @@ pub(crate) fn parse_map_local(
     compile_map_local(
         &concord_config::mitm::parse_map_local(line, request)?,
         resources,
-        &mut None,
+        &mut Vec::new(),
     )
 }
 
@@ -1067,7 +953,7 @@ mod tests {
         )
         .unwrap();
         assert!(jq.conditions.response.is_some() && jq.conditions.request.is_some());
-        assert_eq!(jq.apply(r#"{"ad":true}"#.to_string()), r#"{"ad":false}"#);
+        assert_eq!(jq.apply(Cow::Borrowed(r#"{"ad":true}"#)), r#"{"ad":false}"#);
         for line in [
             r"http-request ^a response-head x a b",
             r"http-response ^a request-head x",
@@ -1128,7 +1014,7 @@ mod tests {
             r#"http-response ^https://a\.test "\"ad\":true" "\"ad\":false" ^line$ replaced"#,
         )
         .unwrap();
-        let got = rule.apply("{\"ad\":true}\nline\nkeep line".to_string());
+        let got = rule.apply(Cow::Borrowed("{\"ad\":true}\nline\nkeep line"));
         assert_eq!(got, "{\"ad\":false}\nreplaced\nkeep line");
         for line in [
             "http-response ^a only",
@@ -1283,5 +1169,32 @@ mod tests {
                 "{data}"
             );
         }
+    }
+
+    #[test]
+    fn header_replace_regex_keeps_values_on_zero_match_and_still_reports_presence() {
+        let rule = parse_header_rewrite(
+            r"http-response ^https://a\.test/ header-replace-regex X-Tag foo bar",
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        assert!(!rule.apply(&mut headers));
+        headers.append("X-Tag", HeaderValue::from_static("alpha"));
+        headers.append("X-Tag", HeaderValue::from_static("beta"));
+        assert!(rule.apply(&mut headers));
+        let vals: Vec<&str> = headers
+            .get_all("x-tag")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(vals, vec!["alpha", "beta"]);
+        headers.append("X-Tag", HeaderValue::from_static("foo-baz"));
+        assert!(rule.apply(&mut headers));
+        let vals: Vec<&str> = headers
+            .get_all("x-tag")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(vals, vec!["alpha", "beta", "bar-baz"]);
     }
 }

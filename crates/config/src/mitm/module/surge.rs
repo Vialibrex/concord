@@ -1,6 +1,7 @@
 //! The sectioned text Surge and Loon write, a section's lines read the way that section is.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use super::arguments::{read_loon, read_surge, substitute_loon, substitute_surge};
 use super::loon::{self, Out};
@@ -230,6 +231,7 @@ pub(super) struct Reader<'a> {
     pub(super) rules: RuleReader<'a>,
     pub(super) network: NetworkEdits,
     pub(super) skip_verify: Option<u32>,
+    pub(super) resource_index: HashMap<String, usize>,
     pub(super) def: ModuleDef,
 }
 
@@ -244,6 +246,7 @@ impl<'a> Reader<'a> {
             rules: RuleReader::new(inline_sets, input.attachments),
             network: NetworkEdits::default(),
             skip_verify: None,
+            resource_index: HashMap::new(),
             def,
         }
     }
@@ -497,6 +500,7 @@ impl<'a> Reader<'a> {
             number,
             self.input.attachments,
             &mut self.def.resources,
+            &mut self.resource_index,
         ) {
             Ok(file) => Some(file),
             Err(reason) => {

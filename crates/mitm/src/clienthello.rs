@@ -83,37 +83,54 @@ impl Peeker {
     }
 }
 
+fn record_payload_len(header: &[u8]) -> Result<usize, HelloError> {
+    let (kind, major, length) = match header {
+        [kind, major, _, hi, lo] => (*kind, *major, usize::from(*hi) << 8 | usize::from(*lo)),
+        _ => return Err(HelloError::NotClientHello),
+    };
+    if kind != RECORD_TYPE_HANDSHAKE || major != 3 || length == 0 {
+        return Err(HelloError::NotClientHello);
+    }
+    Ok(length)
+}
+
+fn try_parse_message(message: &[u8]) -> Result<Option<ClientHello>, HelloError> {
+    let Some([kind, a, b, c]) = message.get(..HANDSHAKE_HEADER_LEN) else {
+        return Ok(None);
+    };
+    if *kind != HANDSHAKE_TYPE_CLIENT_HELLO {
+        return Err(HelloError::NotClientHello);
+    }
+    let size =
+        HANDSHAKE_HEADER_LEN + (usize::from(*a) << 16 | usize::from(*b) << 8 | usize::from(*c));
+    if message.len() < size {
+        return Ok(None);
+    }
+    let body = message
+        .get(HANDSHAKE_HEADER_LEN..size)
+        .ok_or(HelloError::NotClientHello)?;
+    parse_client_hello(body)
+        .map(Some)
+        .ok_or(HelloError::NotClientHello)
+}
+
 /// Leaves the ClientHello in the buffer, so a connection that is not decrypted
 /// still reaches the server whole. It may span several records.
 pub(crate) async fn peek_client_hello(peeker: &mut Peeker) -> Result<ClientHello, HelloError> {
-    let mut message: Vec<u8> = Vec::new();
-    let mut offset = 0;
+    let first_len = record_payload_len(peeker.at(0, RECORD_HEADER_LEN).await?)?;
+    let first = peeker.at(RECORD_HEADER_LEN, first_len).await?;
+    if let Some(hello) = try_parse_message(first)? {
+        return Ok(hello);
+    }
+    let mut message = Vec::from(first);
+    let mut offset = RECORD_HEADER_LEN + first_len;
     loop {
-        let header = peeker.at(offset, RECORD_HEADER_LEN).await?;
-        let (kind, major, length) = match header {
-            [kind, major, _, hi, lo] => (*kind, *major, usize::from(*hi) << 8 | usize::from(*lo)),
-            _ => return Err(HelloError::NotClientHello),
-        };
-        if kind != RECORD_TYPE_HANDSHAKE || major != 3 || length == 0 {
-            return Err(HelloError::NotClientHello);
-        }
+        let length = record_payload_len(peeker.at(offset, RECORD_HEADER_LEN).await?)?;
         let payload = peeker.at(offset + RECORD_HEADER_LEN, length).await?;
         message.extend_from_slice(payload);
         offset += RECORD_HEADER_LEN + length;
-        let [kind, a, b, c] = match message.get(..HANDSHAKE_HEADER_LEN) {
-            Some([kind, a, b, c]) => [*kind, *a, *b, *c],
-            _ => continue,
-        };
-        if kind != HANDSHAKE_TYPE_CLIENT_HELLO {
-            return Err(HelloError::NotClientHello);
-        }
-        let size =
-            HANDSHAKE_HEADER_LEN + (usize::from(a) << 16 | usize::from(b) << 8 | usize::from(c));
-        if message.len() >= size {
-            let body = message
-                .get(HANDSHAKE_HEADER_LEN..size)
-                .ok_or(HelloError::NotClientHello)?;
-            return parse_client_hello(body).ok_or(HelloError::NotClientHello);
+        if let Some(hello) = try_parse_message(&message)? {
+            return Ok(hello);
         }
     }
 }
@@ -275,7 +292,16 @@ mod tests {
             record(message.get(10..).unwrap()),
         ]
         .concat();
-        for (name, wire) in [("one record", one), ("two records", split)] {
+        let tiny_first = [
+            record(message.get(..2).unwrap()),
+            record(message.get(2..).unwrap()),
+        ]
+        .concat();
+        for (name, wire) in [
+            ("one record", one),
+            ("two records", split),
+            ("tiny first record", tiny_first),
+        ] {
             let (hello, peeker) = peek(wire.clone()).await;
             let hello = hello.unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(hello.server_name, "split.example.test", "{name}");

@@ -339,7 +339,9 @@ fn non_http_scripts_are_excluded_from_http_indexes_and_hooks_take_first() {
     );
     let make = |line: &str| -> std::sync::Arc<Script> {
         let def = concord_config::mitm::parse_script(line).unwrap();
-        std::sync::Arc::new(compile_script(&def, dir.path(), &host, &mut None).unwrap())
+        std::sync::Arc::new(
+            compile_script(&def, dir.path(), &host, &mut Vec::new(), &mut None).unwrap(),
+        )
     };
     let mut rules = Rules::default();
     rules.scripts.push(make(
@@ -357,6 +359,9 @@ fn non_http_scripts_are_excluded_from_http_indexes_and_hooks_take_first() {
     rules
         .scripts
         .push(make(r"g1 = type=generic,script-path=a.js"));
+    rules.scripts.push(make(
+        r"e2 = type=event,event-name=network-changed,script-path=a.js",
+    ));
     rules.index();
 
     let scan = rules.scan_request("https://example.com/anything");
@@ -369,4 +374,6 @@ fn non_http_scripts_are_excluded_from_http_indexes_and_hooks_take_first() {
         Some("first"),
         "duplicate hook names must pick the first definition"
     );
+    assert_eq!(rules.event_scripts("network-changed"), &[1, 5]);
+    assert!(rules.event_scripts("engine-started").is_empty());
 }

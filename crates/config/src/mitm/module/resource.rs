@@ -1,5 +1,7 @@
 //! The files a module's lines read, which the host has Concord download or attaches itself.
 
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 use super::IgnoreReason;
@@ -46,6 +48,7 @@ pub(super) fn locate(
     line: u32,
     attachments: &std::collections::BTreeMap<String, String>,
     resources: &mut Vec<ResourceDef>,
+    index: &mut HashMap<String, usize>,
 ) -> Result<String, IgnoreReason> {
     if !is_url(path) {
         return attachments
@@ -53,17 +56,23 @@ pub(super) fn locate(
             .cloned()
             .ok_or(IgnoreReason::NoAttachment);
     }
-    match resources.iter_mut().find(|resource| resource.url == path) {
-        Some(resource) => {
-            if resource.lines.last() != Some(&line) {
+    match index.get(path).copied() {
+        Some(slot) => {
+            if let Some(resource) = resources.get_mut(slot)
+                && resource.lines.last() != Some(&line)
+            {
                 resource.lines.push(line);
             }
         }
-        None => resources.push(ResourceDef {
-            url: path.to_string(),
-            kind,
-            lines: vec![line],
-        }),
+        None => {
+            let slot = resources.len();
+            resources.push(ResourceDef {
+                url: path.to_string(),
+                kind,
+                lines: vec![line],
+            });
+            index.insert(path.to_string(), slot);
+        }
     }
     Ok(path.to_string())
 }

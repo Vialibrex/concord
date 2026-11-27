@@ -4,17 +4,14 @@ use std::sync::Arc;
 
 pub use concord_config::mitm::MitmSection as RawConfig;
 use concord_config::mitm::text::quote;
-use concord_config::mitm::{
-    BodyActionDef, BodyRewriteDef, HostEntryDef, IssueKind, Items, LineError, MapLocalBody,
-    MapLocalDef, MitmDef, MitmLine, Read,
-};
+use concord_config::mitm::{HostEntryDef, IssueKind, Items, LineError, MitmDef, MitmLine, Read};
 use serde::Serialize;
 
 use crate::hostlist::{HostList, hosts_view};
 use crate::limits::{Limits, Resolve};
 use crate::rules::{
-    ResourceSeen, Rules, compile_body_rewrite, compile_header_rewrite, compile_map_local,
-    compile_url_rewrite, local_file_seen, resource_digest,
+    FileRecord, Rules, compile_body_rewrite, compile_header_rewrite, compile_map_local,
+    compile_url_rewrite,
 };
 use crate::script::{ScriptHost, compile_script};
 use crate::sources::SourceList;
@@ -47,9 +44,8 @@ pub struct Config {
     /// Plain HTTP on port 80 is read whatever its host while a rule can act on a request, as
     /// Surge's HTTP engine reads it without a hostname entry.
     pub(crate) plain_http: bool,
-    def: MitmDef,
-    resources: Resources,
-    errors: Vec<LineIssue>,
+    def: Arc<MitmDef>,
+    resources: Arc<Resources>,
 }
 
 struct LineIssue {
@@ -57,92 +53,44 @@ struct LineIssue {
     unread: bool,
 }
 
-/// What the files a section names in the resources directory held as compiling read them,
-/// in the order its lines name them, and the script runtime that compiled its scripts.
-#[derive(Debug, Default, PartialEq, Eq)]
+/// What the files a section consulted in the resources directory held as compiling read them,
+/// and the script runtime generation that compiled its scripts.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Resources {
     dir: PathBuf,
     runtime: u64,
-    files: Vec<Result<ResourceSeen, LineError>>,
+    files: Vec<FileRecord>,
 }
 
-/// The spelling, resources and errors of the last apply that kept an engine.
+/// The spelling, consulted resources and errors of the section currently in force.
 pub(crate) struct Applied {
-    def: MitmDef,
-    resources: Resources,
+    def: Arc<MitmDef>,
+    resources: Arc<Resources>,
     errors: Vec<LineIssue>,
 }
 
 impl Applied {
     pub(crate) fn compiles_from(&self, def: &MitmDef, env: &ParseEnv) -> bool {
-        self.def.written_the_same(def) && self.resources.still_matches(def, env)
+        self.def.written_the_same(def) && self.resources.still_matches(env)
     }
 
     pub(crate) fn errors(&self, unread: bool) -> Vec<String> {
-        filter_errors(&self.errors, unread)
+        self.errors
+            .iter()
+            .filter(|issue| unread || !issue.unread)
+            .map(|issue| issue.text.clone())
+            .collect()
     }
 }
 
-fn filter_errors(issues: &[LineIssue], unread: bool) -> Vec<String> {
-    issues
-        .iter()
-        .filter(|issue| unread || !issue.unread)
-        .map(|issue| issue.text.clone())
-        .collect()
-}
-
-/// The files of `lines`, each with whether it is base64, which the compile reads whole.
-fn local_files(lines: &[MitmLine<Read<MapLocalDef>>]) -> impl Iterator<Item = (&str, bool)> {
-    lines.iter().filter_map(|line| match &line.read {
-        Ok(local) => match local.body {
-            MapLocalBody::File { base64 } => Some((local.data.as_str(), base64)),
-            _ => None,
-        },
-        _ => None,
-    })
-}
-
 impl Resources {
-    pub(crate) fn still_matches(&self, def: &MitmDef, env: &ParseEnv) -> bool {
-        if self.dir != env.resources || self.runtime != env.scripts.generation() {
-            return false;
-        }
-        let mut recorded = self.files.iter();
-        let mut next = |live: &dyn Fn() -> Result<ResourceSeen, LineError>| -> bool {
-            let Some(seen) = recorded.next() else {
-                return false;
-            };
-            matches!(seen, Ok(ResourceSeen::NotRead)) || seen == &live()
-        };
-        for line in &def.body_rewrite {
-            if let Ok(BodyRewriteDef {
-                action: BodyActionDef::JqFile(name),
-                ..
-            }) = &line.read
-                && !next(&|| resource_digest(&env.resources, "jq file", name))
-            {
-                return false;
-            }
-        }
-        for (name, base64) in local_files(&def.map_local).chain(local_files(&def.request_body_mock))
-        {
-            let matched = if base64 {
-                next(&|| resource_digest(&env.resources, "data", name))
-            } else {
-                next(&|| local_file_seen(&env.resources, name))
-            };
-            if !matched {
-                return false;
-            }
-        }
-        for line in &def.script {
-            if let Ok(script) = &line.read
-                && !next(&|| resource_digest(&env.resources, "script-path", &script.path))
-            {
-                return false;
-            }
-        }
-        recorded.next().is_none()
+    pub(crate) fn still_matches(&self, env: &ParseEnv) -> bool {
+        self.dir == env.resources
+            && self.runtime == env.scripts.generation()
+            && self
+                .files
+                .iter()
+                .all(|record| record.seen == record.file.live(&env.resources))
     }
 }
 
@@ -220,9 +168,8 @@ impl Config {
             limits: def.limits.resolve(),
             rules: Rules::default(),
             plain_http: false,
-            def: MitmDef::default(),
-            resources: Resources::default(),
-            errors: Vec::new(),
+            def: Arc::default(),
+            resources: Arc::default(),
         }
     }
 
@@ -271,7 +218,7 @@ impl Config {
         def: &MitmDef,
         env: &ParseEnv,
         visit: &mut Visit<'_>,
-    ) -> Vec<Result<ResourceSeen, LineError>> {
+    ) -> Vec<FileRecord> {
         let rules = &mut self.rules;
         let mut files = Vec::new();
         each("url-rewrite", &def.url_rewrite, visit, |read, module| {
@@ -296,69 +243,64 @@ impl Config {
             },
         );
         each("body-rewrite", &def.body_rewrite, visit, |read, module| {
-            let mut seen = None;
-            let out = compiled(
+            compiled(
                 read,
-                |def| compile_body_rewrite(def, &env.resources, &mut seen),
+                |def| compile_body_rewrite(def, &env.resources, &mut files),
                 |mut rule| {
                     rule.module = module.cloned();
                     let view = rule.view();
                     rules.body_rewrites.push(Arc::new(rule));
                     view
                 },
-            );
-            files.extend(seen);
-            out
+            )
         });
         each("map-local", &def.map_local, visit, |read, module| {
-            let mut seen = None;
-            let out = compiled(
+            compiled(
                 read,
-                |def| compile_map_local(def, &env.resources, &mut seen),
+                |def| compile_map_local(def, &env.resources, &mut files),
                 |(mut rule, view)| {
                     rule.module = module.cloned();
                     rules.map_locals.push(rule);
                     view
                 },
-            );
-            files.extend(seen);
-            out
+            )
         });
         each(
             "request-body-mock",
             &def.request_body_mock,
             visit,
             |read, module| {
-                let mut seen = None;
-                let out = compiled(
+                compiled(
                     read,
-                    |def| compile_map_local(def, &env.resources, &mut seen),
+                    |def| compile_map_local(def, &env.resources, &mut files),
                     |(mut rule, view)| {
                         rule.module = module.cloned();
                         rules.request_mocks.push(rule);
                         view
                     },
-                );
-                files.extend(seen);
-                out
+                )
             },
         );
+        let mut script_batch = None;
         each("script", &def.script, visit, |read, module| {
-            let mut seen = None;
-            let out = compiled(
+            compiled(
                 read,
-                |def| compile_script(def, &env.resources, &env.scripts, &mut seen),
+                |def| {
+                    compile_script(
+                        def,
+                        &env.resources,
+                        &env.scripts,
+                        &mut files,
+                        &mut script_batch,
+                    )
+                },
                 |mut script| {
                     script.module = module.cloned();
                     let view = script.view();
                     rules.scripts.push(Arc::new(script));
                     view
                 },
-            );
-            if read.is_ok() {
-                files.push(seen.unwrap_or(Ok(ResourceSeen::NotRead)));
-            }
-            out
+            )
         });
         files
     }
@@ -368,56 +310,50 @@ impl Config {
         Config::compile(MitmDef::read(&raw), env, true)
     }
 
-    /// The section in force, and the lines that could not be compiled, with those that
-    /// could not be read when `unread`.
-    pub(crate) fn compile(def: MitmDef, env: &ParseEnv, unread: bool) -> (Config, Vec<String>) {
+    /// The section in force and the applied snapshot of its spelling, resources, and errors.
+    pub(crate) fn compile_applied(def: MitmDef, env: &ParseEnv) -> (Config, Applied) {
         let mut config = Config::empty(&def);
         let mut errors = Vec::new();
-        let resources = config.add_lines(&def, env, &mut |key, _, text, origin, read| {
-            if let Some(err) = read.error {
-                let line = format!("{key} {}: {err}", quote(text));
-                errors.push(LineIssue {
-                    text: match origin {
-                        Some(module) => format!("module {module}: {line}"),
-                        None => line,
-                    },
-                    unread: read.unread,
-                });
-            }
-        });
-        config.errors = errors;
-        config.resources = resources;
+        let resources = Arc::new(
+            config.add_lines(&def, env, &mut |key, _, text, origin, read| {
+                if let Some(err) = read.error {
+                    let line = format!("{key} {}: {err}", quote(text));
+                    errors.push(LineIssue {
+                        text: match origin {
+                            Some(module) => format!("module {module}: {line}"),
+                            None => line,
+                        },
+                        unread: read.unread,
+                    });
+                }
+            }),
+        );
+        let def = Arc::new(def);
+        config.resources = resources.clone();
+        config.def = def.clone();
         env.scripts.keep(&config.rules.scripts);
         config.hosts.index();
         config.skip_verify_hosts.index();
         config.rules.index();
         config.plain_http = config.rules.acts_on_requests();
-        config.def = def;
-        let errors = config.errors(unread);
-        (config, errors)
+        let applied = Applied {
+            def,
+            resources,
+            errors,
+        };
+        (config, applied)
     }
 
-    /// The lines that could not be compiled, with those that could not be read when `unread`.
-    pub(crate) fn errors(&self, unread: bool) -> Vec<String> {
-        filter_errors(&self.errors, unread)
+    /// The section in force, and the lines that could not be compiled, with those that
+    /// could not be read when `unread`.
+    pub(crate) fn compile(def: MitmDef, env: &ParseEnv, unread: bool) -> (Config, Vec<String>) {
+        let (config, applied) = Config::compile_applied(def, env);
+        (config, applied.errors(unread))
     }
 
     /// Whether `other` puts the same section in force from the same resource contents.
     pub fn same(&self, other: &Config) -> bool {
         self.def.reads_the_same(&other.def) && self.resources == other.resources
-    }
-
-    /// Whether compiling `def` against `env` would give this section and these errors.
-    pub(crate) fn compiles_from(&self, def: &MitmDef, env: &ParseEnv) -> bool {
-        self.def.written_the_same(def) && self.resources.still_matches(def, env)
-    }
-
-    pub(crate) fn into_applied(self) -> Applied {
-        Applied {
-            def: self.def,
-            resources: self.resources,
-            errors: self.errors,
-        }
     }
 
     pub fn script_names(&self) -> Vec<&str> {
@@ -718,12 +654,13 @@ mod tests {
 
     #[test]
     fn compile_records_resource_digests_from_read_bytes_and_not_read_scripts() {
-        use sha2::{Digest, Sha256};
+        use concord_config::mitm::{BodyActionDef, MapLocalBody};
 
         let (_home, env) = env();
         std::fs::create_dir_all(&env.resources).unwrap();
         let small = b"small-local";
         let large = vec![b'x'; crate::rules::LOCAL_PIECE + 5];
+        let large_alt = vec![b'y'; crate::rules::LOCAL_PIECE + 9];
         let b64_file = b"aGVsbG8=";
         let jq_file = b".a";
         std::fs::write(env.resources.join("small.txt"), small).unwrap();
@@ -751,32 +688,60 @@ mod tests {
         def.map_local[2].read.as_mut().unwrap().body = MapLocalBody::File { base64: true };
         def.map_local[2].read.as_mut().unwrap().data = "enc.b64".into();
 
-        let (config, errors) = Config::compile(def.clone(), &env, true);
+        let (_, applied) = Config::compile_applied(def.clone(), &env);
+        let errors = applied.errors(true);
         assert_eq!(errors.len(), 2, "{errors:?}");
-        assert_eq!(config.resources.files.len(), 6);
-        assert_eq!(
-            config.resources.files[0],
-            Ok(ResourceSeen::Content(Sha256::digest(jq_file).into()))
+        assert_eq!(applied.resources.files.len(), 5);
+        assert!(applied.compiles_from(&def, &env));
+
+        std::fs::write(env.resources.join("f.jq"), b".b").unwrap();
+        assert!(!applied.compiles_from(&def, &env));
+        std::fs::write(env.resources.join("f.jq"), jq_file).unwrap();
+        assert!(applied.compiles_from(&def, &env));
+
+        std::fs::write(env.resources.join("small.txt"), b"small-changed").unwrap();
+        assert!(!applied.compiles_from(&def, &env));
+        std::fs::write(env.resources.join("small.txt"), small).unwrap();
+        assert!(applied.compiles_from(&def, &env));
+
+        std::fs::write(env.resources.join("large.bin"), &large_alt).unwrap();
+        assert!(
+            applied.compiles_from(&def, &env),
+            "a large raw file read at answer stays matched when its content changes while staying large"
         );
-        assert_eq!(
-            config.resources.files[1],
-            Ok(ResourceSeen::Content(Sha256::digest(small).into()))
+        std::fs::write(env.resources.join("large.bin"), b"shrunk").unwrap();
+        assert!(
+            !applied.compiles_from(&def, &env),
+            "a large raw file that shrinks into the inline threshold must recompile"
         );
-        assert_eq!(config.resources.files[2], Ok(ResourceSeen::ReadAtAnswer));
-        assert_eq!(
-            config.resources.files[3],
-            Ok(ResourceSeen::Content(Sha256::digest(b64_file).into()))
+        std::fs::write(env.resources.join("large.bin"), &large).unwrap();
+        assert!(applied.compiles_from(&def, &env));
+
+        std::fs::write(env.resources.join("enc.b64"), b"d29ybGQ=").unwrap();
+        assert!(!applied.compiles_from(&def, &env));
+        std::fs::write(env.resources.join("enc.b64"), b64_file).unwrap();
+        assert!(applied.compiles_from(&def, &env));
+
+        std::fs::write(env.resources.join("missing.txt"), b"appeared").unwrap();
+        assert!(
+            !applied.compiles_from(&def, &env),
+            "a previously missing file appearing must recompile"
         );
-        assert!(config.resources.files[4].is_err());
-        assert_eq!(config.resources.files[5], Ok(ResourceSeen::NotRead));
-        assert!(config.compiles_from(&def, &env));
+        std::fs::remove_file(env.resources.join("missing.txt")).unwrap();
+        assert!(applied.compiles_from(&def, &env));
 
         std::fs::write(env.resources.join("bad_cron.js"), b"CHANGED").unwrap();
         assert!(
-            config.compiles_from(&def, &env),
+            applied.compiles_from(&def, &env),
             "a script that failed before reading its file stays matched"
         );
-        std::fs::write(env.resources.join("enc.b64"), b"d29ybGQ=").unwrap();
-        assert!(!config.compiles_from(&def, &env));
+
+        let mut reordered = (*applied.resources).clone();
+        reordered.files.reverse();
+        assert!(reordered.still_matches(&env));
+        std::fs::write(env.resources.join("small.txt"), b"mutated").unwrap();
+        assert!(!reordered.still_matches(&env));
+        std::fs::write(env.resources.join("small.txt"), small).unwrap();
+        assert!(reordered.still_matches(&env));
     }
 }

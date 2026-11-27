@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use arc_swap::ArcSwap;
 use concord_common::PRODUCT_NAME;
@@ -22,6 +22,7 @@ use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub const CERT_FILE_NAME: &str = "ca.crt";
@@ -115,6 +116,30 @@ struct LeafKey {
     signing: Arc<dyn rustls::sign::SigningKey>,
 }
 
+#[derive(Clone)]
+enum LeafOutcome {
+    Ready(Arc<Leaf>),
+    Failed(Arc<str>),
+}
+
+struct InflightGuard {
+    ca: Arc<Ca>,
+    host: String,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        lock(&self.ca.inflight).remove(&self.host);
+    }
+}
+
+fn crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    static PROVIDER: OnceLock<Arc<rustls::crypto::CryptoProvider>> = OnceLock::new();
+    PROVIDER
+        .get_or_init(|| Arc::new(aws_lc_rs::default_provider()))
+        .clone()
+}
+
 /// One key serves every leaf, so issuing a leaf costs a signature only.
 pub struct Ca {
     cert_der: CertificateDer<'static>,
@@ -125,8 +150,11 @@ pub struct Ca {
     not_after: OffsetDateTime,
     leaf_key: LeafKey,
     leaves: Mutex<LeafCache>,
+    inflight: Mutex<HashMap<String, watch::Receiver<Option<LeafOutcome>>>>,
     cache_size: AtomicUsize,
     retired: CancellationToken,
+    #[cfg(test)]
+    issue_count: AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -178,14 +206,35 @@ impl Ca {
         Ok(encode_certificate(&self.leaf(host)?.der))
     }
 
-    pub fn server_config(&self, host: &str, alpn: &[&str]) -> Result<Arc<ServerConfig>, CaError> {
+    #[cfg(test)]
+    pub(crate) fn server_config(
+        &self,
+        host: &str,
+        alpn: &[&str],
+    ) -> Result<Arc<ServerConfig>, CaError> {
         let leaf = self.leaf(host)?;
-        let mut config =
-            ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
-                .with_safe_default_protocol_versions()
-                .map_err(|err| CaError::invalid(err.to_string()))?
-                .with_no_client_auth()
-                .with_cert_resolver(Arc::new(FixedCert(leaf.certified.clone())));
+        self.build_server_config(&leaf, alpn)
+    }
+
+    pub async fn server_config_async(
+        self: &Arc<Self>,
+        host: &str,
+        alpn: &[&str],
+    ) -> Result<Arc<ServerConfig>, CaError> {
+        let leaf = self.leaf_async(host).await?;
+        self.build_server_config(&leaf, alpn)
+    }
+
+    fn build_server_config(
+        &self,
+        leaf: &Leaf,
+        alpn: &[&str],
+    ) -> Result<Arc<ServerConfig>, CaError> {
+        let mut config = ServerConfig::builder_with_provider(crypto_provider())
+            .with_safe_default_protocol_versions()
+            .map_err(|err| CaError::invalid(err.to_string()))?
+            .with_no_client_auth()
+            .with_cert_resolver(Arc::new(FixedCert(leaf.certified.clone())));
         config.alpn_protocols = alpn.iter().map(|proto| proto.as_bytes().to_vec()).collect();
         Ok(Arc::new(config))
     }
@@ -194,23 +243,78 @@ impl Ca {
         Ok(self.leaf(host)?.der.clone())
     }
 
-    fn leaf(&self, host: &str) -> Result<Arc<Leaf>, CaError> {
-        let host = host.to_ascii_lowercase();
-        let mut cache = lock(&self.leaves);
-        let now = OffsetDateTime::now_utc();
-        if let Some(leaf) = cache.get(&host, now) {
-            return Ok(leaf);
-        }
-        let leaf = Arc::new(self.issue(&host, now)?);
+    fn cache_leaf(&self, host: String, leaf: Arc<Leaf>) {
         let size = match self.cache_size.load(Ordering::Relaxed) {
             0 => crate::limits::DEFAULT_CERTIFICATE_CACHE as usize,
             size => size,
         };
-        cache.insert(host, leaf.clone(), size);
+        lock(&self.leaves).insert(host, leaf, size);
+    }
+
+    fn leaf(&self, host: &str) -> Result<Arc<Leaf>, CaError> {
+        let host = host.to_ascii_lowercase();
+        let now = OffsetDateTime::now_utc();
+        if let Some(leaf) = lock(&self.leaves).get(&host, now) {
+            return Ok(leaf);
+        }
+        let leaf = Arc::new(self.issue(&host, now)?);
+        self.cache_leaf(host, leaf.clone());
         Ok(leaf)
     }
 
+    async fn leaf_async(self: &Arc<Self>, host: &str) -> Result<Arc<Leaf>, CaError> {
+        let host = host.to_ascii_lowercase();
+        let now = OffsetDateTime::now_utc();
+        if let Some(leaf) = lock(&self.leaves).get(&host, now) {
+            return Ok(leaf);
+        }
+        let (mut rx, leader) = {
+            let mut inflight = lock(&self.inflight);
+            if let Some(leaf) = lock(&self.leaves).get(&host, now) {
+                return Ok(leaf);
+            }
+            if let Some(rx) = inflight.get(&host) {
+                (rx.clone(), None)
+            } else {
+                let (tx, rx) = watch::channel(None);
+                inflight.insert(host.clone(), rx.clone());
+                (rx, Some(tx))
+            }
+        };
+        if let Some(tx) = leader {
+            let guard = InflightGuard {
+                ca: self.clone(),
+                host: host.clone(),
+            };
+            let ca = self.clone();
+            tokio::task::spawn_blocking(move || {
+                let outcome = match ca.issue(&host, now) {
+                    Ok(leaf) => {
+                        let leaf = Arc::new(leaf);
+                        ca.cache_leaf(host, leaf.clone());
+                        LeafOutcome::Ready(leaf)
+                    }
+                    Err(err) => LeafOutcome::Failed(Arc::from(err.to_string())),
+                };
+                drop(guard);
+                let _ = tx.send(Some(outcome));
+            });
+        }
+        let outcome = rx
+            .wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|guard| guard.clone());
+        match outcome {
+            Some(LeafOutcome::Ready(leaf)) => Ok(leaf),
+            Some(LeafOutcome::Failed(msg)) => Err(CaError::invalid(msg.as_ref())),
+            None => Err(CaError::invalid("leaf signing did not finish")),
+        }
+    }
+
     fn issue(&self, host: &str, now: OffsetDateTime) -> Result<Leaf, CaError> {
+        #[cfg(test)]
+        self.issue_count.fetch_add(1, Ordering::SeqCst);
         let mut params = CertificateParams::default();
         params.serial_number = Some(random_serial());
         params.not_before = (now - BACKDATE).max(self.not_before);
@@ -332,8 +436,11 @@ fn parse_ca(cert_pem: &str, key_pem: &str) -> Result<Ca, CaError> {
             signing,
         },
         leaves: Mutex::default(),
+        inflight: Mutex::default(),
         cache_size: AtomicUsize::new(crate::limits::DEFAULT_CERTIFICATE_CACHE as usize),
         retired: CancellationToken::new(),
+        #[cfg(test)]
+        issue_count: AtomicUsize::new(0),
     })
 }
 
@@ -756,5 +863,78 @@ mod tests {
             }
             assert_eq!(ca.cached_leaves(), 2);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn async_leaf_coalesces_same_sni_handles_errors_renewal_and_cancellation() {
+        let (_dir, home) = home();
+        let ca = Arc::new(generate_ca(&home).unwrap());
+
+        let barrier = Arc::new(tokio::sync::Barrier::new(16));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let ca = ca.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                ca.leaf_async("Coalesce.Example.Test").await.unwrap()
+            }));
+        }
+        let mut results = Vec::new();
+        for task in tasks {
+            results.push(task.await.unwrap());
+        }
+        for leaf in &results[1..] {
+            assert!(Arc::ptr_eq(&results[0], leaf));
+        }
+        assert_eq!(ca.issue_count.load(Ordering::SeqCst), 1);
+        assert!(lock(&ca.inflight).is_empty());
+        verifies_leaf(&ca, "coalesce.example.test", &results[0].der);
+
+        let distinct = [
+            "a.example.test",
+            "b.example.test",
+            "c.example.test",
+            "d.example.test",
+        ];
+        let mut handles = Vec::new();
+        for host in distinct {
+            let ca = ca.clone();
+            handles.push(tokio::spawn(async move {
+                (host, ca.server_config_async(host, &["h2"]).await.unwrap())
+            }));
+        }
+        for handle in handles {
+            let (host, cfg) = handle.await.unwrap();
+            assert_eq!(cfg.alpn_protocols, vec![b"h2".to_vec()]);
+            verifies(&ca, host);
+        }
+
+        assert!(matches!(
+            ca.leaf_async("bad\u{00ff}.test").await,
+            Err(CaError::Invalid(_))
+        ));
+        assert!(lock(&ca.inflight).is_empty());
+
+        let expired = Arc::new(Leaf {
+            certified: results[0].certified.clone(),
+            der: results[0].der.clone(),
+            expires: OffsetDateTime::now_utc(),
+        });
+        ca.cache_leaf("renew.example.test".into(), expired.clone());
+        let renewed = ca.leaf_async("renew.example.test").await.unwrap();
+        assert!(!Arc::ptr_eq(&expired, &renewed));
+        assert!(lock(&ca.inflight).is_empty());
+
+        let ca2 = ca.clone();
+        let leader = tokio::spawn(async move { ca2.leaf_async("cancel.example.test").await });
+        let follower = {
+            let ca = ca.clone();
+            tokio::spawn(async move { ca.leaf_async("cancel.example.test").await })
+        };
+        leader.abort();
+        let got = follower.await.unwrap().unwrap();
+        verifies_leaf(&ca, "cancel.example.test", &got.der);
+        assert!(lock(&ca.inflight).is_empty());
     }
 }

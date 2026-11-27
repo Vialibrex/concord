@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use bytes::Bytes;
 use http::header::HOST;
 use http::{HeaderMap, StatusCode};
 
@@ -8,6 +9,7 @@ use crate::capture::{AnsweredBy, PHASE_REQUEST, PHASE_RESPONSE};
 use crate::exchange::{
     Answer, OutRequest, RULE_SCRIPT, ReplyError, Sent, Target, has_response_body, set_length,
 };
+use crate::forward::PreBuffered;
 use crate::headers::{from_list, is_grpc, script_header, to_list, with_host};
 use crate::limits::PRESSURE_NO_SCRIPTS;
 use crate::script::{Script, ScriptInvocation, ScriptRequest, ScriptResponse, ScriptResult};
@@ -16,12 +18,18 @@ use crate::target::TargetUrl;
 
 /// A body read whole for a script, and the trailers that followed it.
 struct ScriptBody {
-    data: Vec<u8>,
+    data: Bytes,
     trailers: Option<HeaderMap>,
 }
 
-fn non_empty(data: &[u8]) -> Option<Vec<u8>> {
-    (!data.is_empty()).then(|| data.to_vec())
+struct ScriptBodyInput {
+    body: Body,
+    length: Option<u64>,
+    pre: Option<PreBuffered>,
+}
+
+fn non_empty(data: &Bytes) -> Option<Bytes> {
+    (!data.is_empty()).then(|| data.clone())
 }
 
 fn script_answer(answer: ScriptResponse) -> Answer {
@@ -85,6 +93,7 @@ impl Session {
         out: &mut OutRequest,
         target: &mut Target,
         script: &Arc<Script>,
+        pre: Option<PreBuffered>,
     ) {
         if target.http1 || self.scripts_paused() {
             return;
@@ -101,7 +110,17 @@ impl Session {
         if script.requires_body && out.has_body {
             let body = std::mem::replace(&mut out.body, empty());
             let (body, length, data) = self
-                .buffer_for_script(target, script, &address, &mut out.headers, body, out.length)
+                .buffer_for_script(
+                    target,
+                    script,
+                    &address,
+                    &mut out.headers,
+                    ScriptBodyInput {
+                        body,
+                        length: out.length,
+                        pre,
+                    },
+                )
                 .await;
             out.set_body(body, length);
             let Some(read) = data else { return };
@@ -183,6 +202,7 @@ impl Session {
         sent: &Sent,
         target: &mut Target,
         script: &Arc<Script>,
+        pre: Option<PreBuffered>,
     ) -> Result<(), ReplyError> {
         if self.scripts_paused() {
             return Ok(());
@@ -200,7 +220,17 @@ impl Session {
         if script.requires_body && has_response_body(&sent.method, head.status) {
             let source = std::mem::replace(body, empty());
             let (replaced, length, data) = self
-                .buffer_for_script(target, script, &address, &mut head.headers, source, length)
+                .buffer_for_script(
+                    target,
+                    script,
+                    &address,
+                    &mut head.headers,
+                    ScriptBodyInput {
+                        body: source,
+                        length,
+                        pre,
+                    },
+                )
                 .await;
             *body = replaced;
             set_length(&mut head.headers, length);
@@ -260,7 +290,7 @@ impl Session {
         if let Some(read) = data_seen
             && (result.body.is_some() || result.trailers.is_some())
         {
-            let data = result.body.unwrap_or(read.data);
+            let data = result.body.map(Bytes::from).unwrap_or(read.data);
             let trailers = match &result.trailers {
                 Some(list) => Some(from_list(list)).filter(|map| !map.is_empty()),
                 None => read.trailers,
@@ -288,29 +318,55 @@ impl Session {
         script: &Script,
         address: &str,
         headers: &mut HeaderMap,
-        body: Body,
-        length: Option<u64>,
+        input: ScriptBodyInput,
     ) -> (Body, Option<u64>, Option<ScriptBody>) {
+        let ScriptBodyInput { body, length, pre } = input;
         if is_grpc(headers) && !script.binary_body {
             return (body, length, None);
         }
         let limit = script.body_limit(&self.core.config.limits);
-        if !self
-            .reserve_body(target, address, headers, length, limit)
-            .await
-        {
-            return (body, length, None);
-        }
-        match buffer_body(headers, body, length, limit).await {
-            Err(err) => (failing(err), None, None),
-            Ok(Buffered::Rest { body, length }) => {
+        let buffered = match pre {
+            Some(pre) => {
+                let cap = u64::try_from(limit).unwrap_or(0);
+                let size = pre.data.len() as u64;
+                if size > cap {
+                    Buffered::Rest { body, length }
+                } else {
+                    let extra = size.saturating_sub(pre.reserved);
+                    if extra > 0
+                        && self
+                            .reserve_extra_body(target, address, extra)
+                            .await
+                            .is_none()
+                    {
+                        return (body, length, None);
+                    }
+                    Buffered::Whole(pre.data, pre.trailers)
+                }
+            }
+            None => {
+                if self
+                    .reserve_body(target, address, headers, length, limit)
+                    .await
+                    .is_none()
+                {
+                    return (body, length, None);
+                }
+                match buffer_body(headers, body, length, limit).await {
+                    Ok(buffered) => buffered,
+                    Err(err) => return (failing(err), None, None),
+                }
+            }
+        };
+        match buffered {
+            Buffered::Rest { body, length } => {
                 tracing::info!(
                     "[MITM] script {} skips {address}, whose body is too large or in an unknown encoding",
                     script.name
                 );
                 (body, length, None)
             }
-            Ok(Buffered::Whole(data, trailers)) => {
+            Buffered::Whole(data, trailers) => {
                 let size = data.len() as u64;
                 let body = full_with(data.clone(), trailers.clone());
                 if !script.binary_body && std::str::from_utf8(&data).is_err() {

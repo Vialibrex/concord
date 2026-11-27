@@ -266,7 +266,7 @@ impl HttpBody for Resumed {
 
 pub(crate) enum Buffered {
     /// The data, and the trailers that followed it.
-    Whole(Vec<u8>, Option<HeaderMap>),
+    Whole(Bytes, Option<HeaderMap>),
     /// Larger than the limit or in an encoding with no decoder: to send on as it
     /// came, already decoded if decoding had begun.
     Rest { body: Body, length: Option<u64> },
@@ -356,7 +356,7 @@ pub(crate) async fn buffer_body(
             });
         }
     }
-    Ok(Buffered::Whole(out, trailers))
+    Ok(Buffered::Whole(Bytes::from(out), trailers))
 }
 
 pub(crate) type DataHook = Box<dyn FnMut(&Bytes) + Send>;
@@ -465,7 +465,7 @@ mod tests {
         let got = buffer_body(&mut map, full("hello"), Some(5), 100)
             .await
             .unwrap();
-        assert!(matches!(got, Buffered::Whole(data, None) if data == b"hello"));
+        assert!(matches!(got, Buffered::Whole(data, None) if data.as_ref() == b"hello"));
     }
 
     #[tokio::test]
@@ -484,7 +484,7 @@ mod tests {
         let Buffered::Whole(data, Some(kept)) = got else {
             panic!("no trailers");
         };
-        assert_eq!((data.as_slice(), &kept), (&b"hello"[..], &trailers));
+        assert_eq!((data.as_ref(), &kept), (&b"hello"[..], &trailers));
         let sent = full_with(data, Some(kept)).collect().await.unwrap();
         assert_eq!(sent.trailers(), Some(&trailers));
         assert_eq!(sent.to_bytes(), "hello");
@@ -496,7 +496,7 @@ mod tests {
         let got = buffer_body(&mut map, full(gzip(b"hello ad")), None, 100)
             .await
             .unwrap();
-        assert!(matches!(got, Buffered::Whole(data, None) if data == b"hello ad"));
+        assert!(matches!(got, Buffered::Whole(data, None) if data.as_ref() == b"hello ad"));
         assert!(map.get(http::header::CONTENT_ENCODING).is_none());
     }
 

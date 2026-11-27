@@ -38,7 +38,7 @@ pub struct MitmEnv {
 #[derive(Default)]
 struct State {
     running: bool,
-    last: Option<Applied>,
+    applied: Option<Applied>,
 }
 
 pub struct Mitm {
@@ -184,7 +184,7 @@ impl Mitm {
         let mut state = lock(&self.state);
         let previous = self.current.load_full();
         let Some(def) = def.filter(|def| def.enable) else {
-            state.last = None;
+            state.applied = None;
             self.current.store(None);
             self.shared.captures.clear();
             if let Some(previous) = previous {
@@ -197,32 +197,27 @@ impl Mitm {
         let kept = previous
             .as_ref()
             .filter(|previous| previous.trusts(&self.shared.trust.load()));
-        if let Some(previous) = kept {
-            let hit = match &state.last {
-                Some(last) if last.compiles_from(&def, &env) => Some(last.errors(unread)),
-                None if previous.config().compiles_from(&def, &env) => {
-                    Some(previous.config().errors(unread))
-                }
-                _ => None,
-            };
-            if let Some(errors) = hit {
-                if state.running {
-                    previous.notify(EVENT_PROFILE_RELOADED);
-                }
-                return errors;
+        if let Some(previous) = kept
+            && let Some(applied) = &state.applied
+            && applied.compiles_from(&def, &env)
+        {
+            if state.running {
+                previous.notify(EVENT_PROFILE_RELOADED);
             }
+            return applied.errors(unread);
         }
-        let (config, errors) = Config::compile(def, &env, unread);
+        let (config, applied) = Config::compile_applied(def, &env);
+        let errors = applied.errors(unread);
         if let Some(previous) = kept
             && previous.config().same(&config)
         {
-            state.last = Some(config.into_applied());
+            state.applied = Some(applied);
             if state.running {
                 previous.notify(EVENT_PROFILE_RELOADED);
             }
             return errors;
         }
-        state.last = None;
+        state.applied = Some(applied);
         let engine = Arc::new(MitmEngine::new(
             config,
             self.shared.clone(),

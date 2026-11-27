@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io;
 use std::sync::Arc;
 
@@ -132,21 +133,37 @@ impl Session {
             tracing::info!("[MITM] mock the request body of {address}");
         }
         let grpc = is_grpc(&out.headers);
+        let mut pre = None;
         if !body_rules.is_empty()
             && !grpc
             && out.has_body
             && self.core.shared.pressure.level() < PRESSURE_NO_BODIES
-            && self
+            && let Some(reserved) = self
                 .reserve_body(target, &address, &out.headers, out.length, max_body)
                 .await
         {
             let body = std::mem::replace(&mut out.body, empty());
             let notes = body_notes(&target.cap, &body_rules);
-            match rewrite_body(&mut out.headers, body, out.length, max_body, body_rules).await {
-                Ok((body, length)) => {
+            let keep = script.is_some_and(|s| s.requires_body);
+            match rewrite_body(
+                &mut out.headers,
+                body,
+                out.length,
+                max_body,
+                body_rules,
+                keep,
+            )
+            .await
+            {
+                Ok((body, length, buffered)) => {
                     out.set_body(body, length);
                     note_body(&target.cap, PHASE_REQUEST, notes);
                     tracing::info!("[MITM] rewrite request body of {address}");
+                    pre = buffered.map(|(data, trailers)| PreBuffered {
+                        data,
+                        trailers,
+                        reserved,
+                    });
                 }
                 Err(err) => {
                     out.body = failing(err);
@@ -155,7 +172,7 @@ impl Session {
             }
         }
         if let Some(script) = script {
-            self.run_request_script(out, target, script).await;
+            self.run_request_script(out, target, script, pre).await;
         }
         let plan = rules.prepare_response(&out.url.raw);
         if !grpc && rules.response_plan_rewrites_body(&plan) {
@@ -167,7 +184,7 @@ impl Session {
 
     /// Makes room for a body about to be read whole: its length, or the size
     /// limit when that is unknown or the body is to be decoded. A body that finds
-    /// none within a while passes on as it came.
+    /// none within a while passes on as it came. Returns the permits reserved.
     pub(crate) async fn reserve_body(
         &self,
         target: &mut Target,
@@ -175,10 +192,10 @@ impl Session {
         headers: &HeaderMap,
         length: Option<u64>,
         limit: i64,
-    ) -> bool {
+    ) -> Option<u64> {
         let cap = u64::try_from(limit).unwrap_or(0);
         if length.is_some_and(|length| length > cap) {
-            return true;
+            return Some(0);
         }
         let encoding = text(headers, CONTENT_ENCODING).trim().to_ascii_lowercase();
         let size = match length {
@@ -186,8 +203,17 @@ impl Session {
             _ => cap,
         };
         if size == 0 {
-            return true;
+            return Some(0);
         }
+        self.reserve_extra_body(target, address, size).await
+    }
+
+    pub(crate) async fn reserve_extra_body(
+        &self,
+        target: &mut Target,
+        address: &str,
+        size: u64,
+    ) -> Option<u64> {
         let permits = u32::try_from(size).unwrap_or(u32::MAX);
         let acquired = tokio::time::timeout(
             BODY_WAIT,
@@ -197,13 +223,13 @@ impl Session {
         match acquired {
             Ok(Ok(permit)) => {
                 target.reserved.push(permit);
-                true
+                Some(u64::from(permits))
             }
             _ => {
                 tracing::info!(
                     "[MITM] the body of {address} passes on as it came: the bodies being worked on fill the buffer"
                 );
-                false
+                None
             }
         }
     }
@@ -250,25 +276,39 @@ impl Session {
             return Ok(());
         }
         let length = hyper::body::Body::size_hint(body).exact();
+        let mut pre = None;
         if !body_rules.is_empty()
             && has_response_body(&sent.method, head.status)
             && !is_grpc(&head.headers)
             && self.core.shared.pressure.level() < PRESSURE_NO_BODIES
-            && self
+            && let Some(reserved) = self
                 .reserve_body(target, &address, &head.headers, length, max_body)
                 .await
         {
             let source = std::mem::replace(body, empty());
             let notes = body_notes(&target.cap, &body_rules);
-            let (rewritten, length) =
-                rewrite_body(&mut head.headers, source, length, max_body, body_rules).await?;
+            let keep = script.is_some_and(|s| s.requires_body);
+            let (rewritten, length, buffered) = rewrite_body(
+                &mut head.headers,
+                source,
+                length,
+                max_body,
+                body_rules,
+                keep,
+            )
+            .await?;
             *body = rewritten;
             set_length(&mut head.headers, length);
             note_body(&target.cap, PHASE_RESPONSE, notes);
             tracing::info!("[MITM] rewrite response body of {address}");
+            pre = buffered.map(|(data, trailers)| PreBuffered {
+                data,
+                trailers,
+                reserved,
+            });
         }
         if let Some(script) = script {
-            self.run_response_script(head, body, sent, target, script)
+            self.run_response_script(head, body, sent, target, script, pre)
                 .await?;
         }
         Ok(())
@@ -561,6 +601,14 @@ fn note_body(cap: &Cap, phase: &str, notes: Vec<(String, Option<Arc<str>>)>) {
     }
 }
 
+/// A body already buffered and rewritten in this phase, handed to a following script
+/// so it reuses the same `Bytes` and accounts only for any growth past `reserved`.
+pub(crate) struct PreBuffered {
+    pub data: Bytes,
+    pub trailers: Option<HeaderMap>,
+    pub reserved: u64,
+}
+
 /// A body over the limit, not UTF-8, or in an encoding it cannot decode is
 /// passed on unchanged.
 pub(crate) async fn rewrite_body(
@@ -569,13 +617,15 @@ pub(crate) async fn rewrite_body(
     length: Option<u64>,
     limit: i64,
     rules: Vec<Arc<BodyRewrite>>,
-) -> io::Result<(Body, Option<u64>)> {
+    keep_buffered: bool,
+) -> io::Result<(Body, Option<u64>, Option<(Bytes, Option<HeaderMap>)>)> {
     match buffer_body(headers, body, length, limit).await? {
-        Buffered::Rest { body, length } => Ok((body, length)),
+        Buffered::Rest { body, length } => Ok((body, length, None)),
         Buffered::Whole(data, trailers) => {
-            let data = apply_off_runtime(Bytes::from(data), rules, DEFAULT_SCRIPT_TIMEOUT).await;
+            let data = apply_off_runtime(data, rules, DEFAULT_SCRIPT_TIMEOUT).await;
             let length = data.len() as u64;
-            Ok((full_with(data, trailers), Some(length)))
+            let buffered = keep_buffered.then(|| (data.clone(), trailers.clone()));
+            Ok((full_with(data, trailers), Some(length), buffered))
         }
     }
 }
@@ -589,8 +639,14 @@ pub(crate) async fn apply_off_runtime(
 ) -> Bytes {
     let input = data.clone();
     let work = tokio::task::spawn_blocking(move || {
-        let text = std::str::from_utf8(&input).ok()?.to_owned();
-        Some(rules.iter().fold(text, |text, rule| rule.apply(text)))
+        let text = std::str::from_utf8(&input).ok()?;
+        match rules
+            .iter()
+            .fold(Cow::Borrowed(text), |body, rule| rule.apply(body))
+        {
+            Cow::Borrowed(_) => None,
+            Cow::Owned(out) => Some(out),
+        }
     });
     match tokio::time::timeout(budget, work).await {
         Ok(Ok(Some(text))) => Bytes::from(text),
@@ -690,5 +746,34 @@ mod tests {
         assert_eq!(out.uri().to_string(), "/p?q=1");
         assert_eq!(out.headers().get(HOST).unwrap(), "example.test:8443");
         assert_eq!(out.version(), Version::HTTP_11);
+    }
+
+    #[tokio::test]
+    async fn zero_hit_body_rewrite_reuses_input_bytes() {
+        let input = Bytes::from("plain text without any token".repeat(64));
+        let ptr = input.as_ptr();
+        let out = apply_off_runtime(
+            input.clone(),
+            rules(&[
+                r"http-response ^http:// never_matches replaced",
+                "http-response-jq ^http:// '.x = 1'",
+            ]),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(out, input);
+        assert_eq!(out.as_ptr(), ptr);
+
+        let chained = apply_off_runtime(
+            Bytes::from_static(b"alpha beta"),
+            rules(&[
+                r"http-response ^http:// missing hit",
+                r"http-response ^http:// beta gamma",
+                r"http-response ^http:// also_missing hit",
+            ]),
+            Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(&chained[..], b"alpha gamma");
     }
 }

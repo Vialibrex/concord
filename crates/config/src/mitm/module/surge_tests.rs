@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use http::header::HeaderName;
 
 use crate::mitm::module::{
-    Environment, IgnoreReason, ModuleDef, ModuleInput, ModuleLists, read_module,
+    Environment, IgnoreReason, ModuleDef, ModuleInput, ModuleLists, ResourceKind, read_module,
 };
 use crate::mitm::{BodyActionDef, HeaderEditDef, ScriptKind};
 
@@ -184,4 +184,47 @@ fn hostname_disabled_reads_as_a_list_of_its_own() {
         .map(|entry| entry.pattern.as_str())
         .collect();
     assert_eq!(disabled, ["b.test"]);
+}
+
+#[test]
+fn resource_index_preserves_order_kind_and_deduped_lines() {
+    use std::fmt::Write as _;
+
+    let mut text = String::from("#!name=ManyResources\n[Script]\n");
+    let mut expected: Vec<(String, ResourceKind, Vec<u32>)> = Vec::new();
+    let mut record = |url: String, kind: ResourceKind, line: u32| {
+        if let Some((_, _, lines)) = expected.iter_mut().find(|(u, _, _)| u == &url) {
+            if lines.last() != Some(&line) {
+                lines.push(line);
+            }
+        } else {
+            expected.push((url, kind, vec![line]));
+        }
+    };
+    let mut line_no = 2u32;
+    for i in 0..90u32 {
+        line_no += 1;
+        let url = format!("https://cdn.test/s{}.js", i % 25);
+        writeln!(
+            text,
+            r"s{i} = type=http-request,pattern=^https://a\.test/{i},script-path={url}"
+        )
+        .unwrap();
+        record(url, ResourceKind::Script, line_no);
+    }
+    text.push_str("[Map Local]\n");
+    line_no += 1;
+    for i in 0..40u32 {
+        line_no += 1;
+        let url = format!("https://cdn.test/s{}.js", (i + 10) % 30);
+        writeln!(text, r"^https://b\.test/{i} data={url}").unwrap();
+        record(url, ResourceKind::MapLocal, line_no);
+    }
+    let def = read(&text);
+    let actual: Vec<(String, ResourceKind, Vec<u32>)> = def
+        .resources
+        .into_iter()
+        .map(|r| (r.url, r.kind, r.lines))
+        .collect();
+    assert_eq!(actual, expected);
 }

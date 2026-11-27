@@ -137,14 +137,12 @@ impl MitmEngine {
         if !self.is_started() {
             return;
         }
-        for (index, script) in self.core.config.rules.scripts.iter().enumerate() {
-            if script.kind == ScriptKind::Event && script.event == event {
-                let invocation = event_invocation(&self.core, event);
-                let (core, tasks) = (self.core.clone(), self.tasks_handle());
-                self.core.tasks.spawn(async move {
-                    let _ = run_task(&core, &tasks, index, invocation).await;
-                });
-            }
+        for &index in self.core.config.rules.event_scripts(event) {
+            let invocation = event_invocation(&self.core, event);
+            let (core, tasks) = (self.core.clone(), self.tasks_handle());
+            self.core.tasks.spawn(async move {
+                let _ = run_task(&core, &tasks, index, invocation).await;
+            });
         }
     }
 

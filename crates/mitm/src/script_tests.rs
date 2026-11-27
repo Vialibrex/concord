@@ -60,7 +60,7 @@ async fn a_request_script_rewrites_answers_and_aborts() {
                     vec!["application/json".to_string()],
                 )]
                 .into(),
-                body: Some(b"tea".to_vec()),
+                body: Some(bytes::Bytes::from_static(b"tea")),
                 trailers: None,
             }),
             ..ScriptResult::default()
@@ -146,7 +146,7 @@ async fn a_response_script_rewrites_status_and_body() {
             .body
             .clone()
             .unwrap_or_default();
-        let mut changed = body.clone();
+        let mut changed = body.to_vec();
         changed.extend_from_slice(b"+script");
         Ok(ScriptResult {
             status: 201,
@@ -201,8 +201,9 @@ fn appends(mark: &'static str) -> Arc<dyn ScriptProgram> {
             .as_ref()
             .unwrap()
             .body
-            .clone()
-            .unwrap_or_default();
+            .as_deref()
+            .unwrap_or_default()
+            .to_vec();
         body.extend_from_slice(mark.as_bytes());
         Ok(ScriptResult {
             body: Some(body),
@@ -536,7 +537,7 @@ async fn a_response_script_gets_a_decoded_body_and_the_request_id() {
             }
             let mut header = response.header.clone();
             header.insert("X-Status".into(), vec![response.status.to_string()]);
-            let body = String::from_utf8(response.body.clone().unwrap_or_default())
+            let body = String::from_utf8(response.body.as_deref().unwrap_or_default().to_vec())
                 .unwrap()
                 .replace(r#""ad":true"#, r#""ad":false"#);
             Ok(ScriptResult {
@@ -1220,4 +1221,127 @@ async fn response_precheck_preserves_identity_fallback_sent_headers_and_response
         .unwrap();
     let reply = client.get("/cond").await;
     assert_eq!(reply.header("x-saw-tag"), "yes");
+}
+
+#[tokio::test]
+async fn body_rewrite_to_script_handoff_respects_limits_buffer_and_pressure() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let avail_during = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+    let bodies_slot: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Semaphore>>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let program = {
+        let seen = seen.clone();
+        let avail_during = avail_during.clone();
+        let bodies_slot = bodies_slot.clone();
+        sync_program(move |inv| {
+            let body = inv
+                .response
+                .as_ref()
+                .and_then(|r| r.body.as_deref())
+                .unwrap_or_default();
+            let text = String::from_utf8_lossy(body).into_owned();
+            lock(&seen).push(text.clone());
+            if let Some(sem) = lock(&bodies_slot).as_ref() {
+                lock(&avail_during).push(sem.available_permits());
+            }
+            Ok(ScriptResult {
+                body: Some(format!("{text}+script").into_bytes()),
+                ..ScriptResult::default()
+            })
+        })
+    };
+    let (_server, rig) = scripted(vec![("post", program)]).await;
+    let errors = rig.config(json!({
+        "enable": true,
+        "hostname": ["example.test"],
+        "skip-server-cert-verify": true,
+        "limits": {"max-body-size": 160, "body-buffer": 256},
+        "body-rewrite": [
+            r"http-response ^https://example\.test/same foo bar",
+            r"http-response ^https://example\.test/grow X XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+            r"http-response ^https://example\.test/big foo bar",
+        ],
+        "script": [
+            r"s1 = type=http-response,pattern=^https://example\.test/same,requires-body=1,script-path=post.js",
+            r"s2 = type=http-response,pattern=^https://example\.test/grow,requires-body=1,max-size=128,script-path=post.js",
+            r"s3 = type=http-response,pattern=^https://example\.test/big,requires-body=1,max-size=-1,script-path=post.js",
+        ],
+    }));
+    assert!(errors.is_empty(), "{errors:?}");
+    let bodies = rig.mitm.engine().unwrap().core.bodies.clone();
+    *lock(&bodies_slot) = Some(bodies.clone());
+
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+
+    let req = client.request("POST", "/same", &[], "hello foo");
+    let reply = client.send(req).await.unwrap();
+    assert_eq!(reply.text(), "example.test|/same||hello bar+script");
+    assert_eq!(lock(&seen).last().unwrap(), "example.test|/same||hello bar");
+    assert!(
+        *lock(&avail_during).last().unwrap() < 256,
+        "permits must remain held during script execution"
+    );
+    assert_eq!(bodies.available_permits(), 256);
+
+    let req = client.request("POST", "/grow", &[], "X");
+    let reply = client.send(req).await.unwrap();
+    let expected_grown = format!("example.test|/grow||{}", "X".repeat(64));
+    assert_eq!(reply.text(), format!("{expected_grown}+script"));
+    let held = 256 - *lock(&avail_during).last().unwrap();
+    assert!(
+        held >= expected_grown.len(),
+        "permits ({held}) must cover expanded body ({})",
+        expected_grown.len()
+    );
+    assert_eq!(bodies.available_permits(), 256);
+
+    let taken = bodies.clone().try_acquire_many_owned(200).unwrap();
+    let count_before = lock(&seen).len();
+    let req = client.request("POST", "/grow", &[], "X");
+    let reply = client.send(req).await.unwrap();
+    assert_eq!(
+        reply.text(),
+        expected_grown,
+        "extra permit timeout skips script and keeps rewritten body"
+    );
+    assert_eq!(lock(&seen).len(), count_before);
+    drop(taken);
+    assert_eq!(bodies.available_permits(), 256);
+
+    let count_before = lock(&seen).len();
+    let req = client.request("POST", "/grow", &[], "XX");
+    let reply = client.send(req).await.unwrap();
+    assert_eq!(
+        reply.text(),
+        format!("example.test|/grow||{}", "X".repeat(128))
+    );
+    assert_eq!(lock(&seen).len(), count_before);
+
+    let over_max = format!("{}foo", "z".repeat(160));
+    let req = client.request("POST", "/big", &[], &over_max);
+    let reply = client.send(req).await.unwrap();
+    assert_eq!(
+        reply.text(),
+        format!("example.test|/big||{over_max}+script")
+    );
+    assert_eq!(bodies.available_permits(), 256);
+
+    let count_before = lock(&seen).len();
+    rig.mitm.set_pressure(PRESSURE_NO_SCRIPTS);
+    let req = client.request("POST", "/same", &[], "hello foo");
+    assert_eq!(
+        client.send(req).await.unwrap().text(),
+        "example.test|/same||hello bar"
+    );
+    assert_eq!(lock(&seen).len(), count_before);
+
+    rig.mitm.set_pressure(PRESSURE_NO_BODIES);
+    let req = client.request("POST", "/same", &[], "hello foo");
+    assert_eq!(
+        client.send(req).await.unwrap().text(),
+        "example.test|/same||hello foo"
+    );
+    assert_eq!(lock(&seen).len(), count_before);
 }

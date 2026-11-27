@@ -482,7 +482,7 @@ impl MitmEngine {
             );
             return declined(peeker);
         }
-        let config = match ca.server_config(&server_name, protocols) {
+        let config = match ca.server_config_async(&server_name, protocols).await {
             Ok(config) => config,
             Err(err) => {
                 tracing::debug!("[MITM] no certificate for {server_name}: {err}");

@@ -12,7 +12,8 @@ use concord_tls::TrustStore;
 use rquickjs::{CatchResultExt, Context, Runtime};
 
 use crate::script::{
-    CompileError, ScriptError, ScriptInvocation, ScriptProgram, ScriptResult, ScriptRuntime,
+    CompileError, ScriptBatch, ScriptError, ScriptInvocation, ScriptProgram, ScriptResult,
+    ScriptRuntime,
 };
 use store::Store;
 
@@ -41,14 +42,51 @@ impl QuickJs {
     pub fn flush(&self) {
         self.store.flush();
     }
+
+    fn new_batch(&self) -> QuickJsBatch {
+        QuickJsBatch {
+            store: self.store.clone(),
+            trust: self.trust.clone(),
+            checker: None,
+        }
+    }
 }
 
 impl ScriptRuntime for QuickJs {
-    fn compile(&self, _name: &str, source: &[u8]) -> Result<Arc<dyn ScriptProgram>, CompileError> {
+    fn compile(&self, name: &str, source: &[u8]) -> Result<Arc<dyn ScriptProgram>, CompileError> {
+        self.new_batch().compile(name, source)
+    }
+
+    fn batch(&self) -> Option<Box<dyn ScriptBatch>> {
+        Some(Box::new(self.new_batch()))
+    }
+}
+
+struct QuickJsBatch {
+    store: Arc<Store>,
+    trust: Arc<ArcSwap<TrustStore>>,
+    checker: Option<(Runtime, Context)>,
+}
+
+impl ScriptBatch for QuickJsBatch {
+    fn compile(
+        &mut self,
+        _name: &str,
+        source: &[u8],
+    ) -> Result<Arc<dyn ScriptProgram>, CompileError> {
         let text = std::str::from_utf8(source)
             .map_err(|err| CompileError(err.to_string()))?
             .to_string();
-        check_syntax(&text)?;
+        let (_, context) = match &self.checker {
+            Some(pair) => pair,
+            None => {
+                let fail = |err: &dyn std::fmt::Display| CompileError(err.to_string());
+                let runtime = Runtime::new().map_err(|err| fail(&err))?;
+                let context = Context::full(&runtime).map_err(|err| fail(&err))?;
+                self.checker.insert((runtime, context))
+            }
+        };
+        check_syntax_in(context, &text)?;
         Ok(Arc::new(Program {
             compiled: Arc::new(run::Compiled::new(quantumult_only(&text), text)),
             store: self.store.clone(),
@@ -57,11 +95,8 @@ impl ScriptRuntime for QuickJs {
     }
 }
 
-fn check_syntax(source: &str) -> Result<(), CompileError> {
-    let fail = |err: &dyn std::fmt::Display| CompileError(err.to_string());
-    let runtime = Runtime::new().map_err(|err| fail(&err))?;
-    let context = Context::full(&runtime).map_err(|err| fail(&err))?;
-    let literal = serde_json::to_string(source).map_err(|err| fail(&err))?;
+fn check_syntax_in(context: &Context, source: &str) -> Result<(), CompileError> {
+    let literal = serde_json::to_string(source).map_err(|err| CompileError(err.to_string()))?;
     context.with(|ctx| {
         ctx.eval::<rquickjs::Value<'_>, _>(format!("new Function({literal})"))
             .catch(&ctx)

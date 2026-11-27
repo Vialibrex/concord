@@ -483,6 +483,7 @@ struct CompiledIndexes {
     resp_refs: Vec<RespRuleRef>,
     rule_scripts: HashMap<Box<str>, usize>,
     dns_scripts: HashMap<Box<str>, usize>,
+    event_scripts: HashMap<Box<str>, Vec<usize>>,
     #[cfg(test)]
     per_kind: [UrlIndex; 6],
 }
@@ -540,6 +541,7 @@ impl Rules {
 
         let mut rule_scripts = HashMap::new();
         let mut dns_scripts = HashMap::new();
+        let mut event_scripts: HashMap<Box<str>, Vec<usize>> = HashMap::new();
         for (i, script) in self.scripts.iter().enumerate() {
             let idx = u32::try_from(i).unwrap_or(u32::MAX);
             match script.kind {
@@ -561,7 +563,13 @@ impl Rules {
                         .entry(Box::from(script.name.as_str()))
                         .or_insert(i);
                 }
-                ScriptKind::Cron | ScriptKind::Event | ScriptKind::Generic => {}
+                ScriptKind::Event => {
+                    event_scripts
+                        .entry(Box::from(script.event.as_str()))
+                        .or_default()
+                        .push(i);
+                }
+                ScriptKind::Cron | ScriptKind::Generic => {}
             }
         }
 
@@ -592,6 +600,7 @@ impl Rules {
             resp_refs,
             rule_scripts,
             dns_scripts,
+            event_scripts,
             #[cfg(test)]
             per_kind,
         }
@@ -742,6 +751,13 @@ impl Rules {
             }
         }?;
         self.scripts.get(idx)
+    }
+
+    pub(crate) fn event_scripts(&self, event: &str) -> &[usize] {
+        self.compiled()
+            .event_scripts
+            .get(event)
+            .map_or(&[], Vec::as_slice)
     }
 
     #[cfg(test)]

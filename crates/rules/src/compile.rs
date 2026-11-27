@@ -212,8 +212,9 @@ fn verify_from<'a>(
     Ok(())
 }
 
-/// Same-class rules as they are read. They stay definitions until the run is long
-/// enough to merge, so at most `merge_min` are held however long the list is.
+/// Same-class rules as they are read. Domain and IP runs stay definitions until long
+/// enough to merge (so at most `merge_min` are held however long the list is), while
+/// URL-REGEX rules compile eagerly so a bad pattern fails where a lone rule would.
 struct OpenRun<D> {
     class: Class,
     start: usize,

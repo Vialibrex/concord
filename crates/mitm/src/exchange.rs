@@ -52,7 +52,7 @@ impl From<std::io::Error> for ReplyError {
 pub(crate) struct Answer {
     pub status: StatusCode,
     pub headers: HeaderMap,
-    pub body: Vec<u8>,
+    pub body: Bytes,
 }
 
 /// One exchange as it passes the rules.

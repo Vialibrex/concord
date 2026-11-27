@@ -432,3 +432,98 @@ async fn a_fetched_script_of_any_format_reads_as_its_stored_file() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_module_resource_fetches_once_per_batch_and_retries_next_batch() {
+    let origin = plain_echo_server().await.port();
+    let files = file_server(404).await;
+    let (a_port, _) = upstream_socks().await;
+    let text = format!(
+        "#!name=Shared\n\
+         [Map Local]\n\
+         ^http://localhost:\\d+/local data-type=file data=\"http://127.0.0.1:{}/shared.json\"\n\
+         [MITM]\n\
+         hostname = %APPEND% localhost:{origin}\n",
+        files.port
+    );
+    let texts = [text.clone(), text];
+    let rig = Rig::new();
+    rig.apply(&modules_config(&texts, a_port)).await.unwrap();
+    rig.engine.start_listeners().await;
+
+    let phases_of = |name: &str| -> Vec<ResourcePhase> {
+        lock(&rig.events.seen)
+            .iter()
+            .filter_map(|event| match event {
+                CoreEvent::Resource(update)
+                    if update.kind == ResourceKind::MitmModule && &*update.name == name =>
+                {
+                    Some(update.phase.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    };
+
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if phases_of("m0").len() >= 2 && phases_of("m1").len() >= 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "initial failed batch did not finish"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(files.asked.load(Ordering::SeqCst), 1);
+    for name in ["m0", "m1"] {
+        let phases = phases_of(name);
+        assert!(
+            matches!(
+                phases.as_slice(),
+                [ResourcePhase::Updating, ResourcePhase::Failed(_)]
+            ),
+            "{name}: {phases:?}"
+        );
+    }
+
+    files.status.store(200, Ordering::SeqCst);
+    rig.engine.mitm().fetch_module(None).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if phases_of("m0").len() >= 4 && phases_of("m1").len() >= 4 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "retry batch did not finish");
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(files.asked.load(Ordering::SeqCst), 2);
+    for name in ["m0", "m1"] {
+        let phases = phases_of(name);
+        assert_eq!(
+            &phases[2..4],
+            &[ResourcePhase::Updating, ResourcePhase::Updated],
+            "{name}: {phases:?}"
+        );
+    }
+
+    rig.engine.mitm().fetch_module(None).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        if phases_of("m0").len() >= 6 && phases_of("m1").len() >= 6 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "unchanged batch did not finish");
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(files.asked.load(Ordering::SeqCst), 3);
+    for name in ["m0", "m1"] {
+        let phases = phases_of(name);
+        assert_eq!(
+            &phases[4..6],
+            &[ResourcePhase::Updating, ResourcePhase::Unchanged],
+            "{name}: {phases:?}"
+        );
+    }
+}

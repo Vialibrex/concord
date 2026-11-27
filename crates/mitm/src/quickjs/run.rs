@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::Read;
@@ -9,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use bytes::Bytes;
 use concord_common::ScriptNotification;
 use concord_config::mitm::text::canonical_header;
 use concord_tls::TrustStore;
@@ -18,7 +20,7 @@ use super::bytecode::Thrown;
 use rquickjs::{
     CatchResultExt, CaughtError, Context, Ctx, Exception, Function, Object, Runtime, Value,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use url::Url;
@@ -106,16 +108,71 @@ fn os_name() -> &'static str {
     }
 }
 
-fn body_json(data: &[u8], binary: bool) -> serde_json::Value {
-    if binary {
-        json!({ "b": STANDARD.encode(data) })
-    } else {
-        json!({ "s": String::from_utf8_lossy(data) })
+#[derive(Serialize)]
+enum BodyPayload<'a> {
+    #[serde(rename = "b")]
+    Binary(String),
+    #[serde(rename = "s")]
+    Text(Cow<'a, str>),
+}
+
+impl<'a> BodyPayload<'a> {
+    fn of(data: &'a [u8], binary: bool) -> Self {
+        if binary {
+            BodyPayload::Binary(STANDARD.encode(data))
+        } else {
+            BodyPayload::Text(String::from_utf8_lossy(data))
+        }
     }
 }
 
-fn header_json(header: &HeaderList) -> serde_json::Value {
-    serde_json::to_value(header).unwrap_or_default()
+#[derive(Serialize)]
+struct RequestPayload<'a> {
+    id: &'a str,
+    url: &'a str,
+    method: &'a str,
+    headers: &'a HeaderList,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scheme: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<BodyPayload<'a>>,
+}
+
+#[derive(Serialize)]
+struct ResponsePayload<'a> {
+    status: u16,
+    headers: &'a HeaderList,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    body: Option<BodyPayload<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trailers: Option<&'a HeaderList>,
+}
+
+#[derive(Serialize)]
+struct InputPayload<'a> {
+    name: &'a str,
+    kind: &'a str,
+    binary: bool,
+    full: bool,
+    system: &'static str,
+    started: f64,
+    session: String,
+    cronexp: &'a str,
+    trigger: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    argument: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule: Option<&'a serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    domain: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request: Option<RequestPayload<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response: Option<ResponsePayload<'a>>,
 }
 
 pub(super) fn build_input(invocation: &ScriptInvocation) -> String {
@@ -124,62 +181,61 @@ pub(super) fn build_input(invocation: &ScriptInvocation) -> String {
     let started = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0.0, |elapsed| elapsed.as_secs_f64());
-    let mut input = json!({
-        "name": invocation.name,
-        "kind": invocation.kind,
-        "binary": invocation.binary_body,
-        "full": invocation.full_header,
-        "system": os_name(),
-        "started": started,
-        "session": hex::encode(session),
-        "cronexp": invocation.cronexp,
-        "trigger": invocation.trigger,
-    });
-    if let Some(event) = &invocation.event {
-        input["event"] = json!(event.name);
-    }
-    if let Some(argument) = &invocation.argument {
-        input["argument"] = argument.clone();
-    }
-    if let Some(rule) = &invocation.rule {
-        input["rule"] = rule.clone();
-    }
-    if let Some(domain) = &invocation.domain {
-        input["domain"] = json!(domain);
-    }
-    if let Some(request) = &invocation.request {
-        let mut value = json!({
-            "id": request.id,
-            "url": request.url,
-            "method": request.method,
-            "headers": header_json(&request.header),
-        });
-        if let Ok(target) = Url::parse(&request.url) {
-            let mut path = target.path().to_string();
-            if let Some(query) = target.query() {
-                path.push('?');
-                path.push_str(query);
+    let request = invocation.request.as_ref().map(|request| {
+        let (scheme, path) = match Url::parse(&request.url) {
+            Ok(target) => {
+                let mut path = target.path().to_string();
+                if let Some(query) = target.query() {
+                    path.push('?');
+                    path.push_str(query);
+                }
+                (Some(target.scheme().to_string()), Some(path))
             }
-            value["scheme"] = json!(target.scheme());
-            value["path"] = json!(path);
+            Err(_) => (None, None),
+        };
+        RequestPayload {
+            id: &request.id,
+            url: &request.url,
+            method: &request.method,
+            headers: &request.header,
+            scheme,
+            path,
+            body: request
+                .body
+                .as_deref()
+                .map(|data| BodyPayload::of(data, invocation.binary_body)),
         }
-        if let Some(body) = &request.body {
-            value["body"] = body_json(body, invocation.binary_body);
-        }
-        input["request"] = value;
-    }
-    if let Some(response) = &invocation.response {
-        let mut value =
-            json!({ "status": response.status, "headers": header_json(&response.header) });
-        if let Some(body) = &response.body {
-            value["body"] = body_json(body, invocation.binary_body);
-        }
-        if let Some(trailers) = &response.trailers {
-            value["trailers"] = header_json(trailers);
-        }
-        input["response"] = value;
-    }
-    input.to_string()
+    });
+    let response = invocation
+        .response
+        .as_ref()
+        .map(|response| ResponsePayload {
+            status: response.status,
+            headers: &response.header,
+            body: response
+                .body
+                .as_deref()
+                .map(|data| BodyPayload::of(data, invocation.binary_body)),
+            trailers: response.trailers.as_ref(),
+        });
+    let payload = InputPayload {
+        name: &invocation.name,
+        kind: &invocation.kind,
+        binary: invocation.binary_body,
+        full: invocation.full_header,
+        system: os_name(),
+        started,
+        session: hex::encode(session),
+        cronexp: &invocation.cronexp,
+        trigger: &invocation.trigger,
+        event: invocation.event.as_ref().map(|e| e.name.as_str()),
+        argument: invocation.argument.as_ref(),
+        rule: invocation.rule.as_ref(),
+        domain: invocation.domain.as_deref(),
+        request,
+        response,
+    };
+    serde_json::to_string(&payload).unwrap_or_default()
 }
 
 /// A script's source and, once a run has compiled it, its bytecode.
@@ -333,10 +389,20 @@ struct State {
     done: RefCell<Option<String>>,
 }
 
-fn install(ctx: &Ctx<'_>, state: &Rc<State>, setup: &Rc<Setup>) -> rquickjs::Result<()> {
+fn install(
+    ctx: &Ctx<'_>,
+    state: &Rc<State>,
+    setup: &Rc<Setup>,
+    input: String,
+) -> rquickjs::Result<()> {
     let native = Object::new(ctx.clone())?;
-    let input = setup.input.clone();
-    native.set("input", Function::new(ctx.clone(), move || input.clone())?)?;
+    let input = RefCell::new(Some(input));
+    native.set(
+        "input",
+        Function::new(ctx.clone(), move || {
+            input.borrow_mut().take().unwrap_or_default()
+        })?,
+    )?;
     let done = state.clone();
     native.set(
         "done",
@@ -386,29 +452,7 @@ fn install(ctx: &Ctx<'_>, state: &Rc<State>, setup: &Rc<Setup>) -> rquickjs::Res
         Function::new(
             ctx.clone(),
             move |title: String, subtitle: String, body: String, url: String| {
-                tracing::info!(
-                    "[MITM] {} notifies {title:?} {subtitle:?} {body:?}",
-                    notify.name
-                );
-                if let Some(console) = &notify.console {
-                    let parts: Vec<&str> = [title.as_str(), subtitle.as_str(), body.as_str()]
-                        .into_iter()
-                        .filter(|part| !part.is_empty())
-                        .collect();
-                    console(&parts.join("\n"));
-                }
-                if let Some(sink) = &notify.notify {
-                    sink(ScriptNotification {
-                        script: notify.name.clone(),
-                        title,
-                        subtitle,
-                        body,
-                        url,
-                        at: std::time::SystemTime::now(),
-                        connection: None,
-                        exchange: None,
-                    });
-                }
+                emit_notification(&notify, title, subtitle, body, url);
             },
         )?,
     )?;
@@ -446,6 +490,32 @@ fn install(ctx: &Ctx<'_>, state: &Rc<State>, setup: &Rc<Setup>) -> rquickjs::Res
     ctx.globals().set("__native", native)
 }
 
+fn emit_notification(setup: &Setup, title: String, subtitle: String, body: String, url: String) {
+    tracing::info!(
+        "[MITM] {} notifies {title:?} {subtitle:?} {body:?}",
+        setup.name
+    );
+    if let Some(console) = &setup.console {
+        let parts: Vec<&str> = [title.as_str(), subtitle.as_str(), body.as_str()]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .collect();
+        console(&parts.join("\n"));
+    }
+    if let Some(sink) = &setup.notify {
+        sink(ScriptNotification {
+            script: setup.name.clone(),
+            title,
+            subtitle,
+            body,
+            url,
+            at: std::time::SystemTime::now(),
+            connection: None,
+            exchange: None,
+        });
+    }
+}
+
 fn ungzip(encoded: &str, limit: i64) -> Option<String> {
     let data = STANDARD.decode(encoded).ok()?;
     let cap = u64::try_from(limit).ok()?;
@@ -466,7 +536,7 @@ fn call(ctx: &Ctx<'_>, name: &str, id: u32, json: Option<&str>) -> Result<(), St
     result.catch(ctx).map(|_| ()).map_err(|err| describe(&err))
 }
 
-fn run_thread(setup: Setup) -> Result<ScriptResult, ScriptError> {
+fn run_thread(mut setup: Setup) -> Result<ScriptResult, ScriptError> {
     let fail = |message: String| ScriptError(message);
     let runtime = Runtime::new().map_err(|err| fail(err.to_string()))?;
     if let Ok(limit) = usize::try_from(setup.memory_limit)
@@ -482,10 +552,11 @@ fn run_thread(setup: Setup) -> Result<ScriptResult, ScriptError> {
         http: Cell::new(0),
         done: RefCell::new(None),
     });
+    let input = std::mem::take(&mut setup.input);
     let setup = Rc::new(setup);
 
     let started = context.with(|ctx| -> Result<(), String> {
-        install(&ctx, &state, &setup).map_err(|err| err.to_string())?;
+        install(&ctx, &state, &setup, input).map_err(|err| err.to_string())?;
         super::bytecode::run(&ctx, super::bytecode::prelude(setup.program.quantumult))?;
         let program = setup.program.bytecode().as_ref().map_err(Clone::clone)?;
         match super::bytecode::run(&ctx, program) {
@@ -607,7 +678,11 @@ fn parse_result(json: &str) -> Result<ScriptResult, String> {
         response: done.response.map(|answer| ScriptResponse {
             status: status(answer.status),
             header: answer.header.map(to_list).unwrap_or_default(),
-            body: answer.body.as_ref().and_then(BodyJson::bytes),
+            body: answer
+                .body
+                .as_ref()
+                .and_then(BodyJson::bytes)
+                .map(Bytes::from),
             trailers: None,
         }),
         abort: done.abort.unwrap_or(false),

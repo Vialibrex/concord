@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use concord_common::sync::lock;
 use concord_common::{BoxStream, ScriptNotification, Tasks};
 use concord_config::mitm::{IssueKind, LineError, ScriptDef};
@@ -19,7 +20,7 @@ use crate::cron::CronSchedule;
 use crate::heads::HeadConditions;
 use crate::limits::Limits;
 use crate::pattern::Pattern;
-use crate::rules::{ResourceSeen, read_resource};
+use crate::rules::{FileKind, FileRecord, FileRef, ResourceSeen, read_resource};
 use crate::view::{LineView, ScriptView, ScriptViewKind};
 
 pub(crate) const DEFAULT_SCRIPT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -35,14 +36,14 @@ pub struct ScriptRequest {
     pub url: String,
     pub method: String,
     pub header: HeaderList,
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Bytes>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ScriptResponse {
     pub status: u16,
     pub header: HeaderList,
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Bytes>,
     /// What followed a body read whole, as gRPC's `grpc-status`.
     pub trailers: Option<HeaderList>,
 }
@@ -147,8 +148,21 @@ impl From<CompileError> for LineError {
     }
 }
 
+pub trait ScriptBatch {
+    fn compile(
+        &mut self,
+        name: &str,
+        source: &[u8],
+    ) -> Result<Arc<dyn ScriptProgram>, CompileError>;
+}
+
 pub trait ScriptRuntime: Send + Sync {
     fn compile(&self, name: &str, source: &[u8]) -> Result<Arc<dyn ScriptProgram>, CompileError>;
+
+    /// A short-lived compile session reused across one config load and dropped when it finishes.
+    fn batch(&self) -> Option<Box<dyn ScriptBatch>> {
+        None
+    }
 }
 
 /// Compiled once and run concurrently. The future must stop its work when it
@@ -198,25 +212,39 @@ impl ScriptHost {
         &self,
         resources: &Path,
         name: &str,
-        seen: &mut Option<Result<ResourceSeen, LineError>>,
+        files: &mut Vec<FileRecord>,
+        batch: &mut Option<Box<dyn ScriptBatch>>,
     ) -> Result<(Arc<dyn ScriptProgram>, [u8; 32]), LineError> {
         let runtime = lock(&self.runtime)
             .clone()
             .ok_or_else(|| LineError::unsupported("this build runs no scripts"))?;
+        let file = FileRef::new("script-path", name, FileKind::Whole);
         let source = match read_resource(resources, "script-path", name) {
             Ok(bytes) => bytes,
             Err(err) => {
-                *seen = Some(Err(err.clone()));
+                files.push(FileRecord {
+                    file,
+                    seen: Err(err.clone()),
+                });
                 return Err(err);
             }
         };
         let key: [u8; 32] = Sha256::digest(&source).into();
-        *seen = Some(Ok(ResourceSeen::Content(key)));
+        files.push(FileRecord {
+            file,
+            seen: Ok(ResourceSeen::Content(key)),
+        });
         let cached = lock(&self.programs).get(&key).cloned();
         if let Some(program) = cached {
             return Ok((program, key));
         }
-        let program = runtime.compile(name, &source)?;
+        if batch.is_none() {
+            *batch = runtime.batch();
+        }
+        let program = match batch.as_deref_mut() {
+            Some(session) => session.compile(name, &source)?,
+            None => runtime.compile(name, &source)?,
+        };
         {
             let mut programs = lock(&self.programs);
             programs.insert(key, program.clone());
@@ -329,7 +357,8 @@ pub(crate) fn compile_script(
     def: &ScriptDef,
     resources: &Path,
     host: &ScriptHost,
-    seen: &mut Option<Result<ResourceSeen, LineError>>,
+    files: &mut Vec<FileRecord>,
+    batch: &mut Option<Box<dyn ScriptBatch>>,
 ) -> Result<Script, LineError> {
     let cron = match def.kind {
         ScriptKind::Cron => Some(CronSchedule::parse(&def.cronexp)?),
@@ -345,7 +374,7 @@ pub(crate) fn compile_script(
     });
     let pattern = def.pattern.as_deref().map(Pattern::new).transpose()?;
     let conditions = HeadConditions::compile(&def.conditions)?;
-    let (program, key) = host.compile(resources, &def.path, seen)?;
+    let (program, key) = host.compile(resources, &def.path, files, batch)?;
     Ok(Script {
         name: def.name.clone(),
         path: def.path.clone(),
@@ -377,6 +406,7 @@ pub(crate) fn parse_script(
         &concord_config::mitm::parse_script(line)?,
         resources,
         host,
+        &mut Vec::new(),
         &mut None,
     )
 }
@@ -470,12 +500,17 @@ mod tests {
         let (_home, resources, host) = setup();
         concord_test_support::poison(&host.runtime);
         concord_test_support::poison(&host.programs);
-        let (first, _) = host.compile(&resources, "a.js", &mut None).unwrap();
-        let (again, _) = host.compile(&resources, "a.js", &mut None).unwrap();
+        let (first, _) = host
+            .compile(&resources, "a.js", &mut Vec::new(), &mut None)
+            .unwrap();
+        let (again, _) = host
+            .compile(&resources, "a.js", &mut Vec::new(), &mut None)
+            .unwrap();
         assert!(Arc::ptr_eq(&first, &again), "the program was cached");
         host.set_runtime(None);
         assert_eq!(
-            host.compile(&resources, "a.js", &mut None).err(),
+            host.compile(&resources, "a.js", &mut Vec::new(), &mut None)
+                .err(),
             Some(LineError::unsupported("this build runs no scripts"))
         );
     }

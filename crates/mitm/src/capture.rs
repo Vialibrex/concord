@@ -129,7 +129,11 @@ impl CaptureStore {
         let mut exchanges: Vec<ExchangeSummary> = inner
             .by_connection
             .get(connection)
-            .map(|list| list.iter().map(|c| c.snapshot().summary).collect())
+            .map(|list| {
+                list.iter()
+                    .map(|c| c.view(|view| c.summary_of(view)))
+                    .collect()
+            })
             .unwrap_or_default();
         exchanges.sort_by_key(|summary| summary.id);
         ExchangeList {
@@ -357,17 +361,17 @@ impl StoreInner {
     }
 }
 
+fn action_footprint(action: &Action) -> usize {
+    action.phase.len() + action.detail.len() + action.module.len()
+}
+
 impl Exchange {
     fn rewritten(&self) -> bool {
         !self.actions.is_empty()
     }
 
     fn footprint(&self) -> i64 {
-        let actions: usize = self
-            .actions
-            .iter()
-            .map(|action| action.phase.len() + action.detail.len() + action.module.len())
-            .sum();
+        let actions: usize = self.actions.iter().map(action_footprint).sum();
         let route = self.route.as_ref().map_or(0, |route| {
             route.rule.len()
                 + route.rule_payload.len()
@@ -499,14 +503,17 @@ impl Cap {
 
     pub fn note(&self, kind: &'static str, phase: &str, detail: &str, module: Option<&str>) {
         if let Some(c) = &self.capture {
-            c.update(|e| {
-                e.actions.push(Action {
-                    kind,
-                    phase: phase.to_string(),
-                    detail: detail.to_string(),
-                    module: module.unwrap_or_default().to_string(),
-                })
-            });
+            let action = Action {
+                kind,
+                phase: phase.to_string(),
+                detail: detail.to_string(),
+                module: module.unwrap_or_default().to_string(),
+            };
+            let delta = action_footprint(&action) as i64;
+            {
+                lock(&c.record).exchange.actions.push(action);
+            }
+            c.store.changed(c, delta);
         }
     }
 
@@ -845,5 +852,61 @@ mod tests {
             serde_json::json!(["header-rewrite", "script"])
         );
         assert_eq!(json["answer"], "map-local");
+    }
+
+    #[test]
+    fn incremental_note_footprint_eviction_and_exchanges_match_full_recomputation() {
+        let (_, cap_store) = store();
+        let cap = begin(&cap_store, "https://a.test/many");
+        cap.attach(Some(&conn("c1")));
+        cap.responded(200, || {
+            HeaderList::from([("Content-Type".to_string(), vec!["application/json".into()])])
+        });
+        for i in 0..25 {
+            let detail = if i % 5 == 0 {
+                String::new()
+            } else {
+                format!("rule-{i}")
+            };
+            let module = (i % 3 == 0).then(|| format!("mod-{i}"));
+            let phase = if i % 2 == 0 {
+                PHASE_REQUEST
+            } else {
+                PHASE_RESPONSE
+            };
+            cap.note("header-rewrite", phase, &detail, module.as_deref());
+            let snap = cap_store.find(cap.id().unwrap()).unwrap();
+            assert_eq!(cap.held_bytes(), snap.footprint());
+            assert_eq!(cap_store.tracked_bytes(), cap.held_bytes());
+        }
+        let via_list = cap_store.exchanges("c1").exchanges;
+        let via_find = cap_store.find(cap.id().unwrap()).unwrap().summary;
+        assert_eq!(via_list.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&via_list[0]).unwrap(),
+            serde_json::to_value(&via_find).unwrap()
+        );
+
+        let (_, evict_store) = store();
+        let first = begin(&evict_store, "https://a.test/first");
+        let second = begin(&evict_store, "https://a.test/second");
+        let combined = first.held_bytes() + second.held_bytes();
+        evict_store.limit(100, combined + 64, DEFAULT_MAX_BODY_SIZE);
+        assert!(evict_store.find(first.id().unwrap()).is_some());
+        second.note(
+            "header-rewrite",
+            PHASE_REQUEST,
+            &"x".repeat(256),
+            Some("overflow"),
+        );
+        assert!(
+            evict_store.find(first.id().unwrap()).is_none(),
+            "crossing max_bytes inside note must evict the oldest record"
+        );
+        let kept = evict_store.find(second.id().unwrap()).unwrap();
+        assert_eq!(second.held_bytes(), kept.footprint());
+        assert_eq!(evict_store.tracked_bytes(), second.held_bytes());
+        first.note("script", PHASE_RESPONSE, "late", Some("gone"));
+        assert_eq!(evict_store.tracked_bytes(), second.held_bytes());
     }
 }
