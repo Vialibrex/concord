@@ -14,7 +14,7 @@ These are host tests. Android was exercised by hand in an embedding app on an em
 
 | # | Behaviour | Status | Tests and notes |
 |---|---|---|---|
-| 1 | A rejected `config.setup` applies the built-in empty config and answers `rejected` with `fellBack` | partial | `concord-api::behaviour::a_rejected_profile_is_rejected_with_a_fallback_and_the_core_keeps_running` (`rejected` with `fellBack`); `concord-engine::e2e::a_rejected_config_falls_back_to_direct_and_says_so`. A failing empty config answering `internal` is not tested |
+| 1 | A rejected `config.setup` applies the built-in empty config, answers `rejected` with `fellBack`, and marks `config.general` with `fellBack: true` until a valid apply succeeds | partial | `concord-api::behaviour::a_rejected_profile_is_rejected_with_a_fallback_and_the_core_keeps_running` (`rejected` with `fellBack`, `config.general` `fellBack: true` then omitted after a valid apply), `config_general_is_not_fell_back_before_first_apply_or_after_valid_apply`; `concord-engine::e2e::a_rejected_config_falls_back_to_direct_and_says_so`. A failing empty config answering `internal` is not tested |
 | 2 | `options` apply before the profile is read | partial | `concord-api::behaviour::options_take_effect_before_the_profile_is_read` asserts the test URL, not the timeout |
 | 3 | `config.setup` opens no port; `listener.start` does | verified | `concord-api::behaviour::engine_start_opens_the_port_and_an_apply_alone_does_not` |
 | 4 | Providers load asynchronously and each reports `loaded` | verified | Now `resourceUpdate`, every step of whose first load waits for the apply to finish: `concord-api::behaviour::each_provider_reports_loaded_after_the_apply_has_answered`, `an_apply_does_not_wait_for_a_provider_download`; `concord-engine::e2e::the_first_loads_report_their_outcome_only_once_the_apply_lets_them`. Every later fetch reports too: `concord-group::providers::an_http_provider_reports_every_fetch_whatever_started_it`, `concord-engine::geo_update` |
@@ -185,7 +185,7 @@ The new stack carries the same service behaviour under new names (`config.apply`
 
 | # | New test |
 |---|---|
-| 1 | `a_rejected_profile_is_rejected_with_a_fallback_and_the_core_keeps_running` (answers `rejected` with `fellBack: true`; the empty-config failure path stays untested) |
+| 1 | `a_rejected_profile_is_rejected_with_a_fallback_and_the_core_keeps_running` (answers `rejected` with `fellBack: true`, sets `config.general` `fellBack: true`, and omits it again after a valid apply), `config_general_is_not_fell_back_before_first_apply_or_after_valid_apply` (the empty-config failure path stays untested) |
 | 2 | `options_take_effect_before_the_profile_is_read` |
 | 3 | `engine_start_opens_the_port_and_an_apply_alone_does_not`; `the_engine_state_stream_reports_each_step_the_core_takes` |
 | 4 | `each_provider_reports_loaded_after_the_apply_has_answered`, `an_apply_does_not_wait_for_a_provider_download` |

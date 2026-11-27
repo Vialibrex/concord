@@ -68,6 +68,8 @@ that lets a dashboard in keeps its own copy in step:
 
 1. Open `events.watch` with `state: true`, then call `config.general`. Take its `selections` and settings as the
    current state and its `seq` as the last change they include; drop any `stateChanged` with a `seq` at or below it.
+   When `fellBack` is `true`, the built-in empty fallback is in force after a rejected apply: still advance the seen
+   `seq` to drop stale events, but do not adopt the fallback's general settings or selections over the host's own.
 2. Apply every later `stateChanged` in order, whatever its `origin`: a `selected` sets or clears one pick, a
    `general` sets the fields it carries, an `applied` means a `config.apply` replaced the picks with its `selection`.
    Changes the host made itself come back too, with `origin: host`. A fallback group that drops a pick because
