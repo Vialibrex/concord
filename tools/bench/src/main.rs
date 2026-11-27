@@ -15,6 +15,7 @@ mod cases;
 mod control;
 mod core;
 mod env;
+mod fresh;
 mod gost;
 #[cfg(target_os = "linux")]
 mod groupfault;

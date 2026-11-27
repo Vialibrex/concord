@@ -14,6 +14,7 @@ use tokio::process::Child;
 
 use crate::cases::{self, Case};
 use crate::core::{CoreSpec, Launch, Running};
+use crate::fresh;
 use crate::isolate::{self, CpuPlan, Netns, Placement, Role};
 use crate::load::{self, Ctx, Metrics, Pids, Workload};
 use crate::mitm::{self, Authority, Clients};
@@ -737,13 +738,12 @@ impl Rig {
     ) -> Result<Metrics, String> {
         let launch = self.launch(far, case, core, workload.name(), profile, tun);
         let running = launch.await?;
-        let pid = running.pid;
+        let (pid, ready) = (running.pid, running.ready);
         let result = match workload {
-            Workload::Idle => load::idle(&self.ctx(far, case, running.entry, pid)).await,
-            Workload::Startup => {
-                Ok(load::settled(pid, running.ready, Duration::from_secs(2)).await)
-            }
-            Workload::Large => Ok(load::settled(pid, running.ready, Duration::from_secs(3)).await),
+            Workload::Idle => fresh::idle(&self.ctx(far, case, running.entry, pid)).await,
+            Workload::Quiet => fresh::quiet(&self.ctx(far, case, running.entry, pid)).await,
+            Workload::Startup => Ok(fresh::settled(pid, ready, Duration::from_secs(2)).await),
+            Workload::Large => Ok(fresh::settled(pid, ready, Duration::from_secs(3)).await),
             other => Err(format!("{} is not a fresh-core workload", other.name())),
         };
         let stop = running.stop().await;

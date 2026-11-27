@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The calls a relay's data path is made of, and the two that show its wakeups.
-pub const NAMES: [&str; 13] = [
+pub const NAMES: [&str; 14] = [
     "read",
     "readv",
     "recvfrom",
@@ -21,6 +21,7 @@ pub const NAMES: [&str; 13] = [
     "sendmmsg",
     "splice",
     "epoll_pwait",
+    "epoll_pwait2",
     "futex",
 ];
 pub const RECV: [&str; 5] = ["read", "readv", "recvfrom", "recvmsg", "recvmmsg"];

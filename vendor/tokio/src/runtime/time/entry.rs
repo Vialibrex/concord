@@ -76,6 +76,15 @@ const STATE_MIN_VALUE: u64 = STATE_PENDING_FIRE;
 /// This value should be updated if any other signal values are added above.
 pub(super) const MAX_SAFE_MILLIS_DURATION: u64 = STATE_MIN_VALUE - 1;
 
+// Concord: an entry's state holds its deadline in nanoseconds; `registered_when` holds the millisecond slot it
+// sits in, or `REGISTERED_HELD` while it waits on the wheel's held list for the rest of its millisecond.
+pub(super) const NANOS_PER_TICK: u64 = 1_000_000;
+pub(super) const REGISTERED_HELD: u64 = STATE_PENDING_FIRE;
+
+pub(super) fn tick_of(nanos: u64) -> u64 {
+    nanos / NANOS_PER_TICK
+}
+
 /// This structure holds the current shared state of the timer - its scheduled
 /// time (if registered), or otherwise the result of the timer completing, as
 /// well as the registered waker.
@@ -398,7 +407,7 @@ impl TimerShared {
     pub(super) unsafe fn sync_when(&self) -> u64 {
         let true_when = self.true_when();
 
-        self.registered_when.store(true_when, Ordering::Relaxed);
+        self.registered_when.store(tick_of(true_when), Ordering::Relaxed);
 
         true_when
     }
@@ -423,7 +432,7 @@ impl TimerShared {
     /// in the timer wheel.
     pub(super) unsafe fn set_expiration(&self, t: u64) {
         self.state.set_expiration(t);
-        self.registered_when.store(t, Ordering::Relaxed);
+        self.registered_when.store(tick_of(t), Ordering::Relaxed);
     }
 
     /// Sets the true time-of-expiration only if it is after the current.
@@ -527,6 +536,10 @@ impl TimerEntry {
         }
     }
 
+    pub(crate) fn time_source(&self) -> &super::TimeSource {
+        self.driver().time_source()
+    }
+
     pub(crate) fn poll_elapsed(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -586,13 +599,20 @@ impl TimerHandle {
                 }
                 Ok(())
             }
-            Err(tick) => {
+            Err(when) => {
                 unsafe {
-                    self.inner.as_ref().set_registered_when(tick);
+                    self.inner.as_ref().set_registered_when(tick_of(when));
                 }
-                Err(tick)
+                Err(when)
             }
         }
+    }
+
+    /// SAFETY: The caller must ensure that the handle remains valid, the driver
+    /// lock is held, and the entry is not in any wheel linked lists; the caller
+    /// must immediately push the entry onto the wheel's held list.
+    pub(super) unsafe fn set_held(&self) {
+        unsafe { self.inner.as_ref().set_registered_when(REGISTERED_HELD) }
     }
 
     /// Attempts to transition to a terminal state. If the state is already a

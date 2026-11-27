@@ -153,6 +153,11 @@ impl Level {
         }
     }
 
+    // Concord: lets the wheel read a slot's deadlines without unlinking them.
+    pub(crate) fn slot_list(&self, slot: usize) -> &LinkedList<TimerShared> {
+        &self.slot[slot]
+    }
+
     pub(crate) fn take_slot(&mut self, slot: usize) -> LinkedList<TimerShared> {
         self.occupied &= !occupied_bit(slot);
 

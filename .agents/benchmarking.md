@@ -62,7 +62,7 @@ Four roles take part, and each one is measured:
 
 For each case, every core starts on its own port and stays up. Rounds run the cores in rotating order (AB, BA, ...), so
 drift over the run affects each core alike. Each workload has one warmup trial per core that is not counted, and each
-trial measures over a window that opens after `warmup`. `idle`, `startup` and `large` start a fresh core for every
+trial measures over a window that opens after `warmup`. `idle`, `quiet`, `startup` and `large` start a fresh core for every
 trial. With `--fresh-cores`, the other workloads also start every core afresh for each round, with a warmup trial per
 process, so an interval covers process starts rather than only connections. Concord is stopped by closing its control connection, as a host does when it quits; mihomo by SIGTERM, and on
 Windows by terminating it, so `stop_ms` only compares on Unix.
@@ -279,6 +279,7 @@ and a drift of at most 1.61%. The same case on the second machine is a separate 
 | `udp-rr` | one UDP ping in flight: RTT and loss |
 | `udp-crr` | a fresh UDP socket per session, one 64-byte echo, close, as a port scan opens sessions: sessions/s (`cps`), p50/p99 latency, lost sessions (`error_pct`, 250 ms), CPU-µs per session; `--crr-conns` beyond the core's UDP flow table (`MAX_FLOWS` in `crates/tunnel/src/udp/mod.rs`) runs its eviction |
 | `idle` | KiB per held connection, KiB still held after they close, fds per connection, time to open them all |
+| `quiet` | one proven connection held for `--duration` with no traffic: the core's context switches per minute (each is a thread waking from a wait) and, with `--count-syscalls`, its `epoll_pwait`, `epoll_pwait2` and `futex` calls per minute; on the plain cases |
 | `startup` | spawn to first proxied byte, idle memory, threads, fds, CPU spent starting, time to exit after SIGTERM |
 | `large` | a generated profile (quick tier 5k proxies and 50k rules, full tier 20k and 200k): time to ready, peak and settled memory |
 | `mitm-rr`, `mitm-h2-rr` | `mitm` cases: a 64-byte POST and its answer over one HTTPS connection, HTTP/1.1 or HTTP/2, with `tcp-rr`'s metrics and `decrypted` (1 when the core answered the handshake with its own certificate) |
@@ -353,13 +354,16 @@ Two counters on Linux serve the mechanism-count and targeted-signal layers of `p
 `--count-syscalls` (Linux, as root) adds system call counts for the core and the server, read per thread from the
 `syscalls:sys_enter_*` and `raw_syscalls:sys_enter` tracepoints with `perf_event_open` in counting mode, so the
 binaries are unchanged: `syscalls_per_mb` (all calls), `sys_<name>_per_mb` for the read, write, recv, send, splice,
-`epoll_pwait` and `futex` families, `recv_calls_per_mb` and `send_calls_per_mb`, `socket_bytes_per_recv_call` and
+`epoll_pwait`, `epoll_pwait2` and `futex` families (on Linux 5.11+, Concord's timed waits count under
+`sys_epoll_pwait2_*` while untimed waits and Go's poller count under `sys_epoll_pwait_*`, so sum the two when comparing
+total epoll waits across cores), `recv_calls_per_mb` and `send_calls_per_mb`, `socket_bytes_per_recv_call` and
 `socket_bytes_per_send_call` (the core's TCP bytes from the socket counters divided by those calls; left out when
 the core called `splice`, since those bytes pass through neither), and the same with a `server_` prefix. `tcp-rr`
 and `tcp-crr` report the call counts per transaction and per connection instead (`syscalls_per_conn`,
-`sys_<name>_per_conn`, `recv_calls_per_conn`, and `_per_tx` likewise). Threads started after a window opens are not
-counted. While any syscall tracepoint is on, every system call on the machine takes the kernel's slow entry path, so
-CPU and rates from such a run are not comparable with a run without it; use it for the counts only.
+`sys_<name>_per_conn`, `recv_calls_per_conn`, and `_per_tx` likewise), and `quiet` reports `_per_min`. Threads started
+after a window opens are not counted. While any syscall tracepoint is on, every system call on the machine takes the
+kernel's slow entry path, so CPU and rates from such a run are not comparable with a run without it; use it for the
+counts only.
 
 `--net-counters` (Linux) is a diagnostic for the bulk TCP workloads that reads kernel state at the two edges of each
 window and never inside it, at the instants the socket counters above are already read:

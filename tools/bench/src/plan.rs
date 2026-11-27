@@ -149,6 +149,7 @@ impl Plan {
             let trial = match w {
                 Workload::Startup => Duration::from_secs(3),
                 Workload::Idle => Duration::from_secs(8),
+                Workload::Quiet => self.duration + Duration::from_secs(2),
                 Workload::Large => Duration::from_secs(15),
                 Workload::TcpCrr | Workload::MitmCrr => Duration::from_secs(3),
                 Workload::PageLoad => stream + Duration::from_secs(3),

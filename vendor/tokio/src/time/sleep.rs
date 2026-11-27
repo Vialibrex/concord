@@ -338,11 +338,11 @@ impl Sleep {
         *this.deadline = deadline;
 
         let handle = this.driver;
-        let time_source = handle.driver().time().time_source();
-        let deadline = time_source.deadline_to_tick(deadline);
 
         #[cfg(all(tokio_unstable, feature = "tracing"))]
         {
+            let time_source = handle.driver().time().time_source();
+            let deadline = time_source.deadline_to_tick(deadline);
             let _resource_enter = this.inner.ctx.resource_span.enter();
             this.inner.ctx.async_op_span =
                 tracing::trace_span!("runtime.resource.async_op", source = "Sleep::reset");
@@ -405,11 +405,12 @@ impl Sleep {
             Some(timer) => timer,
             None => {
                 let handle = this.driver;
-                let time_source = handle.driver().time().time_source();
-                let deadline = time_source.deadline_to_tick(*this.deadline);
+                let deadline = *this.deadline;
 
                 #[cfg(all(tokio_unstable, feature = "tracing"))]
                 {
+                    let time_source = handle.driver().time().time_source();
+                    let deadline = time_source.deadline_to_tick(deadline);
                     let clock = handle.driver().clock();
                     let now = time_source.now(clock);
                     tracing::trace!(

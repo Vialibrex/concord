@@ -34,6 +34,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | gotatun | Deliver already-ready encrypted IP packets to the bounded UDP queue together | None yet | Propose the batch handoff to mullvad/gotatun |
 | h2 | Ignore DATA and HEADERS on forgotten client streams | None as of 0.4.20 | Issue and PR to hyperium/h2 with the delayed-DATA-after-reset transport test |
 | mio | High-resolution timed waits on Windows | None | PR to tokio-rs/mio, citing Go's default poller path |
+| mio | Nanosecond timed waits through `epoll_pwait2` on Linux | None | PR to tokio-rs/mio |
 | quinn | `MAX_TRANSMIT_DATAGRAMS` 80 (`MAX_TRANSMIT_SEGMENTS` back to upstream's 10) | n0-computer/noq#636 (noq) | The segment cap is upstream's again; propose only the datagram limit to quinn-rs/quinn |
 | quinn | Stamp each received batch with its own read time | None; quinn `main` `8fe66c3` passes one `now` | PR with `crates/proxy/tests/quinn_recv_time.rs` as the regression |
 | quinn | Lease receive scratch for a socket poll instead of an endpoint lifetime | None | Propose to quinn-rs/quinn with the endpoint sharing regression and receive-buffer lease contracts |
@@ -50,6 +51,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | tokio | Notify peer workers only after `transition_from_parked` removes self from `idle.sleepers` | None | Bug-fix PR |
 | tokio | Check pending queues in `transition_worker_from_searching` before waking a parked worker | None | Bug-fix PR |
 | tokio | Notify peer workers on `yield_now` only when `should_notify_others()` is true | None | Bug-fix PR |
+| tokio | Fire traditional wheel timers at their nanosecond deadline instead of rounding up to the next millisecond | None | Propose to tokio-rs/tokio |
 | tun-rs | `AsyncDevice::into_sync` keeps the owned device | None | PR to tun-rs |
 
 ## boring 5.4.0
@@ -94,6 +96,11 @@ The package archive checksum is `7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c
 
 ## mio 1.2.4
 
+- `src/sys/unix/selector/epoll.rs`: on Linux (excluding Android), a timed `select` invokes `epoll_pwait2` with a
+  nanosecond `__kernel_timespec` (`{ i64, i64 }`), falling back permanently to `epoll_wait` after `ENOSYS` or `EPERM`.
+  Android keeps `epoll_wait` because app seccomp policies can kill a process with `SIGSYS` on syscalls bionic does not
+  expose; Linux environments whose seccomp filter kills with `SIGSYS` instead of returning `EPERM` (such as OHOS) are
+  outside the supported scope. Regression contract: `crates/platform/tests/timer_deadline.rs`.
 - `Cargo.lock`: registry lockfile omitted; the workspace uses its root lockfile.
 - `src/sys/windows/hires_timer.rs`, `selector.rs`, `mod.rs`, `overlapped.rs`, `Cargo.toml`: a timed `select` arms a
   high-resolution waitable timer and associates it with the completion port through `NtAssociateWaitCompletionPacket`,
@@ -303,6 +310,18 @@ The package archive checksum is `b52fd3255258d26fac7264ab5a76b53c13367136dc011d3
     driver worker while a peer self-yields.
     Tokio's upstream `rt_metrics`, `rt_threaded`, `rt_unstable_metrics`, and `rt_unstable_eager_driver_handoff` suites
     were also verified against the full upstream package before trimming `tests/`.
+- `src/runtime/driver.rs`, `src/runtime/mod.rs`, `src/runtime/time/entry.rs`, `src/runtime/time/mod.rs`, `src/runtime/time/source.rs`, `src/runtime/time/tests/mod.rs`, `src/runtime/time/wheel/level.rs`, `src/runtime/time/wheel/mod.rs`, `src/time/sleep.rs`, `src/util/linked_list.rs`:
+  - Fire traditional wheel timers at their nanosecond deadline instead of rounding each deadline up to the next
+    millisecond (`TimeSource::deadline_to_tick` added 999,999 ns and parked for whole milliseconds, adding ~1 ms of
+    overshoot to every sleep). `TimerShared.state` now stores the deadline in nanoseconds while `registered_when`
+    keeps the 1 ms wheel slot (`floor(deadline)`). Entries whose millisecond slot has been processed while their
+    nanosecond deadline lies later in that millisecond wait on a per-wheel `held` list (marked by `REGISTERED_HELD`
+    in `registered_when` for cancellation), because 1.54's `next_occupied_slot` skips the slot holding `elapsed`.
+    `Wheel::next_wake_nanos` scans the `held` list and the next level-0 slot for the earliest nanosecond deadline
+    so `Driver::park_internal` parks for the exact remaining duration. `Timer::new`/`init`/`reset` take `Instant`
+    directly (`TimerFlavor::Alternative` keeps millisecond ticks). A timer fires only when `deadline <= clock.now()`,
+    verified by `runtime::time::tests::concord_tests`, the upstream tokio 1.54.1 `time_*` and `rt_time_start_paused`
+    suites, and `crates/platform/tests/timer_deadline.rs`.
 - `Cargo.toml`, `tests/`: the `[[test]]` targets are removed with their sources.
 - `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`: crates.io packaging metadata, omitted.
 

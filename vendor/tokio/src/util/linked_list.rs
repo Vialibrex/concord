@@ -257,6 +257,18 @@ impl<L: Link> LinkedList<L> {
     }
 }
 
+// Concord: walks the nodes without unlinking them; the caller must not mutate the list meanwhile.
+impl<L: Link> LinkedList<L> {
+    pub(crate) fn targets(&self) -> impl Iterator<Item = NonNull<L::Target>> + '_ {
+        let mut next = self.head;
+        core::iter::from_fn(move || {
+            let curr = next?;
+            next = unsafe { L::pointers(curr).as_ref().get_next() };
+            Some(curr)
+        })
+    }
+}
+
 impl<L: Link> Default for LinkedList<L> {
     fn default() -> Self {
         Self::new()

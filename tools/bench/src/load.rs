@@ -37,12 +37,13 @@ pub enum Workload {
     HttpRr,
     PageLoad,
     Idle,
+    Quiet,
     Startup,
     Large,
 }
 
 impl Workload {
-    pub const ALL: [Workload; 17] = [
+    pub const ALL: [Workload; 18] = [
         Workload::TcpDown,
         Workload::TcpUp,
         Workload::TcpMulti,
@@ -58,6 +59,7 @@ impl Workload {
         Workload::HttpRr,
         Workload::PageLoad,
         Workload::Idle,
+        Workload::Quiet,
         Workload::Startup,
         Workload::Large,
     ];
@@ -79,6 +81,7 @@ impl Workload {
             Workload::HttpRr => "http-rr",
             Workload::PageLoad => "page-load",
             Workload::Idle => "idle",
+            Workload::Quiet => "quiet",
             Workload::Startup => "startup",
             Workload::Large => "large",
         }
@@ -113,6 +116,9 @@ impl Workload {
             Workload::Idle => {
                 "memory per held connection, and what stays after they close; on mitm cases each holds a TLS session after one exchange"
             }
+            Workload::Quiet => {
+                "one proven connection held for the window with no traffic: the core's wake-ups per minute (context switches; with --count-syscalls its epoll and futex calls)"
+            }
             Workload::Startup => "spawn to first proxied byte, idle memory, threads, exit time",
             Workload::Large => "a large generated profile: time to ready and peak memory",
         }
@@ -139,7 +145,10 @@ impl Workload {
 
     /// Runs against a fresh core each trial rather than the case's shared one.
     pub fn fresh_core(self) -> bool {
-        matches!(self, Workload::Idle | Workload::Startup | Workload::Large)
+        matches!(
+            self,
+            Workload::Idle | Workload::Quiet | Workload::Startup | Workload::Large
+        )
     }
 
     pub fn per_case(self) -> bool {
@@ -181,7 +190,7 @@ pub struct Ctx {
 }
 
 impl Ctx {
-    fn at(&self, port: u16) -> SocketAddr {
+    pub(crate) fn at(&self, port: u16) -> SocketAddr {
         SocketAddr::new(self.origin, port)
     }
 }
@@ -235,7 +244,7 @@ impl Windows {
     }
 }
 
-const MIB: f64 = 1024.0 * 1024.0;
+pub(crate) const MIB: f64 = 1024.0 * 1024.0;
 
 /// Cost of the window per `unit_count` units of work, named `per`.
 fn costs(m: &mut Metrics, closed: &Closed, bytes: Option<u64>, per: Option<(&str, f64, f64)>) {
@@ -370,9 +379,9 @@ fn latency_metrics(m: &mut Metrics, prefix: &str, samples: &mut [u64], unit_ns: 
     );
 }
 
-type Io<T> = Result<T, String>;
+pub(crate) type Io<T> = Result<T, String>;
 
-fn io(what: &str) -> impl FnOnce(std::io::Error) -> String + '_ {
+pub(crate) fn io(what: &str) -> impl FnOnce(std::io::Error) -> String + '_ {
     move |e| format!("{what}: {e}")
 }
 
@@ -398,7 +407,7 @@ pub async fn run(workload: Workload, ctx: &Ctx) -> Io<Metrics> {
         }
         Workload::HttpRr => mitm::rr(ctx, Wire::Plain).await,
         Workload::PageLoad => page_load(ctx).await,
-        Workload::Idle | Workload::Startup | Workload::Large => {
+        Workload::Idle | Workload::Quiet | Workload::Startup | Workload::Large => {
             Err(format!("{} runs on a fresh core", workload.name()))
         }
     }
@@ -968,139 +977,6 @@ async fn udp_crr_once(entry: Entry, target: SocketAddr) -> Result<u64, String> {
         Ok(Err(err)) => Err(err.to_string()),
         Err(_) => Err("lost".into()),
     }
-}
-
-/// Holds `ctx.idle_conns` connections, each proven end to end, and reads the core
-/// before, while they are held, and after they are closed.
-pub async fn idle(ctx: &Ctx) -> Io<Metrics> {
-    if ctx.tls.is_some() {
-        let held = ctx.clone();
-        return hold(ctx, move || mitm::held(held.clone()), drop).await;
-    }
-    let (entry, target) = (ctx.entry, ctx.at(ctx.ports.echo));
-    let open = move || async move {
-        let mut stream = socks::connect(entry, target)
-            .await
-            .map_err(|e| e.to_string())?;
-        stream.write_all(b"i").await.map_err(|e| e.to_string())?;
-        let mut byte = [0u8; 1];
-        stream
-            .read_exact(&mut byte)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(stream)
-    };
-    hold(ctx, open, socks::abort).await
-}
-
-/// Opens `idle_conns` connections with `open`, 64 at a time, and reads what holding them costs.
-async fn hold<T, F, Fut>(ctx: &Ctx, open: F, close: fn(T)) -> Io<Metrics>
-where
-    T: Send + 'static,
-    F: Fn() -> Fut,
-    Fut: Future<Output = Result<T, String>> + Send + 'static,
-{
-    let pid = ctx.pids.core;
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let before = probe::memory(pid, true).ok_or("read core memory")?;
-    let server_before = ctx.pids.server.and_then(|p| probe::memory(p, true));
-    let fds_before = probe::open_fds(pid);
-    let started = Instant::now();
-    let mut held = Vec::with_capacity(ctx.idle_conns);
-    let mut pending = tokio::task::JoinSet::new();
-    let mut failures = 0usize;
-    let mut first_error = None;
-    for _ in 0..ctx.idle_conns {
-        if pending.len() >= 64
-            && let Some(done) = pending.join_next().await
-        {
-            match done {
-                Ok(Ok(stream)) => held.push(stream),
-                Ok(Err(e)) => {
-                    failures += 1;
-                    first_error.get_or_insert(e);
-                }
-                Err(_) => failures += 1,
-            }
-        }
-        let opening = open();
-        pending.spawn(async move {
-            tokio::time::timeout(Duration::from_secs(10), opening)
-                .await
-                .map_err(|_| "held connection not proven within 10 s".to_string())?
-        });
-    }
-    while let Some(done) = pending.join_next().await {
-        match done {
-            Ok(Ok(stream)) => held.push(stream),
-            Ok(Err(e)) => {
-                failures += 1;
-                first_error.get_or_insert(e);
-            }
-            Err(_) => failures += 1,
-        }
-    }
-    let open_ms = started.elapsed().as_secs_f64() * 1e3;
-    if held.is_empty() {
-        return Err(format!(
-            "no connection opened: {}",
-            first_error.unwrap_or_default()
-        ));
-    }
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    let loaded = probe::memory(pid, true).ok_or("read core memory")?;
-    let server_loaded = ctx.pids.server.and_then(|p| probe::memory(p, true));
-    let fds_loaded = probe::open_fds(pid);
-    let count = held.len() as f64;
-    for item in held.drain(..) {
-        close(item);
-    }
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    let after = probe::memory(pid, true).ok_or("read core memory")?;
-    let mut m = Metrics::new();
-    let kib = |a: u64, b: u64| (a as f64 - b as f64) / 1024.0 / count;
-    m.insert(
-        "kib_per_conn".into(),
-        kib(loaded.footprint, before.footprint),
-    );
-    m.insert(
-        "retained_kib_per_conn".into(),
-        kib(after.footprint, before.footprint),
-    );
-    m.insert("open_ms".into(), open_ms);
-    m.insert("failed".into(), failures as f64);
-    m.insert("threads_loaded".into(), loaded.threads as f64);
-    if let (Some(b), Some(l)) = (server_before, server_loaded) {
-        m.insert("server_kib_per_conn".into(), kib(l.footprint, b.footprint));
-    }
-    if let (Some(b), Some(l)) = (fds_before, fds_loaded) {
-        m.insert("fds_per_conn".into(), (l as f64 - b as f64) / count);
-    }
-    Ok(m)
-}
-
-/// After `ready`: settle, then read what an idle core holds.
-pub async fn settled(pid: u32, ready: Duration, settle: Duration) -> Metrics {
-    let ready_usage = probe::usage(pid);
-    tokio::time::sleep(settle).await;
-    let mut m = Metrics::new();
-    m.insert("ready_ms".into(), ready.as_secs_f64() * 1e3);
-    if let Some(usage) = ready_usage {
-        m.insert("ready_cpu_ms".into(), usage.cpu_ns() as f64 / 1e6);
-    }
-    if let Some(mem) = probe::memory(pid, true) {
-        m.insert("footprint_mib".into(), mem.footprint as f64 / MIB);
-        m.insert("rss_mib".into(), mem.rss as f64 / MIB);
-        m.insert("peak_mib".into(), mem.peak as f64 / MIB);
-        m.insert("threads".into(), mem.threads as f64);
-    }
-    if let Some(fds) = probe::open_fds(pid) {
-        m.insert("fds".into(), fds as f64);
-    }
-    if let Some(usage) = probe::usage(pid) {
-        m.insert("startup_cpu_ms".into(), usage.cpu_ns() as f64 / 1e6);
-    }
-    m
 }
 
 #[cfg(test)]

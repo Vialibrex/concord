@@ -44,8 +44,8 @@ use std::{num::NonZeroU64, ptr::NonNull};
 /// or `park_timeout`. The time driver will perform no work unless `park` or
 /// `park_timeout` is called repeatedly.
 ///
-/// The driver has a resolution of one millisecond. Any unit of time that falls
-/// between milliseconds are rounded up to the next millisecond.
+/// Concord: the wheel's slots are one millisecond wide, but each entry keeps its
+/// deadline in nanoseconds and fires once the clock has reached it.
 ///
 /// When an instance is dropped, any outstanding [`Sleep`][sleep] instance that has not
 /// elapsed will be notified with an error. At this point, calling `poll` on the
@@ -216,21 +216,18 @@ impl Driver {
 
         assert!(!handle.is_shutdown());
 
-        let next_wake = lock.wheel.next_expiration_time();
-        lock.next_wake =
-            next_wake.map(|t| NonZeroU64::new(t).unwrap_or_else(|| NonZeroU64::new(1).unwrap()));
+        let next_wake = lock.wheel.next_wake_nanos();
+        lock.next_wake = next_wake.map(nonzero_wake);
 
         drop(lock);
 
         match next_wake {
             Some(when) => {
-                let now = handle.time_source.now(rt_handle.clock());
-                // Note that we effectively round up to 1ms here - this avoids
-                // very short-duration microsecond-resolution sleeps that the OS
-                // might treat as zero-length.
-                let mut duration = handle
-                    .time_source
-                    .tick_to_duration(when.saturating_sub(now));
+                // Concord: park for the remaining nanoseconds until `when`. Millisecond-only pollers
+                // round sub-millisecond waits up to 1 ms instead of spinning with 0; early wakes
+                // (I/O, unpark, or `limit`) leave entries unreached until `deadline <= clock.now()`.
+                let now = handle.time_source.now_nanos(rt_handle.clock());
+                let mut duration = Duration::from_nanos(when.saturating_sub(now));
 
                 if duration > Duration::from_millis(0) {
                     if let Some(limit) = limit {
@@ -288,7 +285,7 @@ impl Driver {
 
 impl Handle {
     pub(self) fn process(&self, clock: &Clock) {
-        let now = self.time_source().now(clock);
+        let now = self.time_source().now_nanos(clock);
 
         self.process_at_time(now);
     }
@@ -298,14 +295,14 @@ impl Handle {
 
         let mut lock = self.inner.lock();
 
-        if now < lock.wheel.elapsed() {
+        if now < lock.wheel.elapsed_nanos() {
             // Time went backwards! This normally shouldn't happen as the Rust language
             // guarantees that an Instant is monotonic, but can happen when running
             // Linux in a VM on a Windows host due to std incorrectly trusting the
             // hardware clock to be monotonic.
             //
             // See <https://github.com/tokio-rs/tokio/issues/3619> for more information.
-            now = lock.wheel.elapsed();
+            now = lock.wheel.elapsed_nanos();
         }
 
         while let Some(entry) = lock.wheel.poll(now) {
@@ -326,10 +323,7 @@ impl Handle {
             }
         }
 
-        lock.next_wake = lock
-            .wheel
-            .poll_at()
-            .map(|t| NonZeroU64::new(t).unwrap_or_else(|| NonZeroU64::new(1).unwrap()));
+        lock.next_wake = lock.wheel.next_wake_nanos().map(nonzero_wake);
 
         drop(lock);
 
@@ -460,6 +454,10 @@ impl Handle {
             }
         }
     }
+}
+
+fn nonzero_wake(t: u64) -> NonZeroU64 {
+    NonZeroU64::new(t).unwrap_or_else(|| NonZeroU64::new(1).unwrap())
 }
 
 // ===== impl Inner =====

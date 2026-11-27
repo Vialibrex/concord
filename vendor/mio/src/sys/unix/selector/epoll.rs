@@ -12,6 +12,68 @@ cfg_io_source! {
     use std::ptr;
 }
 
+// Concord: a timed wait hands its nanoseconds to `epoll_pwait2` (Linux 5.11), so a timer due in 29.4 ms is not
+// waited for the 30 ms that `epoll_wait`'s rounded-up milliseconds give. After ENOSYS (older kernel) or EPERM (a
+// seccomp filter) every wait falls back to `epoll_wait`. Android keeps `epoll_wait`: its app seccomp policy can
+// kill a process for a syscall bionic does not expose.
+#[cfg(target_os = "linux")]
+mod pwait2 {
+    use std::io;
+    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::ptr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use super::Events;
+
+    static UNSUPPORTED: AtomicBool = AtomicBool::new(false);
+
+    // Linux's `epoll_pwait2` always takes `struct __kernel_timespec` (64-bit seconds and nanoseconds),
+    // even on 32-bit architectures where `libc::timespec` can still use 32-bit fields.
+    #[repr(C)]
+    struct KernelTimespec {
+        tv_sec: i64,
+        tv_nsec: i64,
+    }
+
+    pub(super) fn select(ep: &OwnedFd, events: &mut Events, timeout: Duration) -> Option<io::Result<()>> {
+        if UNSUPPORTED.load(Ordering::Relaxed) {
+            return None;
+        }
+        let timeout = KernelTimespec {
+            tv_sec: timeout.as_secs().try_into().unwrap_or(i64::MAX),
+            tv_nsec: i64::from(timeout.subsec_nanos()),
+        };
+        events.clear();
+        // SAFETY: the buffer holds `capacity` events, the timespec outlives the call, and a null signal mask
+        // with size 0 leaves the mask unchanged.
+        let n = unsafe {
+            libc::syscall(
+                libc::SYS_epoll_pwait2,
+                ep.as_raw_fd(),
+                events.as_mut_ptr(),
+                events.capacity() as libc::c_int,
+                &timeout as *const KernelTimespec,
+                ptr::null::<libc::sigset_t>(),
+                0 as libc::size_t,
+            )
+        };
+        if n >= 0 {
+            // SAFETY: `epoll_pwait2` initialised the first `n` events.
+            unsafe { events.set_len(n as usize) };
+            return Some(Ok(()));
+        }
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::ENOSYS | libc::EPERM) => {
+                UNSUPPORTED.store(true, Ordering::Relaxed);
+                None
+            }
+            _ => Some(Err(err)),
+        }
+    }
+}
+
 /// Unique id for use as `SelectorId`.
 #[cfg(debug_assertions)]
 static NEXT_ID: AtomicUsize = AtomicUsize::new(1);
@@ -44,6 +106,11 @@ impl Selector {
     }
 
     pub fn select(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(result) = timeout.and_then(|timeout| pwait2::select(&self.ep, events, timeout)) {
+            return result;
+        }
+
         let timeout = timeout
             .map(|to| {
                 // `Duration::as_millis` truncates, so round up. This avoids

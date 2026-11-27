@@ -138,7 +138,7 @@ impl Handle {
 
         #[cfg(test)]
         pub(crate) fn now(&self) -> u64 {
-           self.time().time_source().deadline_to_tick(self.clock.now())
+           self.time().time_source().deadline_to_nanos(self.clock.now())
         }
     }
 }
