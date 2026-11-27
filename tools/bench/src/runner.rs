@@ -520,6 +520,7 @@ impl Rig {
             udp_window: self.plan.udp_window,
             idle_conns: self.plan.idle_conns,
             net_counters: self.plan.net_counters,
+            client_rate: self.plan.client_rate,
             far_netns: self.netns.as_ref().map(|n| n.far.clone()),
             tls: None,
             origin_tls: None,

@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
 use super::*;
 
 mod cancellation;
+mod direct_write;
 
 #[test]
 fn the_last_read_releases_data_storage_before_the_next_frame_arrives() {
@@ -141,12 +142,15 @@ async fn owned_data_preserves_storage_and_partial_reads_under_flow_control() {
         payload_range
             .1
             .store(pointer + payload.len(), Ordering::SeqCst);
-        assert_eq!(
-            std::future::poll_fn(|cx| body.poll_write_buffer(cx, &mut buffer))
+        let mut total = 0;
+        while !buffer.is_empty() {
+            let n = std::future::poll_fn(|cx| body.poll_write_buffer(cx, &mut buffer))
                 .await
-                .unwrap(),
-            payload.len()
-        );
+                .unwrap();
+            assert!(n > 0);
+            total += n;
+        }
+        assert_eq!(total, payload.len());
         assert!(buffer.is_empty());
         body.shutdown().await.unwrap();
         let mut response = Vec::new();

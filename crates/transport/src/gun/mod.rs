@@ -12,7 +12,9 @@ use h2::client::SendRequest;
 use http::{Method, Request, Uri};
 
 use crate::DialFn;
-use crate::h2io::{Activity, H2Body, Incoming, STREAM_WINDOW, h2_io_error, spawn_connection};
+use crate::h2io::{
+    Activity, H2Body, Incoming, STREAM_WINDOW, h2_io_error, handshake_split, spawn_connection,
+};
 pub(crate) use frame::gun_framed;
 
 const DEFAULT_SERVICE: &str = "GunService";
@@ -142,10 +144,7 @@ impl GunClient {
         for attempt in 0..2 {
             if slot.is_none() {
                 let io = (self.dial)().await?;
-                let (sender, conn) = client_builder()
-                    .handshake::<_, Bytes>(io)
-                    .await
-                    .map_err(h2_io_error)?;
+                let (sender, conn) = handshake_split(&client_builder(), io).await?;
                 let interval = Duration::from_secs(u64::from(self.opts.ping_interval));
                 transport.activity.touch();
                 spawn_connection(

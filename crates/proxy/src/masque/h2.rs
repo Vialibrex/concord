@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use concord_common::{BoxStream, DialCx};
 use concord_quic::io_error;
-use concord_transport::h2io::{Activity, H2Body, Incoming, client_builder, spawn_connection};
+use concord_transport::h2io::{
+    Activity, H2Body, Incoming, client_builder, handshake_split, spawn_connection,
+};
 use http::{Method, Request, Uri};
 
 use super::config::Config;
@@ -42,11 +44,9 @@ pub(super) async fn connect_io(
         .header("accept-encoding", "gzip")
         .body(())
         .map_err(io_error)?;
-    let (sender, connection) = client_builder()
-        .max_header_list_size(10 << 20)
-        .handshake::<_, bytes::Bytes>(io)
-        .await
-        .map_err(io_error)?;
+    let mut builder = client_builder();
+    builder.max_header_list_size(10 << 20);
+    let (sender, connection) = handshake_split(&builder, io).await?;
     let activity = Activity::new();
     spawn_connection(
         tasks,

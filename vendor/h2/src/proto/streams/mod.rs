@@ -13,7 +13,11 @@ mod streams;
 pub(crate) use self::prioritize::Prioritized;
 pub(crate) use self::recv::Open;
 pub(crate) use self::send::PollReset;
-pub(crate) use self::streams::{DynStreams, OpaqueStreamRef, RecvOutcome, StreamRef, Streams};
+// Concord: expose store::Key internally for DirectWriter stream tracking.
+pub(crate) use self::store::Key as StoreKey;
+pub(crate) use self::streams::{
+    DirectInFlight, DynStreams, OpaqueStreamRef, RecvOutcome, StreamRef, Streams,
+};
 
 use self::buffer::Buffer;
 use self::counts::Counts;

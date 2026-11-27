@@ -11,7 +11,9 @@ use http::{Method, Request, Uri};
 use tokio::sync::Mutex;
 
 use super::MuxSession;
-use crate::h2io::{Activity, H2Body, Incoming, STREAM_WINDOW, h2_io_error, spawn_connection};
+use crate::h2io::{
+    Activity, H2Body, Incoming, STREAM_WINDOW, h2_io_error, handshake_split, spawn_connection,
+};
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 // sing-mux sets the h2mux transport's `MaxReadFrameSize` to sing's 32 KiB buffer size; the
@@ -38,10 +40,7 @@ pub(super) struct H2MuxSession {
 
 impl H2MuxSession {
     pub async fn new(io: BoxStream, tasks: &Tasks) -> io::Result<Self> {
-        let (sender, conn) = client_builder()
-            .handshake::<_, Bytes>(io)
-            .await
-            .map_err(h2_io_error)?;
+        let (sender, conn) = handshake_split(&client_builder(), io).await?;
         let activity = Activity::new();
         activity.touch();
         spawn_connection(tasks, conn, Some(IDLE_TIMEOUT), activity.clone());

@@ -1,4 +1,4 @@
-use crate::codec::Codec;
+use crate::codec::CodecWrite;
 use crate::frame::Ping;
 use crate::proto::{self, PingPayload};
 
@@ -8,7 +8,6 @@ use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use tokio::io::AsyncWrite;
 
 /// Acknowledges ping requests from the remote.
 #[derive(Debug)]
@@ -134,14 +133,40 @@ impl PingPong {
         }
     }
 
+    // Concord: O(1) check + waker registration so split-I/O connections avoid
+    // locking the shared writer when no ping/pong is queued.
+    pub(crate) fn has_pending(&self) -> bool {
+        if self.pending_pong.is_some() {
+            return true;
+        }
+        if let Some(ref ping) = self.pending_ping {
+            if !ping.sent {
+                return true;
+            }
+        } else if let Some(ref users) = self.user_pings {
+            if users.0.state.load(Ordering::Acquire) == USER_STATE_PENDING_PING {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn register_user_ping_waker(&self, cx: &Context) {
+        if self.pending_ping.is_none() {
+            if let Some(ref users) = self.user_pings {
+                users.0.ping_task.register(cx.waker());
+            }
+        }
+    }
+
     /// Send any pending pongs.
-    pub(crate) fn send_pending_pong<T, B>(
+    pub(crate) fn send_pending_pong<D, B>(
         &mut self,
         cx: &mut Context,
-        dst: &mut Codec<T, B>,
+        dst: &mut D,
     ) -> Poll<io::Result<()>>
     where
-        T: AsyncWrite + Unpin,
+        D: CodecWrite<B> + ?Sized,
         B: Buf,
     {
         if let Some(pong) = self.pending_pong.take() {
@@ -158,13 +183,13 @@ impl PingPong {
     }
 
     /// Send any pending pings.
-    pub(crate) fn send_pending_ping<T, B>(
+    pub(crate) fn send_pending_ping<D, B>(
         &mut self,
         cx: &mut Context,
-        dst: &mut Codec<T, B>,
+        dst: &mut D,
     ) -> Poll<io::Result<()>>
     where
-        T: AsyncWrite + Unpin,
+        D: CodecWrite<B> + ?Sized,
         B: Buf,
     {
         if let Some(ref mut ping) = self.pending_ping {

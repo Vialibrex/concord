@@ -2,7 +2,7 @@
 //! core's. It exits when its standard input closes, so it never outlives the harness.
 
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -35,33 +35,6 @@ impl Ports {
             https: base + 5,
             http: base + 6,
         }
-    }
-}
-
-/// Paces a source flow at a fixed rate. A deadline in the past is not waited for, so the flow catches up on what
-/// a coarse timer made it miss, up to `CATCH_UP` of the rate.
-struct Pace {
-    per_chunk: Duration,
-    next: Instant,
-}
-
-const CATCH_UP: Duration = Duration::from_millis(10);
-
-impl Pace {
-    fn new(mbit: f64, now: Instant) -> Pace {
-        Pace {
-            per_chunk: Duration::from_secs_f64(CHUNK as f64 * 8.0 / (mbit * 1e6)),
-            next: now,
-        }
-    }
-
-    /// When the chunk after the one just written may go out.
-    fn after_chunk(&mut self, now: Instant) -> Instant {
-        if let Some(floor) = now.checked_sub(CATCH_UP) {
-            self.next = self.next.max(floor);
-        }
-        self.next += self.per_chunk;
-        self.next
     }
 }
 
@@ -125,15 +98,7 @@ where
 }
 
 async fn source_flow(mut stream: TcpStream, rate_mbit: Option<f64>) -> std::io::Result<()> {
-    let chunk = vec![0x5au8; CHUNK];
-    let mut pace = rate_mbit.map(|mbit| Pace::new(mbit, Instant::now()));
-    loop {
-        stream.write_all(&chunk).await?;
-        if let Some(pace) = &mut pace {
-            let due = pace.after_chunk(Instant::now());
-            tokio::time::sleep_until(due.into()).await;
-        }
-    }
+    crate::pace::send_chunks(&mut stream, 0x5a, rate_mbit).await
 }
 
 /// Reports the running total so the uploader learns the receiver's rate, not its own buffers'.
@@ -185,26 +150,5 @@ async fn udp_echo(socket: UdpSocket) {
             continue;
         };
         let _ = socket.send_to(&buf[..n], peer).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_paced_flow_keeps_its_rate_and_bounds_what_it_catches_up() {
-        let start = Instant::now();
-        let mut pace = Pace::new(524.288, start);
-        let per_chunk = Duration::from_millis(1);
-        assert_eq!(pace.per_chunk, per_chunk);
-        assert_eq!(pace.after_chunk(start), start + per_chunk);
-        assert_eq!(pace.after_chunk(start), start + 2 * per_chunk);
-
-        let late = start + Duration::from_millis(7);
-        assert_eq!(pace.after_chunk(late), start + 3 * per_chunk);
-
-        let stalled = start + Duration::from_secs(1);
-        assert_eq!(pace.after_chunk(stalled), stalled - CATCH_UP + per_chunk);
     }
 }

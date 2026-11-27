@@ -96,6 +96,8 @@ use std::task::{Context, Poll};
 #[derive(Debug)]
 pub struct SendStream<B> {
     inner: proto::StreamRef<B>,
+    // Concord: tracks in-flight direct write across Poll::Pending on split-I/O clients.
+    direct_in_flight: Option<proto::DirectInFlight>,
 }
 
 /// A stream identifier, as described in [Section 5.1.1] of RFC 7540.
@@ -221,7 +223,10 @@ pub struct Pong {
 
 impl<B: Buf> SendStream<B> {
     pub(crate) fn new(inner: proto::StreamRef<B>) -> Self {
-        SendStream { inner }
+        SendStream {
+            inner,
+            direct_in_flight: None,
+        }
     }
 
     /// Requests capacity to send data.
@@ -379,6 +384,44 @@ impl<B: Buf> SendStream<B> {
     /// If the lock on the stream store has been poisoned.
     pub fn stream_id(&self) -> StreamId {
         StreamId::from_internal(self.inner.stream_id())
+    }
+
+    // Concord: opt-in split-I/O direct-write API.
+    /// Returns true when this stream belongs to a split-I/O client connection.
+    pub fn has_direct_writer(&self) -> bool {
+        self.inner.has_direct_writer()
+    }
+
+    /// Returns true while a direct write is mid-flush on the outbound writer.
+    pub fn has_direct_in_flight(&self) -> bool {
+        self.direct_in_flight.is_some()
+    }
+
+    /// Writes at most one DATA frame bounded by peer frame size and flow control
+    /// directly to the split outbound writer and flushes it before returning `Ready`.
+    pub fn poll_write_direct<F>(
+        &mut self,
+        cx: &mut Context<'_>,
+        len: usize,
+        end_of_stream: bool,
+        make_buf: F,
+    ) -> Poll<Result<usize, crate::Error>>
+    where
+        F: FnOnce(usize) -> B,
+    {
+        self.inner
+            .poll_write_direct(cx, &mut self.direct_in_flight, len, end_of_stream, make_buf)
+    }
+
+    /// Polls any in-flight direct write to completion on the split outbound writer.
+    pub fn poll_flush_direct(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), crate::Error>> {
+        self.inner.poll_flush_direct(cx, &mut self.direct_in_flight)
+    }
+}
+
+impl<B> Drop for SendStream<B> {
+    fn drop(&mut self) {
+        self.inner.abandon_direct_write();
     }
 }
 

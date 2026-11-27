@@ -108,6 +108,51 @@ impl Prioritize {
         self.max_buffer_size
     }
 
+    // Concord: helpers for split-I/O direct-write connections.
+    pub(crate) fn has_pending(&self, counts: &Counts) -> bool {
+        (!self.pending_open.is_empty() && counts.can_inc_num_send_streams())
+            || !self.pending_send.is_empty()
+    }
+
+    /// Returns peer flow-control bytes currently sendable by `stream` directly.
+    pub(crate) fn direct_available(&self, stream: &store::Ptr) -> WindowSize {
+        let stream_win = stream.send_flow.window_size();
+        let stream_assigned = stream.send_flow.available().as_size();
+        let conn_unassigned = self.flow.available().as_size();
+        let conn_win = self.flow.window_size();
+        let conn_avail = stream_assigned
+            .saturating_add(conn_unassigned)
+            .min(conn_win);
+        stream_win.min(conn_avail)
+    }
+
+    /// Consumes `len` bytes from stream and connection flow-control windows for a
+    /// direct DATA frame write, preserving all FlowControl accounting invariants.
+    pub(crate) fn direct_consume(&mut self, len: WindowSize, stream: &mut store::Ptr) {
+        if len == 0 {
+            return;
+        }
+        let stream_assigned = stream.send_flow.available().as_size();
+        if len > stream_assigned {
+            let need = len - stream_assigned;
+            let _res = self.flow.claim_capacity(need);
+            debug_assert!(_res.is_ok());
+            let _res = stream.send_flow.assign_capacity(need);
+            debug_assert!(_res.is_ok());
+        }
+        let _res = stream.send_flow.send_data(len);
+        debug_assert!(_res.is_ok());
+        let _res = self.flow.assign_capacity(len);
+        debug_assert!(_res.is_ok());
+        let _res = self.flow.send_data(len);
+        debug_assert!(_res.is_ok());
+        let remaining_assigned = stream.send_flow.available().as_size();
+        stream.requested_send_capacity = stream
+            .requested_send_capacity
+            .saturating_sub(len)
+            .max(remaining_assigned);
+    }
+
     /// Queue a frame to be sent to the remote
     pub fn queue_frame<B>(
         &mut self,
@@ -505,15 +550,15 @@ impl Prioritize {
         }
     }
 
-    pub fn buffer_pending<T, B>(
+    pub fn buffer_pending<D, B>(
         &mut self,
         buffer: &mut Buffer<Frame<B>>,
         store: &mut Store,
         counts: &mut Counts,
-        dst: &mut Codec<T, Prioritized<B>>,
+        dst: &mut D,
     ) -> io::Result<BufferStatus>
     where
-        T: AsyncWrite + Unpin,
+        D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,
     {
         // Reclaim any frame that has previously been written
@@ -557,13 +602,14 @@ impl Prioritize {
         }
     }
 
-    pub fn reclaim_written_frame<T, B>(
+    pub fn reclaim_written_frame<D, B>(
         &mut self,
         buffer: &mut Buffer<Frame<B>>,
         store: &mut Store,
-        dst: &mut Codec<T, Prioritized<B>>,
+        dst: &mut D,
     ) -> bool
     where
+        D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,
     {
         self.reclaim_frame(buffer, store, dst)
@@ -576,13 +622,14 @@ impl Prioritize {
     /// When a data frame is written to the codec, it may not be written in its
     /// entirety (large chunks are split up into potentially many data frames).
     /// In this case, the stream needs to be reprioritized.
-    fn reclaim_frame<T, B>(
+    fn reclaim_frame<D, B>(
         &mut self,
         buffer: &mut Buffer<Frame<B>>,
         store: &mut Store,
-        dst: &mut Codec<T, Prioritized<B>>,
+        dst: &mut D,
     ) -> bool
     where
+        D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,
     {
         let span = tracing::trace_span!("try_reclaim_frame");
@@ -922,6 +969,18 @@ impl Prioritize {
 }
 
 // ===== impl Prioritized =====
+
+impl<B: Buf> Prioritized<B> {
+    // Concord: construct a direct-write payload without routing through pending_send.
+    pub(crate) fn direct(buf: B, end_of_stream: bool, stream: store::Key) -> Self {
+        let len = buf.remaining();
+        Prioritized {
+            inner: buf.take(len),
+            end_of_stream,
+            stream,
+        }
+    }
+}
 
 impl<B> Buf for Prioritized<B>
 where

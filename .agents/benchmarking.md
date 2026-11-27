@@ -238,12 +238,12 @@ pass decides and the cell needs a real machine.
 that is read on the payload rate. Through SOCKS no arm reached it (406 to 818 Mbit/s, the arms up to 13% apart), and
 over TUN `direct` did with the arms 1.6% apart, so `udp-stream` is judged at full speed everywhere for now.
 
-`--link` needs Linux. Elsewhere `--origin-rate 1000` holds both arms of a download to one rate, and nothing does for an
-upload or UDP. Concord's arm is tight there in 10 s windows (3% to 11% over six rounds);
-mihomo's had one round a third below the rest in two of three cases, so read it with 6 rounds or more. It is another
-regime: the origin under-supplies the server, which then writes small bursts, where a netem cap leaves the server
-backlogged. The levels do not transfer (`ss-aes128` download, Concord: 2.79 CPU-s/GB for the core and 3.18 for the
-server under the origin's cap, 1.63 and 0.48 under netem's), so never compare a figure across the two.
+`--link` needs Linux. Elsewhere `--origin-rate 1000` holds both arms of a download to one rate, `--client-rate 1000`
+those of an upload, and nothing does for UDP. Concord's download arm is tight in 10 s windows (3% to 11% over six
+rounds); mihomo's had one round a third below the rest in two of three cases, so read it with 6 rounds or more. It is
+another regime: the origin under-supplies the server, which then writes small bursts, where a netem cap leaves the
+server backlogged. The levels do not transfer (`ss-aes128` download, Concord: 2.79 CPU-s/GB for the core and 3.18 for
+the server under the origin's cap, 1.63 and 0.48 under netem's), so never compare a figure across the two.
 
 ## Fixed Go references
 
@@ -308,8 +308,9 @@ windows. `full` covers every case and workload, 5 rounds of 5 s windows. The lis
 the same tier always measures the same thing.
 `--crr-conns N` replaces the tier's `tcp-crr` connection count (1500 quick, 3000 full) for a run that needs a long
 connection series. `--origin-rate M` caps each download flow the origin serves at M Mbit/s, so cores are compared at one
-rate (the server's CPU per GB at the slower core's rate, say); the origin paces in bursts of about a millisecond, and
-uploads are not capped. `--background W` runs workload `W` through the same core for the whole of every trial of the
+rate (the server's CPU per GB at the slower core's rate, say); the origin paces in bursts of about a millisecond.
+`--client-rate M` paces each upload flow the client sends the same way; without it the client writes as fast as the
+core takes the data. `--background W` runs workload `W` through the same core for the whole of every trial of the
 others, to read one flow's latency while another loads the core (`--workloads tcp-rr --background udp-stream`); its
 figures are kept with a `bg_` prefix, and the core's CPU figures then cover both loads.
 

@@ -1,4 +1,4 @@
-use crate::codec::UserError;
+use crate::codec::{CodecRead, CodecWrite, UserError};
 use crate::error::Reason;
 use crate::proto::*;
 use std::task::{Context, Poll};
@@ -38,15 +38,19 @@ impl Settings {
         }
     }
 
-    pub(crate) fn recv_settings<T, B, C, P>(
+    // Concord: O(1) check so split-I/O connections avoid locking the writer when synced.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.remote.is_some() || matches!(self.local, Local::ToSend(..))
+    }
+
+    pub(crate) fn recv_settings<R, C, P>(
         &mut self,
         frame: frame::Settings,
-        codec: &mut Codec<T, B>,
+        codec: &mut R,
         streams: &mut Streams<C, P>,
     ) -> Result<(), Error>
     where
-        T: AsyncWrite + Unpin,
-        B: Buf,
+        R: CodecRead + ?Sized,
         C: Buf,
         P: Peer,
     {
@@ -108,14 +112,14 @@ impl Settings {
         !has_received
     }
 
-    pub(crate) fn poll_send<T, B, C, P>(
+    pub(crate) fn poll_send<D, B, C, P>(
         &mut self,
         cx: &mut Context,
-        dst: &mut Codec<T, B>,
+        dst: &mut D,
         streams: &mut Streams<C, P>,
     ) -> Poll<Result<(), Error>>
     where
-        T: AsyncWrite + Unpin,
+        D: CodecWrite<B> + ?Sized,
         B: Buf,
         C: Buf,
         P: Peer,

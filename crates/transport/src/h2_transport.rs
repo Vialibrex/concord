@@ -1,12 +1,12 @@
 use std::io;
 
-use bytes::Bytes;
 use concord_common::{BoxStream, Tasks};
 use http::{Method, Request, Uri};
 use rand::Rng;
 
 use crate::h2io::{
-    Activity, CONN_WINDOW, H2Body, Incoming, STREAM_WINDOW, h2_io_error, spawn_connection,
+    Activity, CONN_WINDOW, H2Body, Incoming, STREAM_WINDOW, h2_io_error, handshake_split,
+    spawn_connection,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -52,13 +52,12 @@ pub(crate) async fn connect(
         .header("user-agent", "Go-http-client/2.0")
         .body(())
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
-    let (sender, conn) = h2::client::Builder::new()
+    let mut builder = h2::client::Builder::new();
+    builder
         .initial_window_size(STREAM_WINDOW)
         .initial_connection_window_size(CONN_WINDOW)
-        .enable_push(false)
-        .handshake::<_, Bytes>(io)
-        .await
-        .map_err(h2_io_error)?;
+        .enable_push(false);
+    let (sender, conn) = handshake_split(&builder, io).await?;
     let activity = Activity::new();
     spawn_connection(tasks, conn, None, activity);
     let mut sender = sender.ready().await.map_err(h2_io_error)?;

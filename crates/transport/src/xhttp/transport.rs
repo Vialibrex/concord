@@ -19,7 +19,8 @@ use super::request::Built;
 use super::{BoxRead, BoxWrite};
 use crate::DialFn;
 use crate::h2io::{
-    Activity, H2Reader, H2Writer, Incoming, client_builder, h2_io_error, spawn_connection,
+    Activity, H2Reader, H2Writer, Incoming, client_builder, h2_io_error, handshake_split,
+    spawn_connection,
 };
 use crate::http1::invalid;
 
@@ -42,10 +43,7 @@ impl H2Transport {
         for attempt in 0..2 {
             if slot.is_none() {
                 let io = (self.dial)().await?;
-                let (sender, conn) = client_builder()
-                    .handshake::<_, Bytes>(io)
-                    .await
-                    .map_err(h2_io_error)?;
+                let (sender, conn) = handshake_split(&client_builder(), io).await?;
                 spawn_connection(&self.tasks, conn, self.keep_alive, Activity::new());
                 *slot = Some(sender);
             }

@@ -1,4 +1,6 @@
 mod connection;
+// Concord: shared writer state for opt-in split-I/O client connections.
+mod direct_writer;
 mod error;
 mod go_away;
 mod peer;
@@ -6,14 +8,15 @@ mod ping_pong;
 mod settings;
 mod streams;
 
-pub(crate) use self::connection::{Config, Connection, DataFrameBudget};
+pub(crate) use self::connection::{Config, Connection, DataFrameBudget, SplitConnection};
+pub(crate) use self::direct_writer::{DirectWriter, DirectWriterState, WriteOwner};
 pub use self::error::{Error, Initiator};
 pub(crate) use self::peer::{Dyn as DynPeer, Peer};
 pub(crate) use self::ping_pong::UserPings;
-pub(crate) use self::streams::{DynStreams, OpaqueStreamRef, StreamRef, Streams};
+pub(crate) use self::streams::{DirectInFlight, DynStreams, OpaqueStreamRef, StreamRef, Streams};
 pub(crate) use self::streams::{Open, PollReset, Prioritized};
 
-use crate::codec::Codec;
+use crate::codec::{Codec, CodecWrite};
 
 use self::go_away::GoAway;
 use self::ping_pong::PingPong;

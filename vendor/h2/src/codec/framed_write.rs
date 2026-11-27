@@ -348,6 +348,11 @@ impl<T, B> FramedWrite<T, B> {
         self.encoder.last_data_frame.take()
     }
 
+    // Concord: expose whether any encoded bytes or chained frame remain unwritten.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.encoder.next.is_none() && self.encoder.buf.get_ref().is_empty()
+    }
+
     pub fn get_mut(&mut self) -> &mut T {
         &mut self.inner
     }

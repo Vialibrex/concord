@@ -135,10 +135,10 @@
 //! [`Builder`]: struct.Builder.html
 //! [`Error`]: ../struct.Error.html
 
-use crate::codec::{Codec, SendError, UserError};
+use crate::codec::{new_framed_write, Codec, CodecRead, SendError, SplitRead, UserError};
 use crate::ext::Protocol;
 use crate::frame::{Headers, Pseudo, Reason, Settings, StreamId};
-use crate::proto::{self, Error};
+use crate::proto::{self, DirectWriter, Error};
 use crate::{FlowControl, PingPong, RecvStream, SendStream};
 
 use bytes::{Buf, Bytes};
@@ -146,6 +146,7 @@ use http::{uri, HeaderMap, Method, Request, Response, Version};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -230,6 +231,13 @@ pub struct ReadySendRequest<B: Buf> {
 #[must_use = "futures do nothing unless polled"]
 pub struct Connection<T, B: Buf = Bytes> {
     inner: proto::Connection<T, Peer, B>,
+}
+
+/// Concord: opt-in split-I/O client connection whose read half runs on the
+/// connection task while `SendStream`s write DATA frames directly to the write half.
+#[must_use = "futures do nothing unless polled"]
+pub struct SplitConnection<R, B: Buf = Bytes> {
+    inner: proto::SplitConnection<R, B>,
 }
 
 /// A future of an HTTP response.
@@ -1257,6 +1265,45 @@ impl Builder {
     {
         Connection::handshake2(io, self.clone())
     }
+
+    /// Concord: opt-in split-I/O client handshake. Keeps `read` on the connection
+    /// task and shares `write` with `SendStream`s for synchronous outbound-coupled
+    /// direct DATA writes.
+    pub fn handshake_split<R, W, B>(
+        &self,
+        read: R,
+        write: W,
+    ) -> impl Future<Output = Result<(SendRequest<B>, SplitConnection<R, B>), crate::Error>>
+    where
+        R: AsyncRead + Unpin,
+        W: AsyncWrite + Send + Unpin + 'static,
+        B: Buf + Send + 'static,
+    {
+        SplitConnection::handshake2(read, write, self.clone())
+    }
+
+    fn apply_recv_limits<C: CodecRead>(&self, codec: &mut C) {
+        if let Some(max) = self.settings.max_frame_size() {
+            codec.set_max_recv_frame_size(max as usize);
+        }
+        if let Some(max) = self.settings.max_header_list_size() {
+            codec.set_max_recv_header_list_size(max as usize);
+        }
+    }
+
+    fn proto_config(self) -> proto::Config {
+        proto::Config {
+            next_stream_id: self.stream_id,
+            initial_max_send_streams: self.initial_max_send_streams,
+            max_send_buffer_size: self.max_send_buffer_size,
+            reset_stream_duration: self.reset_stream_duration,
+            reset_stream_max: self.reset_stream_max,
+            remote_reset_stream_max: self.pending_accept_reset_stream_max,
+            local_error_reset_streams_max: self.local_max_error_reset_streams,
+            settings: self.settings,
+            data_frame_budget: self.data_frame_budget,
+        }
+    }
 }
 
 impl Default for Builder {
@@ -1340,41 +1387,22 @@ where
 
         // Create the codec
         let mut codec = Codec::new(io);
-
-        if let Some(max) = builder.settings.max_frame_size() {
-            codec.set_max_recv_frame_size(max as usize);
-        }
-
-        if let Some(max) = builder.settings.max_header_list_size() {
-            codec.set_max_recv_header_list_size(max as usize);
-        }
+        builder.apply_recv_limits(&mut codec);
 
         // Send initial settings frame
         codec
             .buffer(builder.settings.clone().into())
             .expect("invalid SETTINGS frame");
 
-        let inner = proto::Connection::new(
-            codec,
-            proto::Config {
-                next_stream_id: builder.stream_id,
-                initial_max_send_streams: builder.initial_max_send_streams,
-                max_send_buffer_size: builder.max_send_buffer_size,
-                reset_stream_duration: builder.reset_stream_duration,
-                reset_stream_max: builder.reset_stream_max,
-                remote_reset_stream_max: builder.pending_accept_reset_stream_max,
-                local_error_reset_streams_max: builder.local_max_error_reset_streams,
-                settings: builder.settings,
-                data_frame_budget: builder.data_frame_budget,
-            },
-        );
+        let target_window = builder.initial_target_connection_window_size;
+        let inner = proto::Connection::new(codec, builder.proto_config());
         let send_request = SendRequest {
             inner: inner.streams().clone(),
             pending: None,
         };
 
         let mut connection = Connection { inner };
-        if let Some(sz) = builder.initial_target_connection_window_size {
+        if let Some(sz) = target_window {
             connection.set_target_window_size(sz);
         }
 
@@ -1492,6 +1520,90 @@ impl<T, B> fmt::Debug for Connection<T, B>
 where
     T: AsyncRead + AsyncWrite,
     T: fmt::Debug,
+    B: fmt::Debug + Buf,
+{
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Debug::fmt(&self.inner, fmt)
+    }
+}
+
+impl<R, B> SplitConnection<R, B>
+where
+    R: AsyncRead + Unpin,
+    B: Buf + Send + 'static,
+{
+    async fn handshake2<W>(
+        read: R,
+        mut write: W,
+        builder: Builder,
+    ) -> Result<(SendRequest<B>, SplitConnection<R, B>), crate::Error>
+    where
+        W: AsyncWrite + Send + Unpin + 'static,
+    {
+        tracing::debug!("binding split client connection");
+        let msg: &'static [u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+        write.write_all(msg).await.map_err(crate::Error::from_io)?;
+
+        let mut split_read = SplitRead::new(read);
+        builder.apply_recv_limits(&mut split_read);
+
+        let mut sink = new_framed_write::<W, proto::Prioritized<B>>(write);
+        sink.buffer(builder.settings.clone().into())
+            .expect("invalid SETTINGS frame");
+        crate::poll_fn(|cx| sink.flush(cx))
+            .await
+            .map_err(crate::Error::from_io)?;
+
+        let writer = Arc::new(DirectWriter::new(sink));
+        let target_window = builder.initial_target_connection_window_size;
+        let mut inner = proto::SplitConnection::new(split_read, writer, builder.proto_config());
+        if let Some(sz) = target_window {
+            inner.set_target_window_size(sz);
+        }
+        let send_request = SendRequest {
+            inner: inner.streams().clone(),
+            pending: None,
+        };
+        Ok((send_request, SplitConnection { inner }))
+    }
+
+    /// Sets a new `INITIAL_WINDOW_SIZE` setting for stream-level receive flow control.
+    pub fn set_initial_window_size(&mut self, size: u32) -> Result<(), crate::Error> {
+        assert!(size <= proto::MAX_WINDOW_SIZE);
+        self.inner.set_initial_window_size(size)?;
+        Ok(())
+    }
+
+    /// Takes a `PingPong` instance from the connection.
+    pub fn ping_pong(&mut self) -> Option<PingPong> {
+        self.inner.take_user_pings().map(PingPong::new)
+    }
+}
+
+impl<R, B> Future for SplitConnection<R, B>
+where
+    R: AsyncRead + Unpin,
+    B: Buf,
+{
+    type Output = Result<(), crate::Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let had_streams_or_refs = self.inner.has_streams_or_other_references();
+        self.inner.maybe_close_connection_if_no_streams();
+        let result = self.inner.poll(cx).map_err(Into::into);
+        if result.is_pending()
+            && had_streams_or_refs
+            && !self.inner.has_streams_or_other_references()
+        {
+            cx.waker().wake_by_ref();
+        }
+        result
+    }
+}
+
+impl<R, B> fmt::Debug for SplitConnection<R, B>
+where
+    R: fmt::Debug,
     B: fmt::Debug + Buf,
 {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {

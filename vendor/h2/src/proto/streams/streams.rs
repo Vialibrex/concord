@@ -1,23 +1,33 @@
 use super::recv::RecvHeaderBlockError;
 use super::store::{self, Entry, Resolve, Store};
 use super::{Buffer, BufferStatus, Config, Counts, Prioritized, Recv, Send, Stream, StreamId};
-use crate::codec::{Codec, SendError, UserError};
+use crate::codec::{CodecWrite, SendError, UserError};
 use crate::ext::Protocol;
 use crate::frame::{self, Frame, Reason};
-use crate::proto::{peer, Error, Initiator, Open, Peer, WindowSize};
-use crate::{client, proto, server};
+use crate::proto::{
+    self, peer, DirectWriter, DirectWriterState, Error, Initiator, Open, Peer, WindowSize,
+    WriteOwner, MAX_WINDOW_SIZE,
+};
+use crate::{client, server};
 
 use bytes::{Buf, Bytes};
 use http::{HeaderMap, Request, Response};
 use std::task::{Context, Poll, Waker};
-use tokio::io::AsyncWrite;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::{fmt, io};
+
+// Concord: tracks an in-flight direct write across Poll::Pending on a split-I/O client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DirectInFlight {
+    PendingFlush,
+    Data(usize),
+}
 
 #[derive(Debug)]
 pub(crate) struct Streams<B, P>
 where
+    B: Buf,
     P: Peer,
 {
     /// Holds most of the connection and stream related state for processing
@@ -33,6 +43,9 @@ where
     /// bit of unsafe code. This optimization has been postponed until it has
     /// been shown to be necessary.
     send_buffer: Arc<SendBuffer<B>>,
+
+    // Concord: present only on opt-in split-I/O client connections.
+    direct_writer: Option<Arc<DirectWriter<B>>>,
 
     _p: ::std::marker::PhantomData<P>,
 }
@@ -63,6 +76,8 @@ pub(crate) enum RecvOutcome {
 pub(crate) struct StreamRef<B> {
     opaque: OpaqueStreamRef,
     send_buffer: Arc<SendBuffer<B>>,
+    // Concord: shared outbound FramedWrite for opt-in split-I/O clients.
+    direct_writer: Option<Arc<DirectWriter<B>>>,
 }
 
 /// Reference to the stream state that hides the send data chunk generic
@@ -124,6 +139,19 @@ where
         Streams {
             inner: Inner::new(peer, config),
             send_buffer: Arc::new(SendBuffer::new()),
+            direct_writer: None,
+            _p: ::std::marker::PhantomData,
+        }
+    }
+
+    // Concord: constructor for opt-in split-I/O client connections.
+    pub fn new_with_direct_writer(config: Config, direct_writer: Arc<DirectWriter<B>>) -> Self {
+        let peer = P::r#dyn();
+
+        Streams {
+            inner: Inner::new(peer, config),
+            send_buffer: Arc::new(SendBuffer::new()),
+            direct_writer: Some(direct_writer),
             _p: ::std::marker::PhantomData,
         }
     }
@@ -161,6 +189,7 @@ where
             StreamRef {
                 opaque: OpaqueStreamRef::new(self.inner.clone(), stream),
                 send_buffer: self.send_buffer.clone(),
+                direct_writer: self.direct_writer.clone(),
             }
         })
     }
@@ -186,13 +215,9 @@ where
             .clear_expired_reset_streams(&mut me.store, &mut me.counts);
     }
 
-    pub fn poll_complete<T>(
-        &mut self,
-        cx: &mut Context,
-        dst: &mut Codec<T, Prioritized<B>>,
-    ) -> Poll<io::Result<()>>
+    pub fn poll_complete<D>(&mut self, cx: &mut Context, dst: &mut D) -> Poll<io::Result<()>>
     where
-        T: AsyncWrite + Unpin,
+        D: CodecWrite<Prioritized<B>> + ?Sized,
     {
         loop {
             // Make any required socket progress before taking stream locks.
@@ -231,6 +256,38 @@ where
                 return Poll::Ready(Ok(()));
             }
         }
+    }
+
+    // Concord: split-I/O helpers so SplitConnection avoids locking DirectWriter
+    // when streams have no pending WINDOW_UPDATE / HEADERS / RST_STREAM writes.
+    pub(crate) fn register_conn_task_if_idle(&self, cx: &Context) -> bool {
+        let mut me = self.inner.lock().unwrap();
+        let has_pending = me.actions.recv.has_pending_window_updates()
+            || me.actions.send.has_pending(&me.counts);
+        if !has_pending {
+            me.actions.task = Some(cx.waker().clone());
+        }
+        !has_pending
+    }
+
+    pub(crate) fn buffer_pending_for_split<D>(&self, cx: &Context, dst: &mut D) -> io::Result<bool>
+    where
+        D: CodecWrite<Prioritized<B>> + ?Sized,
+    {
+        let mut me = self.inner.lock().unwrap();
+        let status = me.buffer_pending(&self.send_buffer, dst)?;
+        if status == BufferStatus::Complete {
+            me.actions.task = Some(cx.waker().clone());
+        }
+        Ok(status == BufferStatus::CodecFull)
+    }
+
+    pub(crate) fn reclaim_written_frame_for_split<D>(&self, dst: &mut D) -> bool
+    where
+        D: CodecWrite<Prioritized<B>> + ?Sized,
+    {
+        let mut me = self.inner.lock().unwrap();
+        me.reclaim_written_frame(&self.send_buffer, dst)
     }
 
     pub fn apply_remote_settings(
@@ -354,6 +411,7 @@ where
             StreamRef {
                 opaque: OpaqueStreamRef::new(self.inner.clone(), &mut stream),
                 send_buffer: self.send_buffer.clone(),
+                direct_writer: self.direct_writer.clone(),
             },
             is_full,
         ))
@@ -996,13 +1054,13 @@ impl Inner {
         Ok(())
     }
 
-    fn buffer_pending<T, B>(
+    fn buffer_pending<D, B>(
         &mut self,
         send_buffer: &SendBuffer<B>,
-        dst: &mut Codec<T, Prioritized<B>>,
+        dst: &mut D,
     ) -> io::Result<BufferStatus>
     where
-        T: AsyncWrite + Unpin,
+        D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,
     {
         let mut send_buffer = send_buffer.inner.lock().unwrap();
@@ -1034,12 +1092,9 @@ impl Inner {
         Ok(BufferStatus::Complete)
     }
 
-    fn reclaim_written_frame<T, B>(
-        &mut self,
-        send_buffer: &SendBuffer<B>,
-        dst: &mut Codec<T, Prioritized<B>>,
-    ) -> bool
+    fn reclaim_written_frame<D, B>(&mut self, send_buffer: &SendBuffer<B>, dst: &mut D) -> bool
     where
+        D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,
     {
         let mut send_buffer = send_buffer.inner.lock().unwrap();
@@ -1129,12 +1184,14 @@ where
 
 impl<B, P> Streams<B, P>
 where
+    B: Buf,
     P: Peer,
 {
     pub fn as_dyn(&self) -> DynStreams<'_, B> {
         let Self {
             inner,
             send_buffer,
+            direct_writer: _,
             _p,
         } = self;
         DynStreams {
@@ -1165,7 +1222,11 @@ where
         me.store.num_active_streams()
     }
 
-    pub fn has_streams(&self) -> bool {
+    pub(crate) fn conn_error(&self) -> Option<proto::Error> {
+        self.inner.lock().unwrap().actions.conn_error.clone()
+    }
+
+    pub(crate) fn has_streams(&self) -> bool {
         let me = self.inner.lock().unwrap();
         me.counts.has_streams()
     }
@@ -1185,6 +1246,7 @@ where
 // no derive because we don't need B and P to be Clone.
 impl<B, P> Clone for Streams<B, P>
 where
+    B: Buf,
     P: Peer,
 {
     fn clone(&self) -> Self {
@@ -1192,6 +1254,7 @@ where
         Streams {
             inner: self.inner.clone(),
             send_buffer: self.send_buffer.clone(),
+            direct_writer: self.direct_writer.clone(),
             _p: ::std::marker::PhantomData,
         }
     }
@@ -1199,6 +1262,7 @@ where
 
 impl<B, P> Drop for Streams<B, P>
 where
+    B: Buf,
     P: Peer,
 {
     fn drop(&mut self) {
@@ -1398,6 +1462,7 @@ impl<B> StreamRef<B> {
         Ok(StreamRef {
             opaque,
             send_buffer: self.send_buffer.clone(),
+            direct_writer: self.direct_writer.clone(),
         })
     }
 
@@ -1475,6 +1540,287 @@ impl<B> StreamRef<B> {
     pub fn stream_id(&self) -> StreamId {
         self.opaque.stream_id()
     }
+
+    // Concord: opt-in split-I/O synchronous direct write path.
+    pub fn has_direct_writer(&self) -> bool {
+        self.direct_writer.is_some()
+    }
+
+    /// Called when `SendStream` is dropped: removes any queued waiter and hands a writer
+    /// this stream owns to `Connection` as `Abandoned`, which finishes and reclaims the
+    /// frame in flight so wire framing stays intact for sibling streams.
+    pub(crate) fn abandon_direct_write(&mut self) {
+        let Some(writer) = &self.direct_writer else {
+            return;
+        };
+        let Some((wake, need_conn_task)) = writer
+            .lock_unless_poisoned()
+            .map(|mut state| state.on_stream_drop(self.opaque.key))
+        else {
+            return;
+        };
+        if let Some(w) = wake {
+            w.wake();
+        }
+        if need_conn_task {
+            let conn_task = self
+                .opaque
+                .inner
+                .lock()
+                .ok()
+                .and_then(|mut me| me.actions.task.take());
+            if let Some(w) = conn_task {
+                w.wake();
+            }
+        }
+    }
+}
+
+impl<B: Buf> StreamRef<B> {
+    fn record_direct_io_error(&self, io_err: io::Error) -> crate::Error {
+        let err = proto::Error::Io(io_err.kind(), Some(io_err.to_string()));
+        let ret = crate::Error::from_io(io_err);
+        let wake = {
+            let mut me = self.opaque.inner.lock().unwrap();
+            me.handle_error(&self.send_buffer, err);
+            me.actions.task.take()
+        };
+        if let Some(w) = wake {
+            w.wake();
+        }
+        ret
+    }
+
+    fn current_stream_send_error(stream: &store::Ptr) -> crate::Error {
+        if let Ok(Some(reason)) = stream.state.ensure_reason(proto::PollReset::Streaming) {
+            return proto::Error::remote_reset(stream.id, reason).into();
+        }
+        if stream.state.is_closed() {
+            UserError::InactiveStreamId.into()
+        } else {
+            UserError::UnexpectedFrameType.into()
+        }
+    }
+
+    /// The error for a stream that lost the writer: the connection's error if it has one.
+    fn lost_writer_error(&self) -> crate::Error {
+        let me = self.opaque.inner.lock().unwrap();
+        if let Err(err) = me.actions.ensure_no_conn_error() {
+            return err.into();
+        }
+        crate::Error::from_io(io::Error::from(io::ErrorKind::BrokenPipe))
+    }
+
+    /// Flushes the frame this stream put in the sink; on `Ready` the writer is released.
+    fn finish_direct_flush(
+        &self,
+        cx: &Context,
+        mut state: MutexGuard<'_, DirectWriterState<B>>,
+        in_flight: &mut Option<DirectInFlight>,
+        pending: DirectInFlight,
+    ) -> Poll<Result<(), crate::Error>> {
+        match state.sink.flush(&mut Context::from_waker(cx.waker())) {
+            Poll::Pending => {
+                *in_flight = Some(pending);
+                Poll::Pending
+            }
+            Poll::Ready(Err(io_err)) => {
+                DirectWriterState::fail(state);
+                *in_flight = None;
+                Poll::Ready(Err(self.record_direct_io_error(io_err)))
+            }
+            Poll::Ready(Ok(())) => {
+                state.reclaim_flushed(|sink| {
+                    let mut me = self.opaque.inner.lock().unwrap();
+                    me.reclaim_written_frame(&self.send_buffer, sink);
+                });
+                DirectWriterState::release(state);
+                *in_flight = None;
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    /// Drives an already-started direct frame (DATA or pending HEADERS/control flush)
+    /// to completion on the outbound `AsyncWrite`.
+    pub(crate) fn poll_flush_direct(
+        &mut self,
+        cx: &Context,
+        in_flight: &mut Option<DirectInFlight>,
+    ) -> Poll<Result<(), crate::Error>> {
+        let Some(pending) = *in_flight else {
+            return Poll::Ready(Ok(()));
+        };
+        let Some(writer) = &self.direct_writer else {
+            *in_flight = None;
+            return Poll::Ready(Ok(()));
+        };
+        let state = writer.lock();
+        if state.owner != Some(WriteOwner::Stream(self.opaque.key)) {
+            drop(state);
+            *in_flight = None;
+            return Poll::Ready(Err(self.lost_writer_error()));
+        }
+        self.finish_direct_flush(cx, state, in_flight, pending)
+    }
+
+    /// Writes at most one HTTP/2 DATA frame (`min(len, peer_max_frame_size, peer_window)`)
+    /// directly onto the outbound `AsyncWrite` and flushes it before returning `Ready`.
+    pub(crate) fn poll_write_direct<F>(
+        &mut self,
+        cx: &Context,
+        in_flight: &mut Option<DirectInFlight>,
+        len: usize,
+        end_of_stream: bool,
+        make_buf: F,
+    ) -> Poll<Result<usize, crate::Error>>
+    where
+        F: FnOnce(usize) -> B,
+    {
+        let writer = self
+            .direct_writer
+            .clone()
+            .expect("poll_write_direct requires split-I/O connection");
+        let key = self.opaque.key;
+        let mut make_buf = Some(make_buf);
+
+        loop {
+            if let Some(pending) = *in_flight {
+                ready!(self.poll_flush_direct(cx, in_flight))?;
+                match pending {
+                    DirectInFlight::Data(written) => return Poll::Ready(Ok(written)),
+                    DirectInFlight::PendingFlush => continue,
+                }
+            }
+
+            if len == 0 && !end_of_stream {
+                return Poll::Ready(Ok(0));
+            }
+
+            let mut state = writer.lock();
+            if state.broken {
+                drop(state);
+                return Poll::Ready(Err(self.lost_writer_error()));
+            }
+            if !state.can_stream_acquire(key) {
+                state.enqueue_waiter(key, cx.waker());
+                return Poll::Pending;
+            }
+            state.owner = Some(WriteOwner::Stream(key));
+
+            match self.next_direct_action(cx, &mut state, len, end_of_stream) {
+                DirectAction::Error(err) => {
+                    DirectWriterState::release(state);
+                    return Poll::Ready(Err(err));
+                }
+                DirectAction::Pending => {
+                    DirectWriterState::release(state);
+                    return Poll::Pending;
+                }
+                DirectAction::FlushPending => {
+                    state.is_direct_data_frame = false;
+                    let pending = DirectInFlight::PendingFlush;
+                    ready!(self.finish_direct_flush(cx, state, in_flight, pending))?;
+                }
+                DirectAction::WriteData {
+                    stream_id,
+                    take,
+                    eos,
+                } => {
+                    let payload = make_buf.take().expect("make_buf called once")(take);
+                    debug_assert_eq!(payload.remaining(), take);
+                    let mut frame = frame::Data::new(stream_id, Prioritized::direct(payload, eos, key));
+                    frame.set_end_stream(eos);
+                    state.is_direct_data_frame = true;
+                    state
+                        .sink
+                        .buffer(Frame::Data(frame))
+                        .expect("direct DATA frame within max_frame_size");
+                    let pending = DirectInFlight::Data(take);
+                    ready!(self.finish_direct_flush(cx, state, in_flight, pending))?;
+                    return Poll::Ready(Ok(take));
+                }
+            }
+        }
+    }
+
+    /// Decides, under the stream lock, what a direct write of `len` bytes does next: flush
+    /// frames the connection path queued for this stream first, wait for a stream slot or
+    /// window, or consume window for one DATA frame.
+    fn next_direct_action(
+        &self,
+        cx: &Context,
+        state: &mut DirectWriterState<B>,
+        len: usize,
+        end_of_stream: bool,
+    ) -> DirectAction {
+        let key = self.opaque.key;
+        let max_frame = state.sink.max_send_frame_size();
+        let mut me = self.opaque.inner.lock().unwrap();
+        let me = &mut *me;
+        // A received GOAWAY sets the connection error yet leaves streams up to its last
+        // stream id open, as `SendStream::send_data` does; a fatal error closes every stream.
+        let mut stream = me.store.resolve(key);
+        if !stream.state.is_send_streaming() {
+            return DirectAction::Error(Self::current_stream_send_error(&stream));
+        }
+        if stream.is_pending_open || !stream.pending_send.is_empty() {
+            drop(stream);
+            return match me.buffer_pending(&self.send_buffer, &mut *state.sink) {
+                Ok(_) if state.sink.is_write_empty() => {
+                    // Stream is blocked on peer max_concurrent_streams.
+                    me.store.resolve(key).wait_send(cx);
+                    DirectAction::Pending
+                }
+                Ok(_) => DirectAction::FlushPending,
+                Err(io_err) => DirectAction::Error(crate::Error::from_io(io_err)),
+            };
+        }
+        let take = if len == 0 && end_of_stream {
+            0
+        } else {
+            let avail = me.actions.send.direct_available(&stream);
+            if avail == 0 {
+                let req = len.min(MAX_WINDOW_SIZE as usize) as WindowSize;
+                me.actions
+                    .send
+                    .reserve_capacity(req, &mut stream, &mut me.counts);
+                stream.wait_send(cx);
+                return DirectAction::Pending;
+            }
+            len.min(max_frame).min(avail as usize)
+        };
+        let stream_id = stream.id;
+        let eos = end_of_stream && take == len;
+        me.counts.transition(stream, |counts, stream| {
+            me.actions.send.direct_consume(take as WindowSize, stream);
+            if eos {
+                stream.state.send_close();
+                me.actions.send.reserve_capacity(0, stream, counts);
+            }
+        });
+        if eos && me.actions.send.has_pending(&me.counts) {
+            if let Some(w) = me.actions.task.take() {
+                w.wake();
+            }
+        }
+        DirectAction::WriteData {
+            stream_id,
+            take,
+            eos,
+        }
+    }
+}
+
+enum DirectAction {
+    Error(crate::Error),
+    Pending,
+    FlushPending,
+    WriteData {
+        stream_id: StreamId,
+        take: usize,
+        eos: bool,
+    },
 }
 
 impl<B> Clone for StreamRef<B> {
@@ -1482,6 +1828,7 @@ impl<B> Clone for StreamRef<B> {
         StreamRef {
             opaque: self.opaque.clone(),
             send_buffer: self.send_buffer.clone(),
+            direct_writer: self.direct_writer.clone(),
         }
     }
 }

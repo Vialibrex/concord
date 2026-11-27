@@ -26,6 +26,7 @@ mod mitm;
 mod netstat;
 mod openvpn;
 mod origin;
+mod pace;
 mod plan;
 mod probe;
 mod report;
@@ -199,10 +200,15 @@ struct RunArgs {
     #[arg(long)]
     count_syscalls: bool,
     #[arg(
-        help = "Cap each download flow the origin serves at this many Mbit/s, to compare cores at one rate. Uploads are not capped."
+        help = "Cap each download flow the origin serves at this many Mbit/s, to compare cores at one rate. `--client-rate` caps uploads."
     )]
     #[arg(long)]
     origin_rate: Option<f64>,
+    #[arg(
+        help = "Cap each upload flow the client sends at this many Mbit/s, to compare cores at one rate. `--origin-rate` caps downloads."
+    )]
+    #[arg(long)]
+    client_rate: Option<f64>,
     #[arg(
         help = "Run this workload through the same core for the whole of every trial of the others (tcp and udp workloads only), to read one flow's latency while another loads the core. Its figures are kept with a `bg_` prefix; the core's CPU figures then cover both loads."
     )]
@@ -330,12 +336,12 @@ fn list() {
     }
 }
 
-fn positive_rate(flag: &str, rate: Option<f64>) -> Result<(), String> {
+fn positive_rate(flag: &str, rate: Option<f64>) -> Result<Option<f64>, String> {
     match rate {
         Some(rate) if !(rate.is_finite() && rate > 0.0) => {
             Err(format!("{flag} takes a positive rate in Mbit/s"))
         }
-        _ => Ok(()),
+        _ => Ok(rate),
     }
 }
 
@@ -501,11 +507,11 @@ fn run(args: RunArgs) -> Result<bool, String> {
     }
     plan.count_syscalls = args.count_syscalls;
     plan.net_counters = args.net_counters;
-    positive_rate("--origin-rate", args.origin_rate)?;
+    plan.origin_rate = positive_rate("--origin-rate", args.origin_rate)?;
     if args.origin_rate.is_some() && args.origin.is_some() {
         return Err("--origin-rate: start the remote origin with --rate-mbit instead".into());
     }
-    plan.origin_rate = args.origin_rate;
+    plan.client_rate = positive_rate("--client-rate", args.client_rate)?;
     if let Some(name) = &args.background {
         let background = Workload::parse(name)
             .filter(|workload| !workload.fresh_core())

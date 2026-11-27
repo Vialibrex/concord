@@ -1,5 +1,5 @@
 use super::{
-    store, Buffer, BufferStatus, Codec, Config, Counts, Frame, Prioritize, Prioritized, Store,
+    store, Buffer, BufferStatus, CodecWrite, Config, Counts, Frame, Prioritize, Prioritized, Store,
     Stream, StreamId, StreamIdOverflow, WindowSize,
 };
 use crate::codec::UserError;
@@ -7,7 +7,6 @@ use crate::frame::{self, Reason};
 use crate::proto::{self, Error, Initiator};
 
 use bytes::Buf;
-use tokio::io::AsyncWrite;
 
 use std::cmp::Ordering;
 use std::io;
@@ -344,27 +343,41 @@ impl Send {
         Ok(())
     }
 
-    pub fn buffer_pending<T, B>(
+    // Concord: helpers for split-I/O direct-write connections.
+    pub fn has_pending(&self, counts: &Counts) -> bool {
+        self.prioritize.has_pending(counts)
+    }
+
+    pub fn direct_available(&self, stream: &store::Ptr) -> WindowSize {
+        self.prioritize.direct_available(stream)
+    }
+
+    pub fn direct_consume(&mut self, len: WindowSize, stream: &mut store::Ptr) {
+        self.prioritize.direct_consume(len, stream);
+    }
+
+    pub fn buffer_pending<D, B>(
         &mut self,
         buffer: &mut Buffer<Frame<B>>,
         store: &mut Store,
         counts: &mut Counts,
-        dst: &mut Codec<T, Prioritized<B>>,
+        dst: &mut D,
     ) -> io::Result<BufferStatus>
     where
-        T: AsyncWrite + Unpin,
+        D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,
     {
         self.prioritize.buffer_pending(buffer, store, counts, dst)
     }
 
-    pub fn reclaim_written_frame<T, B>(
+    pub fn reclaim_written_frame<D, B>(
         &mut self,
         buffer: &mut Buffer<Frame<B>>,
         store: &mut Store,
-        dst: &mut Codec<T, Prioritized<B>>,
+        dst: &mut D,
     ) -> bool
     where
+        D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,
     {
         self.prioritize.reclaim_written_frame(buffer, store, dst)

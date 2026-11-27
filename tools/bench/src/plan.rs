@@ -54,6 +54,7 @@ pub struct Plan {
     pub count_syscalls: bool,
     pub net_counters: bool,
     pub origin_rate: Option<f64>,
+    pub client_rate: Option<f64>,
     /// A load that runs through the same core for the whole of every trial of the others.
     pub background: Option<Workload>,
 }
@@ -94,6 +95,7 @@ impl Plan {
                 count_syscalls: false,
                 net_counters: false,
                 origin_rate: None,
+                client_rate: None,
                 background: None,
             },
             Tier::Full => Plan {
@@ -136,6 +138,7 @@ impl Plan {
                 count_syscalls: false,
                 net_counters: false,
                 origin_rate: None,
+                client_rate: None,
                 background: None,
             },
         }

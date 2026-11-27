@@ -267,6 +267,21 @@ Concord already takes these from the references; keep them unless the reference 
   like `GunConn.FrontHeadroom`. The owned path prepends its gRPC and protobuf header and hands the storage to h2; h2's
   codec and TLS can still copy.
 
+- [language-neutral] **HTTP/2 client outbound writes** follow Go's synchronous flow-control-and-socket-coupled model.
+  mihomo `v1.19.33` (`3f27ef39`) connects `gun` (`transport/gun/gun.go:339`, `:348`, `:368`, `:146`, `:170`) and VMess
+  HTTP/2 (`transport/vmess/h2.go:30`, `:49`, `:56`, `:83`, `:89`), sing-box `v1.15.0-alpha.13` connects
+  `v2raygrpclite` (`transport/v2raygrpclite/client.go:86`, `:90`, `:119`), and `metacubex/sing-mux` `v0.3.12` connects
+  `h2mux` (`h2mux.go:201`, `:204`, `:221`) through an unbuffered `io.Pipe`. In `metacubex/http` `v0.1.8`
+  (`h2_bundle.go:9137-9154`, `:9179-9268`, `:9315-9350`), `writeRequestBody` has no background writer goroutine or
+  in-memory send queue: `frameScratchBufferLen` takes `min(peer maxFrameSize, 512 KiB)`, `awaitFlowControl` grants at
+  most `min(len(remain), cc.maxFrameSize, cs.flow.available())`, and the caller acquires `cc.wmu`, writes one DATA frame
+  (`cc.fr.WriteData`) and flushes it to the outbound socket (`cc.bw.Flush`) before reading the next body chunk.
+  Concord splits client transports via `BoxStream::into_split()` into `h2::client::Builder::handshake_split`
+  (`crates/transport/src/h2io.rs`, shared by `gun`, `h2_transport`, `xhttp`, `singmux::h2mux` and `masque`): the
+  connection task exclusively reads `FramedRead<R>`, while `H2Writer` writes at most one DATA frame bounded by
+  `min(len, peer_max_frame_size, stream_window, conn_window)` directly to the shared `FramedWrite<W>` and flushes it
+  before returning `Ready`, with strict FIFO release across streams and no per-stream send buffer or write-size cap.
+
 - [language-neutral] **Canceled HTTP/2 requests** follow the Go client mihomo pins, `processHeaders` and `processData`
   (`metacubex/http` 0.1.8 `h2_bundle.go:9637`, `:9965`): response HEADERS and DATA for forgotten local streams are
   ignored, with connection flow control refunded for DATA. The codec still updates HPACK state. Bounded reset history
@@ -835,7 +850,6 @@ MiB, GiB, ns, µs, ms, s, min, h), or as the source text in backticks; `cfg` var
 | `transport::gun::MAX_FRAME_SIZE` | 1048576 | B | Gun h2 SETTINGS_MAX_FRAME_SIZE 1 MiB = Go HTTP/2 default mihomo runs: metacubex/http v0.1.8 `h2_bundle.go:3555` defaultMaxReadFrameSize 1 << 20. |
 | `transport::gun::MAX_HEADER_LIST_SIZE` | 10485760 | B | Gun h2 max header list 10 MiB = Go HTTP/2 client default mihomo runs: metacubex/http v0.1.8 `h2_bundle.go:7522` maxHeaderListSize returns 10 << 20. |
 | `transport::h2io::CONN_WINDOW` | 1073807359 | B | Go HTTP/2 client default 65535 + transportDefaultConnFlow 1 GiB, which mihomo runs for xhttp and h2 (metacubex/http v0.1.8 `h2_bundle.go:7358`, mihomo `transport/xhttp/client.go:210-228`); same value as `transport::gun::CONN_WINDOW`. |
-| `transport::h2io::MAX_WRITE` | 524288 | B | Go's HTTP/2 client copies a request body in chunks of at most 512 KiB (mihomo's metacubex/http v0.1.8 `h2_bundle.go:9138` frameScratchBufferLen, the x/net client sing-box runs); h2 splits them at the peer's frame size as Go does. Same value. |
 | `transport::h2io::PING_TIMEOUT` | 15 s | B | h2 keepalive ping answer timeout 15 s; Go HTTP/2 PingTimeout default 15 s (metacubex/http v0.1.8 `h2_bundle.go:1134`, used by mihomo). |
 | `transport::h2io::STREAM_WINDOW` | 4194304 | B | h2 stream window 4 MiB; Go HTTP/2 client transportDefaultStreamFlow 4 << 20 (metacubex/http v0.1.8 `h2_bundle.go:7363`, `:1131`), which mihomo runs for gun/h2. |
 | `transport::http1::MAX_HEAD` | 10 MiB | B | Go's Transport caps a response head at 10 << 20 by default (`net/http/transport.go:336-341`), the client mihomo's HTTP-upgrade transports read with; same value. |

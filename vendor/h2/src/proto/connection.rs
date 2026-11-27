@@ -1,4 +1,4 @@
-use crate::codec::UserError;
+use crate::codec::{CodecRead, SplitRead, UserError};
 use crate::frame::{Reason, StreamId};
 use crate::{client, server};
 
@@ -9,7 +9,9 @@ use bytes::Bytes;
 use futures_core::Stream;
 use std::io;
 use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
+use std::sync::{Arc, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::io::AsyncRead;
@@ -29,7 +31,7 @@ where
 // Extracted part of `Connection` which does not depend on `T`. Reduces the amount of duplicated
 // method instantiations.
 #[derive(Debug)]
-struct ConnectionInner<P, B: Buf = Bytes>
+pub(crate) struct ConnectionInner<P, B: Buf = Bytes>
 where
     P: Peer,
 {
@@ -132,59 +134,13 @@ where
     B: Buf,
 {
     pub fn new(codec: Codec<T, Prioritized<B>>, config: Config) -> Connection<T, P, B> {
-        fn streams_config(config: &Config) -> streams::Config {
-            streams::Config {
-                initial_max_send_streams: config.initial_max_send_streams,
-                local_max_buffer_size: config.max_send_buffer_size,
-                local_next_stream_id: config.next_stream_id,
-                local_push_enabled: config.settings.is_push_enabled().unwrap_or(true),
-                extended_connect_protocol_enabled: config
-                    .settings
-                    .is_extended_connect_protocol_enabled()
-                    .unwrap_or(false),
-                local_reset_duration: config.reset_stream_duration,
-                local_reset_max: config.reset_stream_max,
-                remote_reset_max: config.remote_reset_stream_max,
-                remote_init_window_sz: DEFAULT_INITIAL_WINDOW_SIZE,
-                remote_max_initiated: config
-                    .settings
-                    .max_concurrent_streams()
-                    .map(|max| max as usize),
-                local_max_error_reset_streams: config.local_error_reset_streams_max,
-                data_frame_budget: config.data_frame_budget,
-            }
-        }
         let streams = Streams::new(streams_config(&config));
         let span = tracing::debug_span!(parent: None, "Connection", peer = %P::NAME);
         span.follows_from(tracing::Span::current());
         Connection {
             codec,
-            inner: ConnectionInner {
-                state: State::Open,
-                error: None,
-                go_away: GoAway::new(),
-                pending_refusal: None,
-                ping_pong: PingPong::new(),
-                settings: Settings::new(config.settings),
-                streams,
-                span,
-                _phantom: PhantomData,
-            },
+            inner: ConnectionInner::new(config.settings, streams, span),
         }
-    }
-
-    /// connection flow control
-    pub(crate) fn set_target_window_size(&mut self, size: WindowSize) {
-        let _res = self.inner.streams.set_target_connection_window_size(size);
-        // TODO: proper error handling
-        debug_assert!(_res.is_ok());
-    }
-
-    /// Send a new SETTINGS frame with an updated initial window size.
-    pub(crate) fn set_initial_window_size(&mut self, size: WindowSize) -> Result<(), UserError> {
-        let mut settings = frame::Settings::default();
-        settings.set_initial_window_size(Some(size));
-        self.inner.settings.send_settings(settings)
     }
 
     /// Send a new SETTINGS frame with extended CONNECT protocol enabled.
@@ -192,18 +148,6 @@ where
         let mut settings = frame::Settings::default();
         settings.set_enable_connect_protocol(Some(1));
         self.inner.settings.send_settings(settings)
-    }
-
-    /// Returns the maximum number of concurrent streams that may be initiated
-    /// by this peer.
-    pub(crate) fn max_send_streams(&self) -> usize {
-        self.inner.streams.max_send_streams()
-    }
-
-    /// Returns the maximum number of concurrent streams that may be initiated
-    /// by the remote peer.
-    pub(crate) fn max_recv_streams(&self) -> usize {
-        self.inner.streams.max_recv_streams()
     }
 
     #[cfg(feature = "unstable")]
@@ -251,51 +195,9 @@ where
         self.inner.as_dyn().go_away_from_user(e)
     }
 
-    fn take_error(&mut self, ours: Reason, initiator: Initiator) -> Result<(), Error> {
-        let (debug_data, theirs) = self
-            .inner
-            .error
-            .take()
-            .as_ref()
-            .map_or((Bytes::new(), Reason::NO_ERROR), |frame| {
-                (frame.debug_data().clone(), frame.reason())
-            });
-
-        match (ours, theirs) {
-            (Reason::NO_ERROR, Reason::NO_ERROR) => Ok(()),
-            (ours, Reason::NO_ERROR) => Err(Error::GoAway(Bytes::new(), ours, initiator)),
-            // If both sides reported an error, give their
-            // error back to th user. We assume our error
-            // was a consequence of their error, and less
-            // important.
-            (_, theirs) => Err(Error::remote_go_away(debug_data, theirs)),
-        }
-    }
-
-    /// Closes the connection by transitioning to a GOAWAY state
-    /// iff there are no streams or references
-    pub fn maybe_close_connection_if_no_streams(&mut self) {
-        // If we poll() and realize that there are no streams or references
-        // then we can close the connection by transitioning to GOAWAY
-        if !self.inner.streams.has_streams_or_other_references() {
-            self.inner.as_dyn().go_away_now(Reason::NO_ERROR);
-        }
-    }
-
     /// Checks if there are any streams
     pub fn has_streams(&self) -> bool {
         self.inner.streams.has_streams()
-    }
-
-    /// Checks if there are any streams or references left
-    pub fn has_streams_or_other_references(&self) -> bool {
-        // If we poll() and realize that there are no streams or references
-        // then we can close the connection by transitioning to GOAWAY
-        self.inner.streams.has_streams_or_other_references()
-    }
-
-    pub(crate) fn take_user_pings(&mut self) -> Option<UserPings> {
-        self.inner.ping_pong.take_user_pings()
     }
 
     /// Advances the internal state of the connection.
@@ -347,7 +249,7 @@ where
                     self.inner.state = State::Closed(reason, initiator);
                 }
                 State::Closed(reason, initiator) => {
-                    return Poll::Ready(self.take_error(reason, initiator));
+                    return Poll::Ready(self.inner.take_error(reason, initiator));
                 }
             }
         }
@@ -384,26 +286,9 @@ where
             }
             ready!(self.poll_ready(cx))?;
 
-            match self
-                .inner
-                .as_dyn()
-                .recv_frame(ready!(Pin::new(&mut self.codec).poll_next(cx)?))?
-            {
-                ReceivedFrame::Settings(frame) => {
-                    self.inner.settings.recv_settings(
-                        frame,
-                        &mut self.codec,
-                        &mut self.inner.streams,
-                    )?;
-                }
-                ReceivedFrame::Refused(id) => {
-                    debug_assert!(self.inner.pending_refusal.is_none());
-                    self.inner.pending_refusal = Some(id);
-                }
-                ReceivedFrame::Continue => (),
-                ReceivedFrame::Done => {
-                    return Poll::Ready(Ok(()));
-                }
+            let frame = ready!(Pin::new(&mut self.codec).poll_next(cx)?);
+            if self.inner.handle_received(frame, &mut self.codec)? {
+                return Poll::Ready(Ok(()));
             }
         }
     }
@@ -413,11 +298,133 @@ where
     }
 }
 
+fn streams_config(config: &Config) -> streams::Config {
+    streams::Config {
+        initial_max_send_streams: config.initial_max_send_streams,
+        local_max_buffer_size: config.max_send_buffer_size,
+        local_next_stream_id: config.next_stream_id,
+        local_push_enabled: config.settings.is_push_enabled().unwrap_or(true),
+        extended_connect_protocol_enabled: config
+            .settings
+            .is_extended_connect_protocol_enabled()
+            .unwrap_or(false),
+        local_reset_duration: config.reset_stream_duration,
+        local_reset_max: config.reset_stream_max,
+        remote_reset_max: config.remote_reset_stream_max,
+        remote_init_window_sz: DEFAULT_INITIAL_WINDOW_SIZE,
+        remote_max_initiated: config
+            .settings
+            .max_concurrent_streams()
+            .map(|max| max as usize),
+        local_max_error_reset_streams: config.local_error_reset_streams_max,
+        data_frame_budget: config.data_frame_budget,
+    }
+}
+
 impl<P, B> ConnectionInner<P, B>
 where
     P: Peer,
     B: Buf,
 {
+    fn new(settings: frame::Settings, streams: Streams<B, P>, span: tracing::Span) -> Self {
+        ConnectionInner {
+            state: State::Open,
+            error: None,
+            go_away: GoAway::new(),
+            pending_refusal: None,
+            ping_pong: PingPong::new(),
+            settings: Settings::new(settings),
+            streams,
+            span,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// connection flow control
+    pub(crate) fn set_target_window_size(&mut self, size: WindowSize) {
+        let _res = self.streams.set_target_connection_window_size(size);
+        // TODO: proper error handling
+        debug_assert!(_res.is_ok());
+    }
+
+    /// Send a new SETTINGS frame with an updated initial window size.
+    pub(crate) fn set_initial_window_size(&mut self, size: WindowSize) -> Result<(), UserError> {
+        let mut settings = frame::Settings::default();
+        settings.set_initial_window_size(Some(size));
+        self.settings.send_settings(settings)
+    }
+
+    /// Returns the maximum number of concurrent streams that may be initiated
+    /// by this peer.
+    pub(crate) fn max_send_streams(&self) -> usize {
+        self.streams.max_send_streams()
+    }
+
+    /// Returns the maximum number of concurrent streams that may be initiated
+    /// by the remote peer.
+    pub(crate) fn max_recv_streams(&self) -> usize {
+        self.streams.max_recv_streams()
+    }
+
+    /// Closes the connection by transitioning to a GOAWAY state
+    /// iff there are no streams or references
+    pub(crate) fn maybe_close_connection_if_no_streams(&mut self) {
+        // If we poll() and realize that there are no streams or references
+        // then we can close the connection by transitioning to GOAWAY
+        if !self.streams.has_streams_or_other_references() {
+            self.as_dyn().go_away_now(Reason::NO_ERROR);
+        }
+    }
+
+    /// Checks if there are any streams or references left
+    pub(crate) fn has_streams_or_other_references(&self) -> bool {
+        self.streams.has_streams_or_other_references()
+    }
+
+    pub(crate) fn take_user_pings(&mut self) -> Option<UserPings> {
+        self.ping_pong.take_user_pings()
+    }
+
+    fn take_error(&mut self, ours: Reason, initiator: Initiator) -> Result<(), Error> {
+        let (debug_data, theirs) = self
+            .error
+            .take()
+            .as_ref()
+            .map_or((Bytes::new(), Reason::NO_ERROR), |frame| {
+                (frame.debug_data().clone(), frame.reason())
+            });
+
+        match (ours, theirs) {
+            (Reason::NO_ERROR, Reason::NO_ERROR) => Ok(()),
+            (ours, Reason::NO_ERROR) => Err(Error::GoAway(Bytes::new(), ours, initiator)),
+            // If both sides reported an error, give their
+            // error back to th user. We assume our error
+            // was a consequence of their error, and less
+            // important.
+            (_, theirs) => Err(Error::remote_go_away(debug_data, theirs)),
+        }
+    }
+
+    /// Handles a frame read from the peer; `true` when the connection is done.
+    fn handle_received<R>(&mut self, frame: Option<Frame>, codec: &mut R) -> Result<bool, Error>
+    where
+        R: CodecRead + ?Sized,
+    {
+        match self.as_dyn().recv_frame(frame)? {
+            ReceivedFrame::Settings(frame) => {
+                self.settings
+                    .recv_settings(frame, codec, &mut self.streams)?;
+            }
+            ReceivedFrame::Refused(id) => {
+                debug_assert!(self.pending_refusal.is_none());
+                self.pending_refusal = Some(id);
+            }
+            ReceivedFrame::Continue => (),
+            ReceivedFrame::Done => return Ok(true),
+        }
+        Ok(false)
+    }
+
     fn as_dyn(&mut self) -> DynConnection<'_, B> {
         let ConnectionInner {
             state,
@@ -633,13 +640,23 @@ enum ReceivedFrame {
     Done,
 }
 
-impl<T, B> Connection<T, client::Peer, B>
-where
-    T: AsyncRead + AsyncWrite,
-    B: Buf,
-{
+impl<B: Buf> ConnectionInner<client::Peer, B> {
     pub(crate) fn streams(&self) -> &Streams<B, client::Peer> {
-        &self.inner.streams
+        &self.streams
+    }
+}
+
+impl<T, P: Peer, B: Buf> Deref for Connection<T, P, B> {
+    type Target = ConnectionInner<P, B>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T, P: Peer, B: Buf> DerefMut for Connection<T, P, B> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
     }
 }
 
@@ -686,6 +703,336 @@ where
     fn drop(&mut self) {
         // Ignore errors as this indicates that the mutex is poisoned.
         let _ = self.inner.streams.recv_eof(true);
+    }
+}
+
+// Concord: opt-in split-I/O client connection. `FramedRead<R>` stays exclusively on
+// the connection task (so inbound WINDOW_UPDATE/DATA/control frames are never blocked
+// by outbound backpressure), while outbound frames share `DirectWriter<B>` with
+// direct-writing client `SendStream`s.
+#[derive(Debug)]
+pub(crate) struct SplitConnection<R, B: Buf = Bytes> {
+    read: SplitRead<R>,
+    writer: Arc<DirectWriter<B>>,
+    inner: ConnectionInner<client::Peer, B>,
+}
+
+impl<R, B> SplitConnection<R, B>
+where
+    R: AsyncRead + Unpin,
+    B: Buf,
+{
+    pub(crate) fn new(
+        read: SplitRead<R>,
+        writer: Arc<DirectWriter<B>>,
+        config: Config,
+    ) -> SplitConnection<R, B> {
+        let streams = Streams::new_with_direct_writer(streams_config(&config), writer.clone());
+        let span = tracing::debug_span!(parent: None, "SplitConnection", peer = %client::Peer::NAME);
+        span.follows_from(tracing::Span::current());
+        SplitConnection {
+            read,
+            writer,
+            inner: ConnectionInner::new(config.settings, streams, span),
+        }
+    }
+
+    fn has_pending_control(&self) -> bool {
+        self.inner.go_away.has_pending()
+            || self.inner.ping_pong.has_pending()
+            || self.inner.settings.has_pending()
+            || self.inner.pending_refusal.is_some()
+    }
+
+    /// Finish any in-flight frame owned by `Connection` or `Abandoned` by a dropped stream.
+    fn poll_finish_conn_or_abandoned(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
+        let mut state = self.writer.lock();
+        if !matches!(
+            state.owner,
+            Some(WriteOwner::Connection) | Some(WriteOwner::Abandoned)
+        ) {
+            return Poll::Ready(Ok(()));
+        }
+        let streams = &self.inner.streams;
+        match state.poll_acquire_for_connection(cx, |sink| {
+            streams.reclaim_written_frame_for_split(sink);
+        }) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(io_err)) => {
+                DirectWriterState::fail(state);
+                Poll::Ready(Err(io_err.into()))
+            }
+            Poll::Ready(Ok(())) => {
+                DirectWriterState::release(state);
+                Poll::Ready(Ok(()))
+            }
+        }
+    }
+
+    fn poll_control_frames(&mut self, cx: &mut Context) -> Poll<Result<Option<()>, Error>> {
+        let mut state = ready!(acquire_writer(&self.writer, &self.inner.streams, cx))?;
+
+        let go_away_res = match self
+            .inner
+            .go_away
+            .send_pending_go_away(cx, &mut *state.sink)
+        {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Some(Err(io_err))) => {
+                DirectWriterState::fail(state);
+                return Poll::Ready(Err(io_err.into()));
+            }
+            Poll::Ready(Some(Ok(reason))) => Some(reason),
+            Poll::Ready(None) => None,
+        };
+
+        if let Some(reason) = go_away_res {
+            if self.inner.go_away.should_close_now() {
+                // Flush the buffered GOAWAY frame before transitioning to Closing/Closed.
+                match state.sink.flush(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(io_err)) => {
+                        DirectWriterState::fail(state);
+                        return Poll::Ready(Err(io_err.into()));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        DirectWriterState::release(state);
+                    }
+                }
+                if self.inner.go_away.is_user_initiated() {
+                    return Poll::Ready(Ok(Some(())));
+                } else {
+                    return Poll::Ready(Err(Error::library_go_away(reason)));
+                }
+            }
+            debug_assert_eq!(reason, Reason::NO_ERROR, "graceful GOAWAY should be NO_ERROR");
+        }
+
+        let ready_res: Poll<Result<(), Error>> = (|| {
+            ready!(self.inner.ping_pong.send_pending_pong(cx, &mut *state.sink))?;
+            ready!(self.inner.ping_pong.send_pending_ping(cx, &mut *state.sink))?;
+            ready!(self.inner.settings.poll_send(
+                cx,
+                &mut *state.sink,
+                &mut self.inner.streams
+            ))?;
+            if let Some(id) = self.inner.pending_refusal {
+                ready!(state.sink.poll_ready(cx))?;
+                self.inner.streams.count_pending_refusal()?;
+                state
+                    .sink
+                    .buffer(frame::Reset::new(id, Reason::REFUSED_STREAM).into())
+                    .expect("invalid RST_STREAM frame");
+                self.inner.pending_refusal = None;
+            }
+            Poll::Ready(Ok(()))
+        })();
+
+        match ready_res {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(err)) => {
+                if state.sink.is_write_empty() {
+                    DirectWriterState::release(state);
+                } else {
+                    DirectWriterState::fail(state);
+                }
+                return Poll::Ready(Err(err));
+            }
+            Poll::Ready(Ok(())) => {}
+        }
+
+        if !state.sink.is_write_empty() {
+            match state.sink.flush(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(io_err)) => {
+                    DirectWriterState::fail(state);
+                    return Poll::Ready(Err(io_err.into()));
+                }
+                Poll::Ready(Ok(())) => {}
+            }
+        }
+        DirectWriterState::release(state);
+        Poll::Ready(Ok(None))
+    }
+
+    fn poll_streams_complete(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
+        loop {
+            if self.inner.streams.register_conn_task_if_idle(cx) {
+                return Poll::Ready(Ok(()));
+            }
+            let mut state = ready!(acquire_writer(&self.writer, &self.inner.streams, cx))?;
+
+            let codec_full = match self
+                .inner
+                .streams
+                .buffer_pending_for_split(cx, &mut *state.sink)
+            {
+                Ok(codec_full) => codec_full,
+                Err(io_err) => {
+                    DirectWriterState::fail(state);
+                    return Poll::Ready(Err(io_err.into()));
+                }
+            };
+
+            let mut reclaimed = false;
+            if !state.sink.is_write_empty() {
+                match state.sink.flush(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(io_err)) => {
+                        DirectWriterState::fail(state);
+                        return Poll::Ready(Err(io_err.into()));
+                    }
+                    Poll::Ready(Ok(())) => {
+                        reclaimed = self
+                            .inner
+                            .streams
+                            .reclaim_written_frame_for_split(&mut *state.sink);
+                    }
+                }
+            }
+
+            DirectWriterState::release(state);
+
+            if codec_full || reclaimed {
+                continue;
+            }
+            return Poll::Ready(Ok(()));
+        }
+    }
+
+    fn poll2(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
+        self.inner.streams.clear_expired_reset_streams();
+
+        loop {
+            self.inner.ping_pong.register_user_ping_waker(cx);
+            if self.has_pending_control() {
+                if let Some(()) = ready!(self.poll_control_frames(cx)?) {
+                    return Poll::Ready(Ok(()));
+                }
+            }
+
+            let frame = ready!(Pin::new(&mut self.read).poll_next(cx)?);
+            if self.inner.handle_received(frame, &mut self.read)? {
+                return Poll::Ready(Ok(()));
+            }
+        }
+    }
+
+    pub(crate) fn poll(&mut self, cx: &mut Context) -> Poll<Result<(), Error>> {
+        let span = self.inner.span.clone();
+        let _e = span.enter();
+
+        loop {
+            match self.inner.state {
+                State::Open => {
+                    // Propagate fatal write I/O errors observed on a direct-writing stream.
+                    if let Some(err @ Error::Io(_, _)) = self.inner.streams.conn_error() {
+                        self.writer.wake_all_on_close();
+                        return Poll::Ready(Err(err));
+                    }
+
+                    // Progress any in-flight Connection or Abandoned frame, without
+                    // blocking inbound reads if no new control frames are pending.
+                    let flush_res = self.poll_finish_conn_or_abandoned(cx);
+                    if let Poll::Ready(Err(err)) = flush_res {
+                        self.inner.as_dyn().handle_poll2_result(Err(err))?;
+                        continue;
+                    }
+
+                    let result = match self.poll2(cx) {
+                        Poll::Ready(result) => result,
+                        Poll::Pending => {
+                            if flush_res.is_pending() || self.has_pending_control() {
+                                return Poll::Pending;
+                            }
+                            match self.poll_streams_complete(cx) {
+                                Poll::Pending => return Poll::Pending,
+                                Poll::Ready(Err(err)) => {
+                                    self.inner.as_dyn().handle_poll2_result(Err(err))?;
+                                    continue;
+                                }
+                                Poll::Ready(Ok(())) => {}
+                            }
+
+                            if (self.inner.error.is_some()
+                                || self.inner.go_away.should_close_on_idle())
+                                && !self.inner.streams.has_streams()
+                            {
+                                self.inner.as_dyn().go_away_now(Reason::NO_ERROR);
+                                continue;
+                            }
+
+                            return Poll::Pending;
+                        }
+                    };
+
+                    self.inner.as_dyn().handle_poll2_result(result)?;
+                }
+                State::Closing(reason, initiator) => {
+                    let mut state = self.writer.lock();
+                    ready!(state.take_for_connection(cx));
+                    match state.sink.shutdown(cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(io_err)) => {
+                            DirectWriterState::fail(state);
+                            return Poll::Ready(Err(io_err.into()));
+                        }
+                        Poll::Ready(Ok(())) => {
+                            DirectWriterState::fail(state);
+                        }
+                    }
+                    self.inner.state = State::Closed(reason, initiator);
+                }
+                State::Closed(reason, initiator) => {
+                    self.writer.wake_all_on_close();
+                    return Poll::Ready(self.inner.take_error(reason, initiator));
+                }
+            }
+        }
+    }
+}
+
+/// Takes the shared writer for the split connection's own frames, after finishing a frame
+/// a dropped stream or the connection left in the sink.
+fn acquire_writer<'a, B: Buf>(
+    writer: &'a DirectWriter<B>,
+    streams: &Streams<B, client::Peer>,
+    cx: &mut Context,
+) -> Poll<Result<MutexGuard<'a, DirectWriterState<B>>, Error>> {
+    let mut state = writer.lock();
+    let acquired = state.poll_acquire_for_connection(cx, |sink| {
+        streams.reclaim_written_frame_for_split(sink);
+    });
+    match ready!(acquired) {
+        Ok(()) => Poll::Ready(Ok(state)),
+        Err(io_err) => {
+            DirectWriterState::fail(state);
+            Poll::Ready(Err(io_err.into()))
+        }
+    }
+}
+
+impl<R, B: Buf> Deref for SplitConnection<R, B> {
+    type Target = ConnectionInner<client::Peer, B>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<R, B: Buf> DerefMut for SplitConnection<R, B> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<R, B> Drop for SplitConnection<R, B>
+where
+    B: Buf,
+{
+    fn drop(&mut self) {
+        let _ = self.inner.streams.recv_eof(true);
+        self.writer.wake_all_on_close();
     }
 }
 

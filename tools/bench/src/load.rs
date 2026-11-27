@@ -182,6 +182,7 @@ pub struct Ctx {
     pub udp_window: usize,
     pub idle_conns: usize,
     pub net_counters: bool,
+    pub client_rate: Option<f64>,
     pub far_netns: Option<String>,
     /// Set on the mitm cases, whose origin gave the CA.
     pub tls: Option<crate::mitm::Clients>,
@@ -429,6 +430,7 @@ async fn stream(ctx: &Ctx, direction: Direction, flows: usize) -> Io<Metrics> {
         Direction::Down => ctx.ports.source,
         Direction::Up => ctx.ports.sink,
     });
+    let rate = ctx.client_rate;
     let mut tasks = Vec::new();
     for flow in 0..flows {
         let stream = socks::connect(ctx.entry, target)
@@ -438,7 +440,7 @@ async fn stream(ctx: &Ctx, direction: Direction, flows: usize) -> Io<Metrics> {
         tasks.push(tokio::spawn(async move {
             let result = match direction {
                 Direction::Down => drain(stream, &counters[flow], &stop).await,
-                Direction::Up => fill(stream, &counters[flow], &stop).await,
+                Direction::Up => fill(stream, rate, &counters[flow], &stop).await,
             };
             if let Err(err) = result
                 && !stop.load(Ordering::Relaxed)
@@ -578,16 +580,12 @@ async fn drain(
 
 async fn fill(
     stream: tokio::net::TcpStream,
+    rate_mbit: Option<f64>,
     counter: &AtomicU64,
     stop: &AtomicBool,
 ) -> std::io::Result<()> {
     let (mut read, mut write) = stream.into_split();
-    let writer = async {
-        let chunk = vec![0xa5u8; CHUNK];
-        loop {
-            write.write_all(&chunk).await?;
-        }
-    };
+    let writer = crate::pace::send_chunks(&mut write, 0xa5, rate_mbit);
     let reports = async {
         let mut report = [0u8; 8];
         while !stop.load(Ordering::Relaxed) {

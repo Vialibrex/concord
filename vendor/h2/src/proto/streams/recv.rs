@@ -1095,14 +1095,20 @@ impl Recv {
         }
     }
 
-    pub fn buffer_pending<T, B>(
+    // Concord: O(1) check so split-I/O connections avoid locking the writer when no
+    // WINDOW_UPDATE frames are pending.
+    pub fn has_pending_window_updates(&self) -> bool {
+        self.flow.unclaimed_capacity().is_some() || !self.pending_window_updates.is_empty()
+    }
+
+    pub fn buffer_pending<D, B>(
         &mut self,
         store: &mut Store,
         counts: &mut Counts,
-        dst: &mut Codec<T, Prioritized<B>>,
+        dst: &mut D,
     ) -> io::Result<BufferStatus>
     where
-        T: AsyncWrite + Unpin,
+        D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,
     {
         // Send any pending connection level window updates
@@ -1119,12 +1125,9 @@ impl Recv {
     }
 
     /// Send connection level window update
-    fn send_connection_window_update<T, B>(
-        &mut self,
-        dst: &mut Codec<T, Prioritized<B>>,
-    ) -> io::Result<BufferStatus>
+    fn send_connection_window_update<D, B>(&mut self, dst: &mut D) -> io::Result<BufferStatus>
     where
-        T: AsyncWrite + Unpin,
+        D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,
     {
         if let Some(incr) = self.flow.unclaimed_capacity() {
@@ -1149,14 +1152,14 @@ impl Recv {
     }
 
     /// Send stream level window update
-    pub fn send_stream_window_updates<T, B>(
+    pub fn send_stream_window_updates<D, B>(
         &mut self,
         store: &mut Store,
         counts: &mut Counts,
-        dst: &mut Codec<T, Prioritized<B>>,
+        dst: &mut D,
     ) -> io::Result<BufferStatus>
     where
-        T: AsyncWrite + Unpin,
+        D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,
     {
         loop {

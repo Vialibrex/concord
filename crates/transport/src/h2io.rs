@@ -6,13 +6,12 @@ use std::task::{Context, Poll, ready};
 use std::time::{Duration, Instant};
 
 use bytes::{Buf, Bytes};
-use concord_common::stream_buffer::{self, StreamBuffer};
+use concord_common::stream_buffer::StreamBuffer;
 use concord_common::{BoxRead, BoxStream, BoxWrite, Stream, Tasks};
 use h2::client::ResponseFuture;
 use h2::{RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-const MAX_WRITE: usize = 512 * 1024;
 const PING_TIMEOUT: Duration = Duration::from_secs(15);
 pub(crate) const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 pub(crate) const CONN_WINDOW: u32 = 65_535 + (1 << 30);
@@ -38,6 +37,23 @@ pub fn client_builder() -> h2::client::Builder {
         .initial_connection_window_size(CONN_WINDOW)
         .enable_push(false);
     builder
+}
+
+/// Splits `io` into directional halves and runs a split-I/O HTTP/2 client handshake so
+/// inbound frame reads stay on the connection task while `H2Writer` writes DATA frames
+/// directly to the outbound write half under peer flow control.
+pub async fn handshake_split(
+    builder: &h2::client::Builder,
+    io: BoxStream,
+) -> io::Result<(
+    h2::client::SendRequest<Bytes>,
+    h2::client::SplitConnection<BoxRead, Bytes>,
+)> {
+    let (read, write) = io.into_split();
+    builder
+        .handshake_split(read, write)
+        .await
+        .map_err(h2_io_error)
 }
 
 /// Last time anything arrived on a connection, so a ping goes out only when it
@@ -74,7 +90,7 @@ impl Activity {
 
 pub fn spawn_connection(
     tasks: &Tasks,
-    conn: h2::client::Connection<BoxStream, Bytes>,
+    conn: h2::client::SplitConnection<BoxRead, Bytes>,
     ping_interval: Option<Duration>,
     activity: Arc<Activity>,
 ) {
@@ -85,7 +101,7 @@ pub fn spawn_connection(
 }
 
 async fn drive(
-    conn: h2::client::Connection<BoxStream, Bytes>,
+    conn: h2::client::SplitConnection<BoxRead, Bytes>,
     ping_interval: Option<Duration>,
     activity: &Activity,
 ) {
@@ -198,6 +214,7 @@ impl AsyncRead for H2Reader {
 /// The request side: writes become DATA frames, shutdown ends the stream.
 pub(crate) struct H2Writer {
     send: SendStream<Bytes>,
+    ending: bool,
     ended: bool,
 }
 
@@ -211,7 +228,11 @@ impl AsRef<[u8]> for OwnedData {
 
 impl H2Writer {
     pub fn new(send: SendStream<Bytes>) -> Self {
-        H2Writer { send, ended: false }
+        H2Writer {
+            send,
+            ending: false,
+            ended: false,
+        }
     }
 
     fn poll_owned_data(
@@ -219,26 +240,49 @@ impl H2Writer {
         cx: &mut Context<'_>,
         buffer: &mut StreamBuffer,
     ) -> Poll<io::Result<usize>> {
-        if self.ended {
+        if self.ended || self.ending {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        if self.send.has_direct_writer() {
+            if !self.send.has_direct_in_flight() && buffer.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
+            let length = buffer.len();
+            let written = ready!(self.send.poll_write_direct(cx, length, false, |take| {
+                if take == length {
+                    Bytes::from_owner(OwnedData(buffer.take_owned()))
+                } else {
+                    let bytes =
+                        Bytes::copy_from_slice(buffer.as_slice().get(..take).unwrap_or(&[]));
+                    let _ = buffer.consume(take);
+                    bytes
+                }
+            }))
+            .map_err(h2_io_error)?;
+            return Poll::Ready(Ok(written));
         }
         let length = buffer.len();
         if length == 0 {
             return Poll::Ready(Ok(0));
         }
-        if length > MAX_WRITE {
-            return stream_buffer::poll_write_buffer(self, cx, buffer);
-        }
         self.send.reserve_capacity(length);
         match ready!(self.send.poll_capacity(cx)) {
             None => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
             Some(Err(error)) => Poll::Ready(Err(h2_io_error(error))),
-            Some(Ok(_)) => {
-                // h2 accounts buffered bytes against the next reservation. A positive grant
-                // admits one bounded owner; h2 retains and drains its remainder on WINDOW_UPDATE.
-                let data = Bytes::from_owner(OwnedData(buffer.take_owned()));
+            Some(Ok(capacity)) => {
+                let take = capacity.min(length);
+                let data = if take == length {
+                    Bytes::from_owner(OwnedData(buffer.take_owned()))
+                } else {
+                    let Some(chunk) = buffer.as_slice().get(..take) else {
+                        return Poll::Ready(Ok(0));
+                    };
+                    let bytes = Bytes::copy_from_slice(chunk);
+                    buffer.consume(take)?;
+                    bytes
+                };
                 self.send.send_data(data, false).map_err(h2_io_error)?;
-                Poll::Ready(Ok(length))
+                Poll::Ready(Ok(take))
             }
         }
     }
@@ -251,19 +295,28 @@ impl AsyncWrite for H2Writer {
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
-        if this.ended {
+        if this.ended || this.ending {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+        }
+        if this.send.has_direct_writer() {
+            if !this.send.has_direct_in_flight() && data.is_empty() {
+                return Poll::Ready(Ok(0));
+            }
+            let written = ready!(this.send.poll_write_direct(cx, data.len(), false, |take| {
+                Bytes::copy_from_slice(data.get(..take).unwrap_or(&[]))
+            }))
+            .map_err(h2_io_error)?;
+            return Poll::Ready(Ok(written));
         }
         if data.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        let want = data.len().min(MAX_WRITE);
-        this.send.reserve_capacity(want);
+        this.send.reserve_capacity(data.len());
         match ready!(this.send.poll_capacity(cx)) {
             None => Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())),
             Some(Err(err)) => Poll::Ready(Err(h2_io_error(err))),
             Some(Ok(capacity)) => {
-                let take = capacity.min(want);
+                let take = capacity.min(data.len());
                 let Some(chunk) = data.get(..take) else {
                     return Poll::Ready(Ok(0));
                 };
@@ -275,18 +328,33 @@ impl AsyncWrite for H2Writer {
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        if this.send.has_direct_writer() {
+            ready!(this.send.poll_flush_direct(cx)).map_err(h2_io_error)?;
+        }
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        if !this.ended {
-            this.ended = true;
-            this.send
-                .send_data(Bytes::new(), true)
-                .map_err(h2_io_error)?;
+        if this.ended {
+            return Poll::Ready(Ok(()));
         }
+        if this.send.has_direct_writer() {
+            if !this.ending {
+                ready!(this.send.poll_flush_direct(cx)).map_err(h2_io_error)?;
+                this.ending = true;
+            }
+            ready!(this.send.poll_write_direct(cx, 0, true, |_| Bytes::new()))
+                .map_err(h2_io_error)?;
+            this.ended = true;
+            return Poll::Ready(Ok(()));
+        }
+        this.ended = true;
+        this.send
+            .send_data(Bytes::new(), true)
+            .map_err(h2_io_error)?;
         Poll::Ready(Ok(()))
     }
 }
