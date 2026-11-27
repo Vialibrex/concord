@@ -392,6 +392,30 @@ pub(crate) struct UrlCache {
     hits: SetMatches,
 }
 
+/// Slot allocator owned only by full `RouteProgram` compilation; classical
+/// rule-sets hold no allocator and keep every `URL-REGEX` leaf self-contained.
+#[derive(Default)]
+pub(crate) struct UrlSlots {
+    sources: Vec<String>,
+    regexes: Vec<fancy_regex::Regex>,
+}
+
+impl UrlSlots {
+    pub(crate) fn alloc(&mut self, regex: fancy_regex::Regex) -> UrlNode {
+        if let Some(cooked) = delegatable_regex(regex.as_str()) {
+            let slot = self.sources.len() as u32;
+            self.sources.push(cooked);
+            self.regexes.push(regex);
+            return UrlNode::Slot(slot);
+        }
+        UrlNode::Fancy(Box::new(regex))
+    }
+
+    pub(crate) fn build(self) -> UrlSet {
+        UrlSet::build(self.sources, self.regexes)
+    }
+}
+
 /// Program-wide pre-matcher for lone and nested `URL-REGEX` leaves across a
 /// `RouteProgram`'s main list and sub-rule lists.
 #[derive(Default)]

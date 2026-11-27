@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use concord_common::{InboundKind, Network};
 use concord_config::filter::{Matcher, compile_pattern};
-use concord_config::mitm::{delegatable_regex, regex_source};
+use concord_config::mitm::regex_source;
 use concord_config::rule::{Cond, NetworkKind, RuleDef, RuleLines, parse_rule};
 use indexmap::IndexMap;
 
@@ -17,7 +17,7 @@ use crate::payload::rule_payload;
 use crate::prog::{Op, Prog, host_match};
 use crate::program::{CompileEnv, CompileError, Demands, RouteProgram};
 use crate::ruleset::RuleSetHandle;
-use crate::runs::{DomainItem, DomainRun, IpRun, UrlNode, UrlRun, UrlSet};
+use crate::runs::{DomainItem, DomainRun, IpRun, UrlNode, UrlRun, UrlSet, UrlSlots};
 use crate::table::TableBuilder;
 use crate::text::go_lower;
 
@@ -90,12 +90,19 @@ struct Cx<'e> {
     check_targets: bool,
     deferred_geo: Vec<GeoFile>,
     scripts: Vec<Box<str>>,
-    url_sources: Vec<String>,
-    url_regexes: Vec<fancy_regex::Regex>,
+    url_slots: Option<UrlSlots>,
 }
 
 impl<'e> Cx<'e> {
-    fn new(env: &'e CompileEnv, check_targets: bool) -> Self {
+    fn for_program(env: &'e CompileEnv) -> Self {
+        Self::with_mode(env, true, Some(UrlSlots::default()))
+    }
+
+    fn for_classical(env: &'e CompileEnv) -> Self {
+        Self::with_mode(env, false, None)
+    }
+
+    fn with_mode(env: &'e CompileEnv, check_targets: bool, url_slots: Option<UrlSlots>) -> Self {
         Cx {
             env,
             targets: Vec::new(),
@@ -107,21 +114,15 @@ impl<'e> Cx<'e> {
             check_targets,
             deferred_geo: Vec::new(),
             scripts: Vec::new(),
-            url_sources: Vec::new(),
-            url_regexes: Vec::new(),
+            url_slots,
         }
     }
 
     fn add_url_leaf(&mut self, regex: fancy_regex::Regex) -> UrlNode {
-        if self.check_targets
-            && let Some(cooked) = delegatable_regex(regex.as_str())
-        {
-            let slot = self.url_sources.len() as u32;
-            self.url_sources.push(cooked);
-            self.url_regexes.push(regex);
-            return UrlNode::Slot(slot);
+        match &mut self.url_slots {
+            Some(slots) => slots.alloc(regex),
+            None => UrlNode::Fancy(Box::new(regex)),
         }
-        UrlNode::Fancy(Box::new(regex))
     }
 
     fn intern(&mut self, target: &str) -> Result<u16, CompileError> {
@@ -168,7 +169,7 @@ fn compile_from<D: Borrow<RuleDef>>(
         return Err(CompileError::EmptySubRuleName);
     }
     verify_sub_rules(sub_rules)?;
-    let mut cx = Cx::new(env, true);
+    let mut cx = Cx::for_program(env);
     for (id, name) in sub_rules.keys().enumerate() {
         cx.sub_ids.insert(name, id as u32);
     }
@@ -188,7 +189,7 @@ fn compile_from<D: Borrow<RuleDef>>(
             classical.push(handle.clone());
         }
     }
-    let url_set = UrlSet::build(cx.url_sources, cx.url_regexes);
+    let url_set = cx.url_slots.map_or_else(UrlSet::empty, UrlSlots::build);
     Ok(RouteProgram {
         progs: progs.into_boxed_slice(),
         sub_rule_names: sub_rules.keys().map(|name| name.as_str().into()).collect(),

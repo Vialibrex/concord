@@ -1616,6 +1616,26 @@ fn program_url_set_handles_logic_rules_single_leaf_and_classical_sets() {
     let from_set = request("b.test", "https://b.test/blocked/set-two", None);
     assert_eq!(accepted(&kit, &program, &from_set), pick(3, "SET"));
 
+    // Classical set URL leaves must never index the outer program's UrlSet slots:
+    // outer slots are 0=/outer0, 1=/outer1; set_a has /set-hit, /set-two.
+    let isolated = kit.compile(
+        &[
+            "AND,((DOMAIN,a.test),(URL-REGEX,/outer0)),OUTER0",
+            "AND,((DOMAIN,a.test),(URL-REGEX,/outer1)),OUTER1",
+            "RULE-SET,set_a,SET",
+            "MATCH,FINAL",
+        ],
+        8,
+    );
+    assert!(isolated.url_set.is_set());
+    let set_only = request("b.test", "https://b.test/set-two", None);
+    assert_eq!(accepted(&kit, &isolated, &set_only), pick(2, "SET"));
+    let outer_slot_only = request("b.test", "https://b.test/outer0", None);
+    assert_eq!(
+        accepted(&kit, &isolated, &outer_slot_only),
+        pick(3, "FINAL")
+    );
+
     let single = kit.compile(&["DOMAIN,x.a.test,X", "URL-REGEX,/one,ONE", "MATCH,F"], 8);
     assert!(!single.url_set.is_set());
     assert_eq!(

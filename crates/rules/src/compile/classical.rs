@@ -56,7 +56,7 @@ fn classical_rule(entry: &str) -> Result<RuleDef, String> {
 }
 
 pub(crate) fn compile_classical(entries: &[String], env: &CompileEnv) -> Classical {
-    let mut cx = Cx::new(env, false);
+    let mut cx = Cx::for_classical(env);
     let mut warnings = Vec::new();
     let mut geo_faults = Vec::new();
     let mut defs = Vec::with_capacity(entries.len());
@@ -85,7 +85,7 @@ pub(crate) fn compile_classical(entries: &[String], env: &CompileEnv) -> Classic
                 index: defs.len(),
                 line: entry,
             };
-            let mut scratch = Cx::new(env, false);
+            let mut scratch = Cx::for_classical(env);
             if let Err(err) = node_for_def(&mut scratch, &def, &loc) {
                 if let Some(fault) = GeoFault::of(&err)
                     && !geo_faults.contains(&fault)

@@ -3,7 +3,7 @@ use smallvec::SmallVec;
 
 use crate::eval::{Ev, Node, Yield};
 use crate::observed::Observed;
-use crate::prog::{Op, host_holds};
+use crate::prog::{Op, Prog, host_holds};
 use crate::program::{MatchCtx, RouteProgram, RuleRef, Step};
 use crate::runs::{IpRun, UrlCache, UrlRun};
 
@@ -132,61 +132,7 @@ impl<'p> Run<'p> {
                 self.frames.pop();
                 continue;
             };
-            let mut miss_end = None;
-            let outcome = match *op {
-                Op::Leaf { idx, node } => match prog.nodes.get(node as usize) {
-                    None => Outcome::Next,
-                    Some(node) => match ev.eval(node) {
-                        Ok(false) => self.passed_over(&ev),
-                        Ok(true) => match node {
-                            Node::SubRule { sub, .. } => Outcome::Enter {
-                                sub: *sub,
-                                from: idx,
-                            },
-                            _ => Outcome::Candidate {
-                                idx,
-                                advance: Advance::Leaf,
-                            },
-                        },
-                        Err(why) => Outcome::Yield(self.yielded(why)),
-                    },
-                },
-                Op::Host { idx, how, extended } => {
-                    if prog
-                        .table
-                        .payload(idx)
-                        .is_some_and(|payload| host_holds(&ev, how, extended, payload))
-                    {
-                        Outcome::Candidate {
-                            idx,
-                            advance: Advance::Leaf,
-                        }
-                    } else {
-                        Outcome::Next
-                    }
-                }
-                Op::Domain(run) => match prog.domain_runs.get(run as usize) {
-                    None => Outcome::Next,
-                    Some(run) => {
-                        miss_end = Some(run.end);
-                        run_candidate(run.next_in(&ev, frame.pos, &prog.table))
-                    }
-                },
-                Op::Url(run) => match prog.url_runs.get(run as usize) {
-                    None => Outcome::Next,
-                    Some(run) => {
-                        miss_end = Some(run.end);
-                        self.url_run(run, &ev, frame.pos)
-                    }
-                },
-                Op::Ip(run) => match prog.ip_runs.get(run as usize) {
-                    None => Outcome::Next,
-                    Some(run) => {
-                        miss_end = Some(run.end);
-                        self.ip_run(run, &mut ev, frame.pos)
-                    }
-                },
-            };
+            let (outcome, miss_end) = self.eval_op(prog, op, frame.pos, &mut ev);
             match outcome {
                 Outcome::Yield(step) => break step,
                 Outcome::Next => {
@@ -226,6 +172,77 @@ impl<'p> Run<'p> {
         self.observed = ev.observed;
         self.url_hits = ev.url_hits;
         step
+    }
+
+    #[inline]
+    fn eval_op(
+        &mut self,
+        prog: &Prog,
+        op: &Op,
+        pos: u32,
+        ev: &mut Ev<'_>,
+    ) -> (Outcome<'p>, Option<u32>) {
+        let mut miss_end = None;
+        let outcome = match *op {
+            Op::Leaf { idx, node } => match prog.nodes.get(node as usize) {
+                None => Outcome::Next,
+                Some(node) => self.leaf_op(idx, node, ev),
+            },
+            Op::Host { idx, how, extended } => {
+                if prog
+                    .table
+                    .payload(idx)
+                    .is_some_and(|payload| host_holds(ev, how, extended, payload))
+                {
+                    Outcome::Candidate {
+                        idx,
+                        advance: Advance::Leaf,
+                    }
+                } else {
+                    Outcome::Next
+                }
+            }
+            Op::Domain(run) => match prog.domain_runs.get(run as usize) {
+                None => Outcome::Next,
+                Some(run) => {
+                    miss_end = Some(run.end);
+                    run_candidate(run.next_in(ev, pos, &prog.table))
+                }
+            },
+            Op::Url(run) => match prog.url_runs.get(run as usize) {
+                None => Outcome::Next,
+                Some(run) => {
+                    miss_end = Some(run.end);
+                    self.url_run(run, ev, pos)
+                }
+            },
+            Op::Ip(run) => match prog.ip_runs.get(run as usize) {
+                None => Outcome::Next,
+                Some(run) => {
+                    miss_end = Some(run.end);
+                    self.ip_run(run, ev, pos)
+                }
+            },
+        };
+        (outcome, miss_end)
+    }
+
+    #[inline]
+    fn leaf_op(&mut self, idx: u32, node: &Node, ev: &mut Ev<'_>) -> Outcome<'p> {
+        match ev.eval(node) {
+            Ok(false) => self.passed_over(ev),
+            Ok(true) => match node {
+                Node::SubRule { sub, .. } => Outcome::Enter {
+                    sub: *sub,
+                    from: idx,
+                },
+                _ => Outcome::Candidate {
+                    idx,
+                    advance: Advance::Leaf,
+                },
+            },
+            Err(why) => Outcome::Yield(self.yielded(why)),
+        }
     }
 
     fn rule_ref(&self, index: u32) -> RuleRef {
