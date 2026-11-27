@@ -7,6 +7,7 @@ use concord_config::listener::VlessUser;
 use tokio::io::{AsyncReadExt, BufReader};
 
 use super::front::Conn;
+use super::mux::{Mux, MuxServe};
 use super::{bounded, flows, unread, user};
 use crate::addr_codec::VMESS;
 use crate::lazy::HeadFirst;
@@ -20,6 +21,7 @@ const RESPONSE: [u8; 2] = [VERSION, 0];
 /// mihomo's VLESS service (`listener/sing_vless/service.go`) without a flow.
 pub(super) struct Vless {
     users: HashMap<[u8; 16], Option<Arc<str>>>,
+    mux: Arc<MuxServe>,
 }
 
 impl Vless {
@@ -29,7 +31,14 @@ impl Vless {
                 .iter()
                 .map(|entry| (user_id(&entry.uuid), user(&entry.username)))
                 .collect(),
+            mux: Arc::default(),
         }
+    }
+
+    /// The listener's `mux-option`; without it, sing-mux sessions neither pad nor run Brutal.
+    pub(super) fn with_mux(mut self, mux: Arc<MuxServe>) -> Self {
+        self.mux = mux;
+        self
     }
 }
 
@@ -82,7 +91,17 @@ fn addon_flow(mut addons: &[u8]) -> &[u8] {
 }
 
 impl Conn for Vless {
-    fn handle(self: Arc<Self>, stream: BoxStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture {
+    fn mux(&self) -> &Arc<MuxServe> {
+        &self.mux
+    }
+
+    fn handle(
+        self: Arc<Self>,
+        stream: BoxStream,
+        peer: Peer,
+        cx: Arc<InboundCx>,
+        mux: Mux,
+    ) -> ServeFuture {
         Box::pin(async move {
             let mut buffered = BufReader::with_capacity(512, stream);
             let Some(request) = bounded(self.request(&mut buffered)).await else {
@@ -91,7 +110,9 @@ impl Conn for Vless {
             let stream: BoxStream = Box::new(HeadFirst::new(unread(buffered), RESPONSE.to_vec()));
             let inbound = cx.inbound(InboundKind::Vless, peer.local, request.user);
             match request.command {
-                CMD_TCP | CMD_MUX => flows::tcp(stream, request.dst, inbound, peer, &cx),
+                CMD_TCP | CMD_MUX => {
+                    flows::tcp(stream, request.dst, inbound, peer, &cx, &mux);
+                }
                 CMD_UDP => flows::udp(stream, request.dst, inbound, peer, &cx),
                 command => tracing::debug!("{}: VLESS command {command} is not served", cx.name),
             }

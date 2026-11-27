@@ -20,6 +20,7 @@ use quinn::{Incoming, VarInt};
 use tokio::sync::watch;
 
 use super::certs::ServerCerts;
+use super::mux::{Mux, MuxServe};
 use super::quic::{self, QuicServer};
 use super::{ServerError, TlsSetup, bounded, flows, packets};
 use crate::tuic::conn::MAX_STREAM_PACKET;
@@ -46,6 +47,7 @@ pub(super) struct Tuic {
     auth_timeout: Duration,
     max_packet: usize,
     config: quinn::ServerConfig,
+    mux: Arc<MuxServe>,
     _certs: ServerCerts,
 }
 
@@ -110,6 +112,7 @@ impl Tuic {
             },
             max_packet: frame - overhead,
             config,
+            mux: MuxServe::new(&server.mux),
             _certs: tls.certs,
         })
     }
@@ -308,7 +311,14 @@ impl Conn {
         }
         let inbound = self.cx.inbound(InboundKind::Tuic, self.peer.local, user);
         let stream = concord_quic::QuicStream::new(send, recv, Box::new(()));
-        flows::tcp(Box::new(stream), dst, inbound, self.peer, &self.cx);
+        flows::tcp(
+            Box::new(stream),
+            dst,
+            inbound,
+            self.peer,
+            &self.cx,
+            &Mux::new(&self.server.mux),
+        );
     }
 
     async fn uni(self: &Arc<Self>) {
@@ -461,6 +471,7 @@ mod tests {
             max_idle_ms: 0,
             auth_timeout_ms: 300,
             max_udp_relay_packet: 0,
+            mux: Default::default(),
         }
     }
 

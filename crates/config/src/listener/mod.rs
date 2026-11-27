@@ -149,6 +149,22 @@ pub struct HttpCarriers {
     pub grpc_service_name: Option<String>,
 }
 
+/// `mux-option` (`listener/inbound/mux.go`). A listener that takes it serves sing-mux
+/// streams whether or not it is written; it says what the server asks of them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MuxServer {
+    /// Refuse a session whose client does not pad.
+    pub padding: bool,
+    /// `brutal` when `enabled`, with its rates as written.
+    pub brutal: Option<MuxBrutal>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MuxBrutal {
+    pub up: String,
+    pub down: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SsServer {
     pub cipher: String,
@@ -156,6 +172,7 @@ pub struct SsServer {
     /// By user name, the password (AEAD) or the user PSK (2022).
     pub users: IndexMap<String, String>,
     pub udp: bool,
+    pub mux: MuxServer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,6 +187,7 @@ pub struct VmessServer {
     pub users: Vec<VmessUser>,
     pub tls: Option<ServerTls>,
     pub carriers: HttpCarriers,
+    pub mux: MuxServer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +202,7 @@ pub struct VlessServer {
     pub users: Vec<VlessUser>,
     pub tls: Option<ServerTls>,
     pub carriers: HttpCarriers,
+    pub mux: MuxServer,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,6 +216,7 @@ pub struct TrojanServer {
     pub users: Vec<TrojanUser>,
     pub tls: Option<ServerTls>,
     pub carriers: HttpCarriers,
+    pub mux: MuxServer,
 }
 
 /// mihomo's `listener/inbound/anytls.go`.
@@ -226,6 +246,7 @@ pub struct TuicServer {
     pub max_idle_ms: u64,
     pub auth_timeout_ms: u64,
     pub max_udp_relay_packet: u64,
+    pub mux: MuxServer,
 }
 
 /// mihomo's `listener/inbound/hysteria2.go`. Rates and windows are as written, empty or 0
@@ -249,6 +270,7 @@ pub struct Hysteria2Server {
     pub max_stream_window: u64,
     pub initial_conn_window: u64,
     pub max_conn_window: u64,
+    pub mux: MuxServer,
 }
 
 /// Everything a profile opens besides the fixed ports of the general section.

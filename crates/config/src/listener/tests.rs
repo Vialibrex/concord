@@ -511,3 +511,42 @@ fn an_anytls_listener_without_a_security_layer_is_skipped() {
         assert!(message.contains(reason), "{message}");
     }
 }
+
+#[test]
+fn mux_option_sets_padding_and_an_enabled_brutal() {
+    let vmess = |mux: Value| {
+        let def = one(json!({
+            "name": "v", "type": "vmess", "port": 1, "users": [{"uuid": "u"}], "mux-option": mux
+        }));
+        match def.kind {
+            ListenerKind::Vmess(server) => server.mux,
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(vmess(json!({})), MuxServer::default());
+    assert_eq!(
+        vmess(json!({"padding": true, "brutal": {"enabled": false, "up": "10 Mbps"}})),
+        MuxServer {
+            padding: true,
+            brutal: None
+        }
+    );
+    let brutal = json!({"brutal": {"enabled": true, "up": "10 Mbps", "down": "20 Mbps"}});
+    if cfg!(any(target_os = "linux", target_os = "android")) {
+        assert_eq!(
+            vmess(brutal).brutal,
+            Some(MuxBrutal {
+                up: "10 Mbps".into(),
+                down: "20 Mbps".into()
+            })
+        );
+    } else {
+        let reason = skipped(json!({
+            "name": "v", "type": "vmess", "port": 1, "users": [{"uuid": "u"}], "mux-option": brutal
+        }));
+        assert!(
+            reason.contains("TCP Brutal is only supported on Linux"),
+            "{reason}"
+        );
+    }
+}

@@ -60,7 +60,7 @@ pub use sigpipe::ignore_sigpipe;
 pub use sockopt::{
     KEEP_ALIVE, SEND_TCP_VECTORED, TRY_SEND_VECTORED, bind_to_interface, enable_tfo,
     is_global_unicast, mptcp_protocol, preconnect, prepare_udp_socket, raw_socket_of, send_space,
-    send_tcp_vectored, set_routing_mark, try_send_vectored,
+    send_tcp_vectored, set_brutal, set_routing_mark, try_send_vectored,
 };
 pub use sparse::SparseBuf;
 #[cfg(any(target_os = "linux", target_os = "android"))]

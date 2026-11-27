@@ -1,8 +1,10 @@
 mod h2mux;
 mod inbox;
 mod padding;
+mod server;
 mod single;
 mod smux;
+pub use server::serve_session;
 pub(crate) use single::smux_stream;
 #[cfg(test)]
 mod tests;
@@ -71,6 +73,12 @@ impl MuxProtocol {
             MuxProtocol::Yamux => 1,
             MuxProtocol::H2Mux => 2,
         }
+    }
+
+    fn from_id(id: u8) -> Option<Self> {
+        [MuxProtocol::Smux, MuxProtocol::Yamux, MuxProtocol::H2Mux]
+            .into_iter()
+            .find(|protocol| protocol.id() == id)
     }
 }
 

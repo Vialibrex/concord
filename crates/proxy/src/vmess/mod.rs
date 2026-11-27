@@ -232,9 +232,6 @@ impl PacketSession for VmessPackets {
 pub(crate) struct XudpFrames {
     first: Cell<bool>,
     global_id: [u8; 8],
-    accepts_new: bool,
-    /// The server's one session: frames of any other id are refused.
-    session: Option<u16>,
 }
 
 impl XudpFrames {
@@ -242,20 +239,6 @@ impl XudpFrames {
         XudpFrames {
             first: Cell::new(true),
             global_id: source.map(global_id).unwrap_or_default(),
-            accepts_new: false,
-            session: None,
-        }
-    }
-
-    /// The server end, which takes the client's opening frame and answers with keep
-    /// frames, as sing-vmess's `xudp.go` does.
-    #[cfg(feature = "server")]
-    pub(crate) fn server() -> Self {
-        XudpFrames {
-            first: Cell::new(false),
-            global_id: [0; 8],
-            accepts_new: true,
-            session: None,
         }
     }
 }
@@ -324,20 +307,10 @@ impl Decoder for XudpFrames {
         let Some(meta) = input.get(2..meta_end) else {
             return Ok(Decoded::NeedMore);
         };
-        let (id, status, option) = match meta {
-            [hi, lo, status, option, ..] => (u16::from_be_bytes([*hi, *lo]), *status, *option),
+        let (status, option) = match meta {
+            [_, _, status, option, ..] => (*status, *option),
             _ => return Err(invalid_data("short xudp frame")),
         };
-        if self.accepts_new {
-            match self.session {
-                Some(known) if known != id => return Err(invalid_data("a second xudp session")),
-                Some(_) => {}
-                None => self.session = Some(id),
-            }
-            if status == STATUS_NEW && meta.get(4).is_some_and(|network| *network != NETWORK_UDP) {
-                return Err(invalid_data("mux.cool TCP sub-streams are not served"));
-            }
-        }
         if option & 2 != 0 {
             return Err(io::Error::new(
                 io::ErrorKind::ConnectionAborted,
@@ -345,9 +318,9 @@ impl Decoder for XudpFrames {
             ));
         }
         let addr = match status {
-            STATUS_NEW if !self.accepts_new => return Err(invalid_data("unexpected frame new")),
+            STATUS_NEW => return Err(invalid_data("unexpected frame new")),
             STATUS_END => return Err(io::ErrorKind::UnexpectedEof.into()),
-            STATUS_NEW | STATUS_KEEP if meta_len > 4 => {
+            STATUS_KEEP if meta_len > 4 => {
                 let body = meta.get(5..).unwrap_or_default();
                 Some(
                     VMESS
@@ -450,30 +423,5 @@ mod tests {
         };
         assert_eq!(addr, Some(dst));
         assert_eq!(&wire[payload], b"hi");
-    }
-
-    #[cfg(feature = "server")]
-    #[test]
-    fn the_server_takes_one_udp_session_and_refuses_tcp_or_a_second_id() {
-        let dst = Address::new("1.2.3.4", 53);
-        let enc = XudpFrames::new(Some("10.0.0.2:5353".parse().unwrap()));
-        let mut pkt = PacketBuf::with_headroom(enc.headroom());
-        pkt.extend_from_slice(b"hi");
-        enc.encode(&mut pkt, &dst).unwrap();
-        let opening = pkt.as_slice().to_vec();
-        assert_eq!(opening[4], STATUS_NEW);
-
-        let mut server = XudpFrames::server();
-        assert!(matches!(
-            server.decode(&mut opening.clone()),
-            Ok(Decoded::Packet { .. })
-        ));
-        let mut other = opening.clone();
-        other[3] ^= 1;
-        assert!(server.decode(&mut other).is_err());
-
-        let mut tcp = opening;
-        tcp[6] = 1;
-        assert!(XudpFrames::server().decode(&mut tcp).is_err());
     }
 }

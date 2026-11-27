@@ -3,18 +3,24 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use concord_common::sync::lock;
 use concord_common::{BoxStream, Tasks};
 use futures_util::future::BoxFuture;
 use http::{Method, Request, Uri};
+use tokio::sync::watch;
+use tokio::time::timeout;
 
 use super::MuxSession;
 use crate::h2io::{
     Activity, H2Body, INITIAL_MAX_SEND_STREAMS, Incoming, STREAM_WINDOW, SafeSender, StreamGuard,
     h2_io_error, handshake_split, reserve_stream, spawn_connection,
 };
+use crate::server;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// x/net/http2's server `prefaceTimeout`, which sing-mux's h2mux server runs on.
+const PREFACE: Duration = Duration::from_secs(10);
 // sing-mux sets the h2mux transport's `MaxReadFrameSize` to sing's 32 KiB buffer size; the
 // connection window is the Go HTTP/2 client's default.
 const MAX_FRAME_SIZE: u32 = 32 * 1024;
@@ -29,6 +35,46 @@ pub(super) fn client_builder() -> h2::client::Builder {
         .max_frame_size(MAX_FRAME_SIZE)
         .enable_push(false);
     builder
+}
+
+/// sing-mux's h2mux server (`h2mux.go:35-65`): every request is a stream, answered 200 at
+/// once. It ends once no stream has been open for its 30 s `IdleTimeout`, which is the
+/// gun server's too.
+pub(super) async fn serve(io: BoxStream, on_stream: &(dyn Fn(BoxStream) + Send + Sync)) {
+    let mut builder = server::server_builder();
+    builder.max_frame_size(MAX_FRAME_SIZE);
+    let handshake = builder.handshake::<_, Bytes>(io);
+    let Ok(Ok(mut connection)) = timeout(PREFACE, handshake).await else {
+        return;
+    };
+    let (count, mut open) = watch::channel(0usize);
+    let count = Arc::new(count);
+    loop {
+        let accepted = tokio::select! {
+            accepted = connection.accept() => accepted,
+            () = server::idle(&mut open) => break,
+        };
+        let Some(Ok((request, mut respond))) = accepted else {
+            return;
+        };
+        let Ok(response) = http::Response::builder().status(200).body(()) else {
+            continue;
+        };
+        let Ok(send) = respond.send_response(response, false) else {
+            continue;
+        };
+        count.send_modify(|n| *n += 1);
+        let closed = Arc::clone(&count);
+        let body = H2Body::new(send, Incoming::Body(request.into_body()))
+            .on_drop(move || closed.send_modify(|n| *n = n.saturating_sub(1)));
+        on_stream(Box::new(body));
+    }
+    connection.graceful_shutdown();
+    let _ = timeout(
+        server::GOAWAY_GRACE,
+        std::future::poll_fn(|cx| connection.poll_closed(cx)),
+    )
+    .await;
 }
 
 pub(super) struct H2MuxSession {

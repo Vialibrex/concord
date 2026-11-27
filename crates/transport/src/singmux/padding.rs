@@ -39,7 +39,7 @@ pub(super) fn protocol_conn(inner: BoxStream, request: Vec<u8>) -> BoxStream {
     ))
 }
 
-struct Passthrough;
+pub(super) struct Passthrough;
 
 impl ReadLayer for Passthrough {
     fn poll_read<R: AsyncRead + Unpin + ?Sized>(

@@ -32,6 +32,7 @@ use tokio::time::Sleep;
 
 use self::dispatch::{Bidi, Dispatched, ForH3, Route, route};
 use super::certs::ServerCerts;
+use super::mux::{Mux, MuxServe};
 use super::quic::{self, QuicServer};
 use super::{ServerError, TlsSetup, bounded, flows, packets};
 use crate::hysteria2::udp::{HEADROOM, Sender};
@@ -64,6 +65,7 @@ pub(super) struct Hysteria2 {
     conn_window: u64,
     obfs: ObfsSpec,
     socket_key: u64,
+    mux: Arc<MuxServe>,
     _certs: ServerCerts,
 }
 
@@ -105,6 +107,7 @@ impl Hysteria2 {
                 None => ObfsSpec::None,
             },
             socket_key: key.finish(),
+            mux: MuxServe::new(&server.mux),
             _certs: tls.certs,
         })
     }
@@ -358,7 +361,14 @@ impl Conn {
             .cx
             .inbound(InboundKind::Hysteria2, self.peer.local, Some(user));
         let stream = HeadFirst::new(QuicStream::new(send, recv, Box::new(())), tcp_response());
-        flows::tcp(Box::new(stream), dst, inbound, self.peer, &self.cx);
+        flows::tcp(
+            Box::new(stream),
+            dst,
+            inbound,
+            self.peer,
+            &self.cx,
+            &Mux::new(&self.server.mux),
+        );
     }
 
     /// Reads datagrams once the connection has authenticated; one that does not parse

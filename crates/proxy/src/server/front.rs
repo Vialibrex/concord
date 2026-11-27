@@ -6,6 +6,7 @@ use concord_tls::server::TlsServer;
 use concord_transport::server::{self, HttpCarriers, OnStream};
 
 use super::certs::ServerCerts;
+use super::mux::{Mux, MuxServe};
 use tokio::net::TcpStream;
 
 /// What lies between an accepted connection and the protocol: TLS, then a websocket or
@@ -18,7 +19,15 @@ pub(super) struct Front {
 /// One protocol connection over a stream the front opened. It reads the request under its
 /// own bound and hands the flow on.
 pub(super) trait Conn: Send + Sync + 'static {
-    fn handle(self: Arc<Self>, stream: BoxStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture;
+    fn mux(&self) -> &Arc<MuxServe>;
+
+    fn handle(
+        self: Arc<Self>,
+        stream: BoxStream,
+        peer: Peer,
+        cx: Arc<InboundCx>,
+        mux: Mux,
+    ) -> ServeFuture;
 }
 
 pub(super) struct Fronted<C> {
@@ -38,6 +47,12 @@ impl<C: Conn> Fronted<C> {
 impl<C: Conn> StreamService for Fronted<C> {
     fn serve(self: Arc<Self>, stream: TcpStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture {
         Box::pin(async move {
+            let bare = self.front.tls.is_none() && self.front.carriers.is_empty();
+            let mux = if bare {
+                Mux::over(self.conn.mux(), &stream)
+            } else {
+                Mux::new(self.conn.mux())
+            };
             let stream: BoxStream = match &self.front.tls {
                 Some((tls, _)) => match tls.accept(stream).await {
                     Ok(tls) => Box::new(tls),
@@ -46,15 +61,18 @@ impl<C: Conn> StreamService for Fronted<C> {
                 None => Box::new(stream),
             };
             if self.front.carriers.is_empty() {
-                self.conn.clone().handle(stream, peer, cx).await;
+                self.conn.clone().handle(stream, peer, cx, mux).await;
                 return;
             }
             let conn = self.conn.clone();
             let carried = cx.clone();
             let on_stream: OnStream = Arc::new(move |stream| {
-                carried
-                    .tasks
-                    .spawn(conn.clone().handle(stream, peer, carried.clone()));
+                carried.tasks.spawn(conn.clone().handle(
+                    stream,
+                    peer,
+                    carried.clone(),
+                    mux.clone(),
+                ));
             });
             let _ = server::accept(stream, &self.front.carriers, &cx.tasks, on_stream).await;
         })

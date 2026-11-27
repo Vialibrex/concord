@@ -5,6 +5,8 @@ mod certs;
 mod flows;
 mod front;
 mod hysteria2;
+mod mux;
+mod muxcool;
 mod packets;
 mod quic;
 #[cfg(test)]
@@ -29,6 +31,7 @@ use concord_transport::server::HttpCarriers;
 use tokio::io::BufReader;
 
 use self::front::{Front, Fronted};
+use self::mux::MuxServe;
 use crate::BuildError;
 use crate::util::lock;
 
@@ -95,12 +98,12 @@ pub fn build(kind: &ListenerKind, env: &ServerEnv<'_>) -> Result<Option<Protocol
     let (kind, stream) = match kind {
         ListenerKind::Trojan(server) => {
             let front = front(server.tls.as_ref(), &server.carriers, env)?;
-            let conn = trojan::Trojan::new(&server.users);
+            let conn = trojan::Trojan::new(&server.users).with_mux(MuxServe::new(&server.mux));
             (InboundKind::Trojan, Fronted::service(front, conn))
         }
         ListenerKind::Vless(server) => {
             let front = front(server.tls.as_ref(), &server.carriers, env)?;
-            let conn = vless::Vless::new(&server.users);
+            let conn = vless::Vless::new(&server.users).with_mux(MuxServe::new(&server.mux));
             (InboundKind::Vless, Fronted::service(front, conn))
         }
         ListenerKind::AnyTls(server) => {
@@ -116,7 +119,8 @@ pub fn build(kind: &ListenerKind, env: &ServerEnv<'_>) -> Result<Option<Protocol
                 &server.users,
                 env.carried.of(env.keep).vmess.clone(),
                 env.clock.clone(),
-            );
+            )
+            .with_mux(MuxServe::new(&server.mux));
             (InboundKind::Vmess, Fronted::service(front, conn))
         }
         ListenerKind::Shadowsocks(server) => {

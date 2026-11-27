@@ -8,10 +8,11 @@ use concord_common::serve::{InboundCx, Peer};
 use concord_common::{Address, BoxStream, FlowMeta, InboundInfo, Network};
 use tokio::io::AsyncReadExt;
 
+use super::mux::{self, Mux};
+use super::muxcool;
 use super::packets::{self, LengthFrames};
 use crate::addr_codec::{SOCKS, UOT};
 use crate::uot::AddrFrames;
-use crate::vmess::XudpFrames;
 
 const UOT_MAGIC: &str = "sp.v2.udp-over-tcp.arpa";
 const UOT_LEGACY_MAGIC: &str = "sp.udp-over-tcp.arpa";
@@ -27,6 +28,7 @@ pub(super) fn tcp(
     inbound: InboundInfo,
     peer: Peer,
     cx: &Arc<InboundCx>,
+    mux: &Mux,
 ) {
     let host = match &dst {
         Address::Domain(host, _) => host.as_str(),
@@ -34,15 +36,8 @@ pub(super) fn tcp(
     };
     match host {
         MUX_COOL => {
-            cx.tasks.spawn(packets::serve(
-                stream,
-                XudpFrames::server(),
-                XudpFrames::server(),
-                dst,
-                inbound,
-                peer.src,
-                cx.clone(),
-            ));
+            let session = muxcool::serve(stream, inbound, peer, cx.clone(), mux.nested());
+            cx.tasks.spawn(session);
         }
         UOT_MAGIC => {
             cx.tasks.spawn(uot(stream, inbound, peer, cx.clone()));
@@ -58,7 +53,10 @@ pub(super) fn tcp(
                 cx.clone(),
             ));
         }
-        SING_MUX => tracing::debug!("{}: sing-mux is not served yet", inbound.name),
+        SING_MUX => {
+            let session = mux::serve(stream, inbound, peer, cx.clone(), mux.clone());
+            cx.tasks.spawn(session);
+        }
         _ => cx.handler.handle_tcp(
             FlowMeta {
                 network: Network::Tcp,

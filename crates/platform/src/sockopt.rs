@@ -162,6 +162,77 @@ pub fn set_routing_mark(_socket: &Socket, _mark: u32) -> io::Result<()> {
     Ok(())
 }
 
+/// tcp-brutal's `TCP_BRUTAL_PARAMS` (sing-mux `brutal_linux.go:20`).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const TCP_BRUTAL_PARAMS: libc::c_int = 23301;
+
+/// Hands `socket` to the tcp-brutal kernel module, sending at `rate` bytes per second with
+/// the cwnd gain of 20 hysteria 2 uses, as sing-mux's `SetBrutalOptions` does
+/// (`brutal_linux.go:31-56`), whose `linux` build tag takes Android too. Fails where the
+/// module is not loaded.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn set_brutal(socket: &std::net::TcpStream, rate: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    #[repr(C)]
+    struct Params {
+        rate: u64,
+        cwnd_gain: u32,
+    }
+    let fd = socket.as_raw_fd();
+    let name = b"brutal";
+    // SAFETY: pointer and length describe `name`; the descriptor belongs to `socket`.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_CONGESTION,
+            name.as_ptr().cast(),
+            name.len() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        let err = io::Error::last_os_error();
+        return Err(io::Error::new(
+            err.kind(),
+            format!(
+                "setsockopt IPPROTO_TCP TCP_CONGESTION brutal: {err}: please make sure you have \
+                 installed the tcp-brutal kernel module"
+            ),
+        ));
+    }
+    let params = Params {
+        rate,
+        cwnd_gain: 20,
+    };
+    // SAFETY: pointer and length describe `params`; the descriptor belongs to `socket`.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            TCP_BRUTAL_PARAMS,
+            std::ptr::from_ref(&params).cast(),
+            std::mem::size_of::<Params>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        let err = io::Error::last_os_error();
+        return Err(io::Error::new(
+            err.kind(),
+            format!("setsockopt IPPROTO_TCP TCP_BRUTAL_PARAMS: {err}"),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn set_brutal(_socket: &std::net::TcpStream, _rate: u64) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "TCP Brutal is only supported on Linux",
+    ))
+}
+
 /// macOS uses [`preconnect`]; Windows needs `ConnectEx`, which tokio cannot issue.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn enable_tfo(socket: &Socket) -> io::Result<()> {

@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, BufReader};
 
 use super::front::Conn;
+use super::mux::{Mux, MuxServe};
 use super::{ServerError, bounded, flows, unread, user};
 use crate::addr_codec::SOCKS;
 use crate::anytls::{AnyTlsStream, ServerPadding};
@@ -17,6 +18,8 @@ use crate::anytls::{AnyTlsStream, ServerPadding};
 pub(super) struct AnyTls {
     users: HashMap<[u8; 32], Option<Arc<str>>>,
     padding: ServerPadding,
+    /// anytls has no `mux-option`: its sing-mux sessions neither pad nor run Brutal.
+    mux: Arc<MuxServe>,
 }
 
 impl AnyTls {
@@ -28,7 +31,11 @@ impl AnyTls {
             .iter()
             .map(|(name, password)| (Sha256::digest(password).into(), user(name)))
             .collect();
-        Ok(AnyTls { users, padding })
+        Ok(AnyTls {
+            users,
+            padding,
+            mux: Arc::default(),
+        })
     }
 
     /// The user the password hash names, once the padding after it is read.
@@ -45,7 +52,17 @@ impl AnyTls {
 }
 
 impl Conn for AnyTls {
-    fn handle(self: Arc<Self>, stream: BoxStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture {
+    fn mux(&self) -> &Arc<MuxServe> {
+        &self.mux
+    }
+
+    fn handle(
+        self: Arc<Self>,
+        stream: BoxStream,
+        peer: Peer,
+        cx: Arc<InboundCx>,
+        mux: Mux,
+    ) -> ServeFuture {
         Box::pin(async move {
             let mut buffered = BufReader::with_capacity(512, stream);
             let Some(user) = bounded(self.authenticate(&mut buffered)).await else {
@@ -54,8 +71,8 @@ impl Conn for AnyTls {
             let inbound = cx.inbound(InboundKind::AnyTls, peer.local, user);
             let tasks = cx.tasks.clone();
             self.padding.serve(unread(buffered), &tasks, move |stream| {
-                cx.tasks
-                    .spawn(relay(stream, inbound.clone(), peer, cx.clone()));
+                let relay = relay(stream, inbound.clone(), peer, cx.clone(), mux.clone());
+                cx.tasks.spawn(relay);
             });
         })
     }
@@ -63,14 +80,20 @@ impl Conn for AnyTls {
 
 /// One stream of the session: its destination, then the flow
 /// (`listener/anytls/server.go:243-258`).
-async fn relay(mut stream: AnyTlsStream, inbound: InboundInfo, peer: Peer, cx: Arc<InboundCx>) {
+async fn relay(
+    mut stream: AnyTlsStream,
+    inbound: InboundInfo,
+    peer: Peer,
+    cx: Arc<InboundCx>,
+    mux: Mux,
+) {
     let Ok(dst) = SOCKS.read(&mut stream).await else {
         return;
     };
     if stream.handshake_success().await.is_err() {
         return;
     }
-    flows::tcp(Box::new(stream), dst, inbound, peer, &cx);
+    flows::tcp(Box::new(stream), dst, inbound, peer, &cx, &mux);
 }
 
 #[cfg(test)]

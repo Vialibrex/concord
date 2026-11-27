@@ -147,7 +147,7 @@ fn default_tuic(f: &mut Fields<'_>) -> Result<Option<ListenerDef>> {
         client_auth: ClientAuth::None,
         client_auth_cert: String::new(),
     };
-    let server = tuic_server(f, tls, String::new())?;
+    let server = tuic_server(f, tls, String::new(), MuxServer::default())?;
     Ok(Some(ListenerDef {
         name: "DEFAULT-TUIC".to_owned(),
         binds: Binds::Addrs(addrs),
@@ -230,6 +230,7 @@ fn global_ss(cipher: String, password: String) -> ListenerKind {
         password,
         users: IndexMap::new(),
         udp: true,
+        mux: MuxServer::default(),
     })
 }
 
@@ -243,6 +244,7 @@ fn global_vmess(username: String, uuid: String) -> ListenerKind {
         }],
         tls: None,
         carriers: HttpCarriers::default(),
+        mux: MuxServer::default(),
     })
 }
 
@@ -325,8 +327,8 @@ fn parse_listener(map: &Map) -> R<(ListenerDef, Vec<String>)> {
         "tuic" => {
             let tls = quic_tls(&mut f)?;
             let bbr_profile = f.string("bbr-profile")?;
-            mux_later(&mut f);
-            ListenerKind::Tuic(tuic_server(&mut f, tls, bbr_profile)?)
+            let mux = mux_option(&mut f)?;
+            ListenerKind::Tuic(tuic_server(&mut f, tls, bbr_profile, mux)?)
         }
         other => return skip(format!("listener type '{other}' is not implemented yet")),
     };
@@ -463,8 +465,29 @@ fn carriers(f: &mut Fields<'_>) -> Result<HttpCarriers> {
     })
 }
 
-fn mux_later(f: &mut Fields<'_>) {
-    f.ignore("mux-option", "sing-mux is not served yet");
+/// Brutal needs Linux's tcp-brutal module: mihomo fails to build such a listener elsewhere
+/// (sing-mux `server.go:39-41`).
+fn mux_option(f: &mut Fields<'_>) -> R<MuxServer> {
+    let Some(mut mux) = f.sub("mux-option")? else {
+        return Ok(MuxServer::default());
+    };
+    let padding = mux.boolean("padding")?;
+    let brutal = match mux.sub("brutal")? {
+        Some(mut brutal) => {
+            let enabled = brutal.boolean("enabled")?;
+            let rates = MuxBrutal {
+                up: brutal.string("up")?,
+                down: brutal.string("down")?,
+            };
+            enabled.then_some(rates)
+        }
+        None => None,
+    };
+    let linux = cfg!(any(target_os = "linux", target_os = "android"));
+    if brutal.is_some() && !linux {
+        return skip("TCP Brutal is only supported on Linux");
+    }
+    Ok(MuxServer { padding, brutal })
 }
 
 fn proxy_server(f: &mut Fields<'_>, has_udp: bool) -> R<ProxyServer> {
@@ -559,12 +582,13 @@ fn ss_server(f: &mut Fields<'_>) -> R<SsServer> {
         return skip("option 'simple-obfs' is not served yet");
     }
     security(f, &None)?;
-    mux_later(f);
+    let mux = mux_option(f)?;
     Ok(SsServer {
         cipher,
         password,
         users,
         udp,
+        mux,
     })
 }
 
@@ -590,11 +614,12 @@ fn vmess_server(f: &mut Fields<'_>) -> R<VmessServer> {
         .collect::<Result<Vec<_>>>()?;
     let tls = server_tls(f)?;
     security(f, &tls)?;
-    mux_later(f);
+    let mux = mux_option(f)?;
     Ok(VmessServer {
         users,
         tls,
         carriers: carriers(f)?,
+        mux,
     })
 }
 
@@ -625,11 +650,12 @@ fn vless_server(f: &mut Fields<'_>) -> R<VlessServer> {
             "disallow using Vless without any certificates/shadow-tls/res-tls/jls/reality/decryption/allow-insecure config",
         );
     }
-    mux_later(f);
+    let mux = mux_option(f)?;
     Ok(VlessServer {
         users,
         tls,
         carriers: carriers(f)?,
+        mux,
     })
 }
 
@@ -652,11 +678,12 @@ fn trojan_server(f: &mut Fields<'_>) -> R<TrojanServer> {
             "disallow using Trojan without any certificates/shadow-tls/res-tls/jls/reality/ss/allow-insecure config",
         );
     }
-    mux_later(f);
+    let mux = mux_option(f)?;
     Ok(TrojanServer {
         users,
         tls,
         carriers: carriers(f)?,
+        mux,
     })
 }
 
@@ -679,7 +706,12 @@ fn anytls_server(f: &mut Fields<'_>) -> R<AnyTlsServer> {
     })
 }
 
-fn tuic_server(f: &mut Fields<'_>, tls: ServerTls, bbr_profile: String) -> Result<TuicServer> {
+fn tuic_server(
+    f: &mut Fields<'_>,
+    tls: ServerTls,
+    bbr_profile: String,
+    mux: MuxServer,
+) -> Result<TuicServer> {
     Ok(TuicServer {
         tokens: f.strings("token")?,
         users: f.string_map("users")?,
@@ -691,6 +723,7 @@ fn tuic_server(f: &mut Fields<'_>, tls: ServerTls, bbr_profile: String) -> Resul
         max_idle_ms: f.loose("max-idle-time", 0)?,
         auth_timeout_ms: f.loose("authentication-timeout", 0)?,
         max_udp_relay_packet: f.loose("max-udp-relay-packet-size", 0)?,
+        mux,
     })
 }
 
@@ -715,7 +748,7 @@ fn hysteria2_server(f: &mut Fields<'_>) -> R<Hysteria2Server> {
     };
     f.ignore("masquerade", "answered with 404 until masquerade is served");
     let tls = quic_tls(f)?;
-    mux_later(f);
+    let mux = mux_option(f)?;
     Ok(Hysteria2Server {
         users: f.string_map("users")?,
         salamander,
@@ -731,5 +764,6 @@ fn hysteria2_server(f: &mut Fields<'_>) -> R<Hysteria2Server> {
         max_stream_window: f.u64("max-stream-receive-window")?,
         initial_conn_window: f.u64("initial-connection-receive-window")?,
         max_conn_window: f.u64("max-connection-receive-window")?,
+        mux,
     })
 }

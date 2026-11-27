@@ -12,15 +12,17 @@ use tokio::io::{AsyncReadExt, BufReader};
 
 use super::flows::{self, PACKET_ADDR_MAGIC};
 use super::front::Conn;
+use super::mux::{Mux, MuxServe};
+use super::muxcool;
 use super::{bounded, packets, unread, user};
 use crate::addr_codec::VMESS;
 use crate::util::lock;
+use crate::vmess::VmessPackets;
 use crate::vmess::crypto::{
     CMD_MUX, CMD_TCP, CMD_UDP, Request, Security, VERSION, command_key, kdf, one_shot_open,
     one_shot_seal, user_id,
 };
 use crate::vmess::stream::VmessStream;
-use crate::vmess::{VmessPackets, XudpFrames};
 
 /// How far a request's timestamp may stray from the clock.
 const WINDOW: Duration = Duration::from_secs(120);
@@ -36,6 +38,7 @@ pub(super) struct Vmess {
     accounts: Vec<Account>,
     seen: Arc<AuthIds>,
     clock: Arc<ClockOffset>,
+    mux: Arc<MuxServe>,
 }
 
 /// The auth ids a listener has accepted, each kept until its own timestamp leaves the
@@ -90,7 +93,14 @@ impl Vmess {
             accounts,
             seen,
             clock,
+            mux: Arc::default(),
         }
+    }
+
+    /// The listener's `mux-option`; without it, sing-mux sessions neither pad nor run Brutal.
+    pub(super) fn with_mux(mut self, mux: Arc<MuxServe>) -> Self {
+        self.mux = mux;
+        self
     }
 
     fn account(&self, auth_id: &[u8; 16]) -> Option<&Account> {
@@ -225,7 +235,17 @@ fn response_head(request: &Request, key: &[u8; 16], iv: &[u8; 16]) -> Option<Vec
 }
 
 impl Conn for Vmess {
-    fn handle(self: Arc<Self>, stream: BoxStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture {
+    fn mux(&self) -> &Arc<MuxServe> {
+        &self.mux
+    }
+
+    fn handle(
+        self: Arc<Self>,
+        stream: BoxStream,
+        peer: Peer,
+        cx: Arc<InboundCx>,
+        mux: Mux,
+    ) -> ServeFuture {
         Box::pin(async move {
             let mut buffered = BufReader::with_capacity(512, stream);
             let Some((user, request, dst)) = bounded(self.request(&mut buffered)).await else {
@@ -241,7 +261,9 @@ impl Conn for Vmess {
             };
             let inbound = cx.inbound(InboundKind::Vmess, peer.local, user);
             match (command, dst) {
-                (CMD_TCP, Some(dst)) => flows::tcp(Box::new(stream), dst, inbound, peer, &cx),
+                (CMD_TCP, Some(dst)) => {
+                    flows::tcp(Box::new(stream), dst, inbound, peer, &cx, &mux);
+                }
                 (CMD_UDP, Some(dst)) => {
                     let packet_addr = matches!(&dst, Address::Domain(host, _) if host.as_str() == PACKET_ADDR_MAGIC);
                     let session = Arc::new(VmessPackets::new(stream, dst, packet_addr));
@@ -253,16 +275,9 @@ impl Conn for Vmess {
                     ));
                 }
                 _ => {
-                    let remote = Address::new("v1.mux.cool", 0);
-                    cx.tasks.spawn(packets::serve(
-                        Box::new(stream),
-                        XudpFrames::server(),
-                        XudpFrames::server(),
-                        remote,
-                        inbound,
-                        peer.src,
-                        cx.clone(),
-                    ));
+                    let session =
+                        muxcool::serve(Box::new(stream), inbound, peer, cx.clone(), mux.nested());
+                    cx.tasks.spawn(session);
                 }
             }
         })

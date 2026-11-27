@@ -229,6 +229,7 @@ fn cases() -> Vec<Case> {
             Some("alice"),
         ),
     ];
+    all.extend(mux_cases());
     all.push(Case {
         udp: false,
         ..case(
@@ -245,6 +246,74 @@ fn cases() -> Vec<Case> {
             .collect(),
         Err(_) => all,
     }
+}
+
+/// sing-mux on the listeners that take `mux-option`: each protocol, with padding and
+/// without.
+fn mux_cases() -> Vec<Case> {
+    let tls = "certificate: server.crt, private-key: server.key";
+    let pad = "mux-option: {padding: true}";
+    let smux = |protocol: &str, padding: bool| {
+        format!("smux: {{enabled: true, protocol: {protocol}, padding: {padding}}}")
+    };
+    vec![
+        case(
+            "ss-smux",
+            "type: shadowsocks, cipher: aes-128-gcm, password: secret",
+            &format!(
+                "type: ss, cipher: aes-128-gcm, password: secret, udp: true, {}",
+                smux("smux", false)
+            ),
+            None,
+        ),
+        case(
+            "vmess-smux-padding",
+            &format!("type: vmess, {pad}, users: [{{username: dave, uuid: {UUID}, alterId: 0}}]"),
+            &format!(
+                "type: vmess, uuid: {UUID}, alterId: 0, cipher: auto, udp: true, {}",
+                smux("smux", true)
+            ),
+            Some("dave"),
+        ),
+        case(
+            "vless-yamux-padding",
+            &format!("type: vless, allow-insecure: true, {pad}, users: [{{uuid: {UUID}}}]"),
+            &format!(
+                "type: vless, uuid: {UUID}, udp: true, {}",
+                smux("yamux", true)
+            ),
+            None,
+        ),
+        case(
+            "trojan-yamux",
+            &format!("type: trojan, {tls}, users: [{{username: frank, password: pw}}]"),
+            &format!(
+                "type: trojan, password: pw, udp: true, sni: localhost, skip-cert-verify: true, {}",
+                smux("yamux", false)
+            ),
+            Some("frank"),
+        ),
+        case(
+            "vmess-h2mux",
+            &format!("type: vmess, users: [{{uuid: {UUID}, alterId: 0}}]"),
+            &format!(
+                "type: vmess, uuid: {UUID}, alterId: 0, cipher: aes-128-gcm, udp: true, {}",
+                smux("h2mux", false)
+            ),
+            None,
+        ),
+        case(
+            "ss-h2mux-padding",
+            &format!(
+                "type: shadowsocks, cipher: 2022-blake3-aes-128-gcm, password: '{KEY}', {pad}"
+            ),
+            &format!(
+                "type: ss, cipher: 2022-blake3-aes-128-gcm, password: '{KEY}', udp: true, {}",
+                smux("h2mux", true)
+            ),
+            None,
+        ),
+    ]
 }
 
 struct Mihomo {

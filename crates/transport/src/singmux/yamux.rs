@@ -33,6 +33,11 @@ const RECV_WINDOW: u32 = 256 * 1024;
 const MAX_MESSAGE: u32 = 64 * 1024 - 12;
 const KEEPALIVE: Duration = Duration::from_secs(30);
 const QUEUE: usize = 64;
+/// metacubex/yamux's `AcceptBacklog`: a SYN past it is reset.
+const ACCEPT_BACKLOG: usize = 256;
+/// metacubex/yamux's `MaxIncomingStreams`: a SYN past this many open streams is reset.
+const MAX_INCOMING_STREAMS: usize = 1000;
+const GO_AWAY_PROTOCOL_ERROR: u32 = 1;
 
 fn header(kind: u8, flags: u16, sid: u32, length: u32) -> Vec<u8> {
     let [f0, f1] = flags.to_be_bytes();
@@ -64,11 +69,14 @@ struct Core {
     closed: AtomicBool,
     received: AtomicU64,
     tasks: Tasks,
+    /// Where a peer's SYN goes on a session that serves; None on one that only opens.
+    accept: Mutex<Option<mpsc::Sender<BoxStream>>>,
 }
 
 impl Core {
     fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
+        lock(&self.accept).take();
         let streams = std::mem::take(&mut *lock(&self.streams));
         for entry in streams.values() {
             entry
@@ -82,6 +90,17 @@ impl Core {
     fn remove(&self, sid: u32) {
         lock(&self.streams).remove(&sid);
     }
+
+    /// Leaves a stream the peer has opened since under the same id.
+    fn remove_own(&self, sid: u32, entry: &Arc<Entry>) {
+        let mut streams = lock(&self.streams);
+        if streams
+            .get(&sid)
+            .is_some_and(|held| Arc::ptr_eq(held, entry))
+        {
+            streams.remove(&sid);
+        }
+    }
 }
 
 pub(super) struct YamuxSession {
@@ -91,15 +110,32 @@ pub(super) struct YamuxSession {
 
 impl YamuxSession {
     pub fn new(io: BoxStream, tasks: &Tasks) -> Self {
+        Self::start(io, 1, None, tasks)
+    }
+
+    /// A session that takes the streams its peer opens, as `yamux.Server`; its own would
+    /// be even.
+    pub(super) fn server(io: BoxStream, tasks: &Tasks) -> (Self, mpsc::Receiver<BoxStream>) {
+        let (accept, accepted) = mpsc::channel(ACCEPT_BACKLOG);
+        (Self::start(io, 2, Some(accept), tasks), accepted)
+    }
+
+    fn start(
+        io: BoxStream,
+        first_id: u32,
+        accept: Option<mpsc::Sender<BoxStream>>,
+        tasks: &Tasks,
+    ) -> Self {
         let (read, write) = Box::new(io).into_split();
         let (tx, rx) = mpsc::channel(QUEUE);
         let core = Arc::new(Core {
             streams: Mutex::new(HashMap::new()),
-            next_id: AtomicU32::new(1),
+            next_id: AtomicU32::new(first_id),
             tx,
             closed: AtomicBool::new(false),
             received: AtomicU64::new(0),
             tasks: tasks.clone(),
+            accept: Mutex::new(accept),
         });
         let reader = {
             let core = core.clone();
@@ -153,7 +189,7 @@ async fn keepalive(core: &Core) {
     }
 }
 
-async fn read_loop(core: &Core, mut io: BoxRead) -> io::Result<()> {
+async fn read_loop(core: &Arc<Core>, mut io: BoxRead) -> io::Result<()> {
     loop {
         let mut raw = [0u8; 12];
         io.read_exact(&mut raw).await?;
@@ -186,7 +222,7 @@ async fn read_loop(core: &Core, mut io: BoxRead) -> io::Result<()> {
 }
 
 async fn handle_stream(
-    core: &Core,
+    core: &Arc<Core>,
     io: &mut BoxRead,
     kind: u8,
     flags: u16,
@@ -194,10 +230,7 @@ async fn handle_stream(
     length: u32,
 ) -> io::Result<()> {
     if flags & FLAG_SYN != 0 {
-        let _ = core
-            .tx
-            .send(header(TYPE_WINDOW_UPDATE, FLAG_RST, sid, 0))
-            .await;
+        accept(core, sid).await?;
     }
     let entry = lock(&core.streams).get(&sid).cloned();
     let data_len = if kind == TYPE_DATA { length } else { 0 };
@@ -244,6 +277,76 @@ async fn handle_stream(
     if !entry.inbox.push(Bytes::from(payload)) {
         return_credit(core, sid, &entry, payload_len(length));
     }
+    Ok(())
+}
+
+/// A session that only opens resets the stream. One that serves takes it as metacubex/yamux's
+/// `incomingStream` (`session.go:843-900`): a client's stream is odd, a duplicate ends the
+/// session with a go away, and a SYN past [`MAX_INCOMING_STREAMS`] or the backlog is reset
+/// without an acknowledgement, which `AcceptStream` sends once the stream is taken.
+async fn accept(core: &Arc<Core>, sid: u32) -> io::Result<()> {
+    let Some(accept) = lock(&core.accept).clone() else {
+        return reset(core, sid).await;
+    };
+    if sid.is_multiple_of(2) {
+        return Err(invalid("both yamux endpoints are clients"));
+    }
+    let entry = Arc::new(Entry {
+        inbox: Inbox::default(),
+        send_window: AtomicU32::new(PEER_ASSUMED_WINDOW),
+        send_waker: AtomicWaker::new(),
+        flow: Mutex::new(Flow {
+            credit: RECV_WINDOW,
+            ..Flow::default()
+        }),
+    });
+    let admission = {
+        let mut streams = lock(&core.streams);
+        if streams.contains_key(&sid) {
+            Admission::Duplicate
+        } else if streams.len() >= MAX_INCOMING_STREAMS {
+            // Every stream of a session that serves is one its peer opened.
+            Admission::Full
+        } else {
+            streams.insert(sid, entry.clone());
+            Admission::Taken
+        }
+    };
+    match admission {
+        Admission::Duplicate => {
+            let away = header(TYPE_GO_AWAY, 0, 0, GO_AWAY_PROTOCOL_ERROR);
+            let _ = core.tx.send(away).await;
+            return Err(invalid("yamux: duplicate stream declared"));
+        }
+        Admission::Full => return reset(core, sid).await,
+        Admission::Taken => {}
+    }
+    let Ok(taken) = accept.try_reserve() else {
+        core.remove(sid);
+        return reset(core, sid).await;
+    };
+    let ack = header(
+        TYPE_WINDOW_UPDATE,
+        FLAG_ACK,
+        sid,
+        RECV_WINDOW - PEER_ASSUMED_WINDOW,
+    );
+    let _ = core.tx.send(ack).await;
+    taken.send(Box::new(YamuxStream::new(sid, core.clone(), entry)));
+    Ok(())
+}
+
+enum Admission {
+    Duplicate,
+    Full,
+    Taken,
+}
+
+async fn reset(core: &Core, sid: u32) -> io::Result<()> {
+    let _ = core
+        .tx
+        .send(header(TYPE_WINDOW_UPDATE, FLAG_RST, sid, 0))
+        .await;
     Ok(())
 }
 
@@ -356,7 +459,7 @@ struct Shared {
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        self.core.remove(self.id);
+        self.core.remove_own(self.id, &self.entry);
     }
 }
 
@@ -481,7 +584,7 @@ impl AsyncWrite for YamuxWrite {
         flow.write_closed = true;
         if flow.remote_fin {
             drop(flow);
-            core.remove(*id);
+            core.remove_own(*id, entry);
         }
         Poll::Ready(Ok(()))
     }
@@ -594,5 +697,131 @@ mod tests {
             .await
             .expect("the peer's window stayed spent");
         }
+    }
+
+    fn syn(sid: u32) -> Vec<u8> {
+        header(TYPE_WINDOW_UPDATE, FLAG_SYN, sid, 0)
+    }
+
+    #[tokio::test]
+    async fn a_serving_session_resets_streams_past_the_incoming_limit() {
+        let (near, far) = duplex(1 << 20);
+        let (mut far_read, mut far_write) = tokio::io::split(far);
+        let (_session, mut accepted) = YamuxSession::server(Box::new(near), &Default::default());
+        let held = Arc::new(Mutex::new(Vec::new()));
+        tokio::spawn({
+            let held = held.clone();
+            async move {
+                while let Some(stream) = accepted.recv().await {
+                    lock(&held).push(stream);
+                }
+            }
+        });
+        let ids = (0..).map(|n: u32| 2 * n + 1);
+        let mut wire = Vec::new();
+        for sid in ids.clone().take(MAX_INCOMING_STREAMS + 1) {
+            wire.extend(syn(sid));
+        }
+        far_write.write_all(&wire).await.unwrap();
+        for sid in ids.clone().take(MAX_INCOMING_STREAMS) {
+            assert_eq!(
+                next_header(&mut far_read).await,
+                (TYPE_WINDOW_UPDATE, FLAG_ACK, sid, 0)
+            );
+        }
+        let over = 2 * u32::try_from(MAX_INCOMING_STREAMS).unwrap() + 1;
+        assert_eq!(
+            next_header(&mut far_read).await,
+            (TYPE_WINDOW_UPDATE, FLAG_RST, over, 0)
+        );
+        drop(lock(&held).pop());
+        far_write.write_all(&syn(over + 2)).await.unwrap();
+        loop {
+            let (kind, flags, sid, _) = next_header(&mut far_read).await;
+            if sid == over + 2 {
+                assert_eq!((kind, flags), (TYPE_WINDOW_UPDATE, FLAG_ACK));
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_full_backlog_resets_a_stream_without_acknowledging_it() {
+        let (near, far) = duplex(1 << 20);
+        let (mut far_read, mut far_write) = tokio::io::split(far);
+        let (_session, _accepted) = YamuxSession::server(Box::new(near), &Default::default());
+        let ids = (0..).map(|n: u32| 2 * n + 1);
+        for sid in ids.clone().take(ACCEPT_BACKLOG + 1) {
+            far_write.write_all(&syn(sid)).await.unwrap();
+        }
+        for sid in ids.clone().take(ACCEPT_BACKLOG) {
+            assert_eq!(
+                next_header(&mut far_read).await,
+                (TYPE_WINDOW_UPDATE, FLAG_ACK, sid, 0)
+            );
+        }
+        let over = 2 * u32::try_from(ACCEPT_BACKLOG).unwrap() + 1;
+        assert_eq!(
+            next_header(&mut far_read).await,
+            (TYPE_WINDOW_UPDATE, FLAG_RST, over, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_syn_ends_the_session_and_the_stream_it_named() {
+        let (near, far) = duplex(1 << 16);
+        let (mut far_read, mut far_write) = tokio::io::split(far);
+        let (_session, mut accepted) = YamuxSession::server(Box::new(near), &Default::default());
+        far_write.write_all(&syn(1)).await.unwrap();
+        next_header(&mut far_read).await;
+        let mut stream = accepted.recv().await.unwrap();
+        let reading = tokio::spawn(async move { stream.read(&mut [0u8; 1]).await });
+        far_write.write_all(&syn(1)).await.unwrap();
+        let away = tokio::time::timeout(Duration::from_secs(5), next_header(&mut far_read)).await;
+        assert_eq!(
+            away.expect("no go away"),
+            (TYPE_GO_AWAY, 0, 0, GO_AWAY_PROTOCOL_ERROR)
+        );
+        let read = tokio::time::timeout(Duration::from_secs(5), reading)
+            .await
+            .expect("the first stream was left open")
+            .unwrap();
+        assert!(read.is_err(), "{read:?}");
+    }
+
+    #[tokio::test]
+    async fn an_even_stream_from_the_client_ends_the_session() {
+        let (near, far) = duplex(1 << 16);
+        let (_far_read, mut far_write) = tokio::io::split(far);
+        let (_session, mut accepted) = YamuxSession::server(Box::new(near), &Default::default());
+        far_write.write_all(&syn(2)).await.unwrap();
+        let next = tokio::time::timeout(Duration::from_secs(5), accepted.recv()).await;
+        assert!(matches!(next, Ok(None)));
+    }
+
+    #[tokio::test]
+    async fn a_stream_reset_and_opened_again_survives_the_old_one_dropping() {
+        let (near, far) = duplex(1 << 16);
+        let (mut far_read, mut far_write) = tokio::io::split(far);
+        let (_session, mut accepted) = YamuxSession::server(Box::new(near), &Default::default());
+        far_write.write_all(&syn(1)).await.unwrap();
+        next_header(&mut far_read).await;
+        let old = accepted.recv().await.unwrap();
+        far_write
+            .write_all(&header(TYPE_WINDOW_UPDATE, FLAG_RST, 1, 0))
+            .await
+            .unwrap();
+        far_write.write_all(&syn(1)).await.unwrap();
+        let mut new = accepted.recv().await.unwrap();
+        drop(old);
+        let mut data = header(TYPE_DATA, 0, 1, 1);
+        data.push(b'x');
+        far_write.write_all(&data).await.unwrap();
+        let mut got = [0u8; 1];
+        tokio::time::timeout(Duration::from_secs(5), new.read_exact(&mut got))
+            .await
+            .expect("the new stream lost its entry to the old one")
+            .unwrap();
+        assert_eq!(&got, b"x");
     }
 }

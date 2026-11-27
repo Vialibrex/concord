@@ -7,11 +7,13 @@ use concord_common::layered::{Layered, ReadLayer, WriteLayer};
 use concord_common::{Address, BoxStream};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
+use super::padding::Passthrough;
 use crate::http1::invalid;
 use crate::outgoing::Outgoing;
 
 const FLAG_UDP: u16 = 1;
 const FLAG_ADDR: u16 = 2;
+const STATUS_SUCCESS: u8 = 0;
 const STATUS_ERROR: u8 = 1;
 
 pub(super) fn mux_destination() -> Address {
@@ -66,7 +68,22 @@ enum Response {
 
 /// A mux stream that sends the destination with its first write (alone, for a
 /// zero-length write) and reads the server's status byte before the first payload byte.
-pub(super) type ClientStream = Layered<BoxStream, ServerStatus, DestinationFirst>;
+pub(super) type ClientStream = Layered<BoxStream, ServerStatus, HeadFirst>;
+
+/// A stream a client opened, which answers with the success status before its first byte,
+/// as sing-mux's `serverConn` does (`server_conn.go:36-50`). It never sends the error
+/// status mihomo writes when the destination cannot be reached (`HandshakeFailure`,
+/// `:25-34`): such a stream closes without one, and the client reads an early end.
+pub(super) fn server_stream(inner: BoxStream) -> BoxStream {
+    Box::new(Layered::new(
+        inner,
+        Passthrough,
+        HeadFirst {
+            request: Some(vec![STATUS_SUCCESS]),
+            out: Outgoing::new(),
+        },
+    ))
+}
 
 pub(super) fn client_stream(
     inner: BoxStream,
@@ -78,7 +95,7 @@ pub(super) fn client_stream(
         ServerStatus {
             response: Response::Status,
         },
-        DestinationFirst {
+        HeadFirst {
             request: Some(encode_stream_request(kind, destination)?),
             out: Outgoing::new(),
         },
@@ -89,7 +106,8 @@ pub(super) struct ServerStatus {
     response: Response,
 }
 
-pub(super) struct DestinationFirst {
+/// Sends `request` with the first write, or alone for a zero-length write or a shutdown.
+pub(super) struct HeadFirst {
     request: Option<Vec<u8>>,
     out: Outgoing,
 }
@@ -156,7 +174,7 @@ fn poll_byte<R: AsyncRead + Unpin + ?Sized>(
     }
 }
 
-impl WriteLayer for DestinationFirst {
+impl WriteLayer for HeadFirst {
     fn poll_write<W: AsyncWrite + Unpin + ?Sized>(
         &mut self,
         io: &mut W,

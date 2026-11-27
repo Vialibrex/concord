@@ -26,11 +26,11 @@ const SETTINGS_FRAME: u8 = 0x4;
 
 /// Go's `firstSettingsTimeout` (`net/http/internal/http2/server.go:59`): how long the
 /// client's SETTINGS may trail its preface.
-const FIRST_SETTINGS: Duration = Duration::from_secs(2);
+pub(crate) const FIRST_SETTINGS: Duration = Duration::from_secs(2);
 /// mihomo's `http.Server{IdleTimeout}` for these carriers (`listener/sing_vmess/server.go:96`,
 /// `listener/sing_vless/server.go:86`, `listener/trojan/server.go:82`), which Go's HTTP/2
 /// server runs from the last stream's close (`server.go:804-806`, `:1590-1595`).
-const IDLE: Duration = Duration::from_secs(30);
+pub(crate) const IDLE: Duration = Duration::from_secs(30);
 /// Go's `defaultMaxStreams` (`server.go:61`), the SETTINGS a Go server advertises.
 const MAX_STREAMS: u32 = 250;
 /// The HTTP/2 server receive buffers of metacubex/http `v0.1.8`, which mihomo's gun and ws
@@ -43,7 +43,7 @@ const STREAM_WINDOW: u32 = 1 << 20;
 /// `http.Server` reads before refusing a request head (`server.go:896`, `:905-906`).
 const MAX_REQUEST_HEAD: usize = (1 << 20) + 4096;
 /// Go's `goAwayTimeout` (`server.go:1345`): how long a connection told to go away lingers.
-const GOAWAY_GRACE: Duration = Duration::from_secs(1);
+pub(crate) const GOAWAY_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Default)]
 pub struct HttpCarriers {
@@ -248,7 +248,7 @@ async fn first_settings(stream: &mut BoxStream, head: &mut Vec<u8>) -> io::Resul
     Ok(())
 }
 
-fn server_builder() -> h2::server::Builder {
+pub(crate) fn server_builder() -> h2::server::Builder {
     let mut builder = h2::server::Builder::new();
     builder
         .initial_window_size(STREAM_WINDOW)
@@ -258,7 +258,7 @@ fn server_builder() -> h2::server::Builder {
 }
 
 /// Resolves once no stream has been open for [`IDLE`].
-async fn idle(open: &mut watch::Receiver<usize>) {
+pub(crate) async fn idle(open: &mut watch::Receiver<usize>) {
     loop {
         if *open.borrow_and_update() == 0 {
             if timeout(IDLE, open.changed()).await.is_err() {

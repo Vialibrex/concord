@@ -7,6 +7,7 @@ use concord_config::listener::TrojanUser;
 use tokio::io::{AsyncReadExt, BufReader};
 
 use super::front::Conn;
+use super::mux::{Mux, MuxServe};
 use super::{bounded, flows, packets, unread, user};
 use crate::addr_codec::SOCKS;
 use crate::trojan::{CMD_TCP, CMD_UDP, TrojanFrames, password_key};
@@ -15,6 +16,7 @@ use crate::trojan::{CMD_TCP, CMD_UDP, TrojanFrames, password_key};
 /// the connection.
 pub(super) struct Trojan {
     users: HashMap<[u8; 56], Option<Arc<str>>>,
+    mux: Arc<MuxServe>,
 }
 
 impl Trojan {
@@ -24,7 +26,14 @@ impl Trojan {
                 .iter()
                 .map(|entry| (password_key(&entry.password), user(&entry.username)))
                 .collect(),
+            mux: Arc::default(),
         }
+    }
+
+    /// The listener's `mux-option`; without it, sing-mux sessions neither pad nor run Brutal.
+    pub(super) fn with_mux(mut self, mux: Arc<MuxServe>) -> Self {
+        self.mux = mux;
+        self
     }
 }
 
@@ -46,7 +55,17 @@ impl Trojan {
 }
 
 impl Conn for Trojan {
-    fn handle(self: Arc<Self>, stream: BoxStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture {
+    fn mux(&self) -> &Arc<MuxServe> {
+        &self.mux
+    }
+
+    fn handle(
+        self: Arc<Self>,
+        stream: BoxStream,
+        peer: Peer,
+        cx: Arc<InboundCx>,
+        mux: Mux,
+    ) -> ServeFuture {
         Box::pin(async move {
             let mut buffered = BufReader::with_capacity(512, stream);
             let Some((user, command, dst)) = bounded(self.request(&mut buffered)).await else {
@@ -55,7 +74,7 @@ impl Conn for Trojan {
             let stream = unread(buffered);
             let inbound = cx.inbound(InboundKind::Trojan, peer.local, user);
             match command {
-                CMD_TCP => flows::tcp(stream, dst, inbound, peer, &cx),
+                CMD_TCP => flows::tcp(stream, dst, inbound, peer, &cx, &mux),
                 CMD_UDP => {
                     cx.tasks.spawn(packets::serve(
                         stream,

@@ -28,6 +28,7 @@ use shadowsocks::relay::udprelay::options::UdpSocketControlData;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
+use super::mux::{Mux, MuxServe};
 use super::{ServerError, bounded, flows, user};
 use crate::ss::crypto::{SsKey, parse_method};
 use crate::ss::window::SlidingWindow;
@@ -60,6 +61,7 @@ pub(super) struct Ss {
     sealer: Sealer,
     keys: Keys,
     kept: Arc<Kept>,
+    mux: Arc<MuxServe>,
 }
 
 /// What a listener's server hands to the one a reload builds: the salts its context has
@@ -144,6 +146,7 @@ pub(super) fn build(
         context,
         keys,
         kept: kept.clone(),
+        mux: MuxServe::new(&server.mux),
     }))
 }
 
@@ -223,11 +226,12 @@ fn to_ss(addr: &Address) -> SsAddress {
 impl StreamService for Ss {
     fn serve(self: Arc<Self>, stream: TcpStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture {
         Box::pin(async move {
+            let mux = Mux::over(&self.mux, &stream);
             let Some((stream, dst, named)) = bounded(self.handshake(Box::new(stream))).await else {
                 return;
             };
             let inbound = cx.inbound(InboundKind::Shadowsocks, peer.local, named);
-            flows::tcp(Box::new(stream), dst, inbound, peer, &cx);
+            flows::tcp(Box::new(stream), dst, inbound, peer, &cx, &mux);
         })
     }
 }
@@ -548,6 +552,7 @@ mod tests {
             password: password.into(),
             users: Default::default(),
             udp: true,
+            mux: Default::default(),
         };
         for (name, password) in users {
             def.users.insert((*name).into(), (*password).into());

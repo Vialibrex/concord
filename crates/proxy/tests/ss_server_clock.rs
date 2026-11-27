@@ -56,6 +56,7 @@ fn server(offset: Duration) -> Protocol {
         password: PASSWORD.into(),
         users: Default::default(),
         udp: true,
+        mux: Default::default(),
     });
     let env = ServerEnv {
         home: &Arc::new(HomeDir::new(std::env::temp_dir())),

@@ -1,10 +1,10 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::future::poll_fn;
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker, ready};
+use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -12,15 +12,22 @@ use concord_common::sync::lock;
 use concord_common::{BoxRead, BoxStream, BoxWrite, Stream, Tasks};
 use futures_util::future::BoxFuture;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
+mod writer;
+
+use self::writer::{FrameWriter, Turn, put_frame};
 use super::MuxSession;
 use super::inbox::Inbox;
 use crate::http1::invalid;
 
 const VERSION: u8 = 1;
 const FIRST_STREAM_ID: u32 = 3;
+/// xtaci/smux numbers a server's own streams from 2; a sing-mux server never opens one.
+const FIRST_SERVER_STREAM_ID: u32 = 2;
+/// xtaci/smux's `defaultAcceptBacklog`: a SYN past it waits for the server to accept.
+const ACCEPT_BACKLOG: usize = 1024;
 const CMD_SYN: u8 = 0;
 const CMD_FIN: u8 = 1;
 const CMD_PSH: u8 = 2;
@@ -29,324 +36,6 @@ const CMD_UPD: u8 = 4;
 const MAX_FRAME: usize = 32768;
 const MAX_RECEIVE_BUFFER: i64 = 4 * 1024 * 1024;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
-
-fn put_frame(out: &mut Vec<u8>, cmd: u8, sid: u32, payload: &[u8]) {
-    let len = u16::try_from(payload.len())
-        .unwrap_or(u16::MAX)
-        .to_le_bytes();
-    let [s0, s1, s2, s3] = sid.to_le_bytes();
-    out.extend_from_slice(&[VERSION, cmd, len[0], len[1], s0, s1, s2, s3]);
-    out.extend_from_slice(payload);
-}
-
-/// The session's write half. A stream writes its frame itself, in its own task, as
-/// metacubex/smux's writeFrameInternal hands its frame to the connection writer
-/// (session.go:671-695), and streams waiting for their turn queue in arrival order.
-/// Waiting is the only time a write is pending, so a cancelled write has handed over
-/// nothing. A taken frame belongs to the session: the next writer finishes it before its
-/// own, and if no one comes the session's driver does, so no write leaves half a frame on
-/// the wire or holds up the streams behind it. A writer waiting for its turn drives the
-/// frame ahead of it itself; one that stops polling while it waits keeps its place, and
-/// the rest of that frame, until it polls again or is dropped.
-struct FrameWriter(Mutex<WriterState>);
-
-struct WriterState {
-    io: Option<BoxWrite>,
-    frame: Vec<u8>,
-    off: usize,
-    unflushed: bool,
-    waiting: VecDeque<(u64, Waker)>,
-    next_ticket: u64,
-    driver: Option<Waker>,
-}
-
-struct Turn {
-    writer: Arc<FrameWriter>,
-    ticket: Option<u64>,
-}
-
-impl Turn {
-    fn new(writer: Arc<FrameWriter>) -> Self {
-        Turn {
-            writer,
-            ticket: None,
-        }
-    }
-
-    fn poll_send(
-        &mut self,
-        cx: &mut Context<'_>,
-        make: impl FnOnce(&mut Vec<u8>),
-    ) -> Poll<io::Result<()>> {
-        let writer = self.writer.clone();
-        writer.poll_send(cx, &mut self.ticket, make)
-    }
-
-    fn leave(&mut self) {
-        if let Some(ticket) = self.ticket.take() {
-            self.writer.leave(ticket);
-        }
-    }
-}
-
-impl Drop for Turn {
-    fn drop(&mut self) {
-        self.leave();
-    }
-}
-
-struct WakeAll(Vec<Waker>);
-
-impl Wake for WakeAll {
-    fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        for waker in &self.0 {
-            waker.wake_by_ref();
-        }
-    }
-}
-
-impl WriterState {
-    fn broken() -> io::Error {
-        io::ErrorKind::BrokenPipe.into()
-    }
-
-    fn busy(&self) -> bool {
-        self.off < self.frame.len()
-    }
-
-    /// The connection wakes only its last poller, who may be a writer dropped since; the
-    /// head of the queue is woken with it, so a frame left half written still finishes.
-    fn poll_progress(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if !self.busy() {
-            return Poll::Ready(Ok(()));
-        }
-        let head = self
-            .waiting
-            .front()
-            .map(|(_, waker)| waker)
-            .filter(|w| !w.will_wake(cx.waker()))
-            .cloned();
-        let Some(head) = head else {
-            return self.write_rest(cx);
-        };
-        let both = Waker::from(Arc::new(WakeAll(vec![cx.waker().clone(), head])));
-        self.write_rest(&mut Context::from_waker(&both))
-    }
-
-    fn write_rest(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let Some(io) = self.io.as_mut() else {
-            return Poll::Ready(Err(Self::broken()));
-        };
-        while let Some(rest) = self.frame.get(self.off..).filter(|rest| !rest.is_empty()) {
-            match ready!(Pin::new(&mut *io).poll_write(cx, rest)) {
-                Ok(0) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
-                Ok(n) => self.off += n,
-                Err(err) => return Poll::Ready(Err(err)),
-            }
-        }
-        self.unflushed = true;
-        Poll::Ready(Ok(()))
-    }
-
-    fn write_taken(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.write_rest(cx) {
-            Poll::Ready(Ok(())) if self.waiting.is_empty() => self.poll_flush(cx),
-            other => other,
-        }
-    }
-
-    fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        ready!(self.poll_progress(cx))?;
-        let Some(io) = self.io.as_mut() else {
-            return Poll::Ready(Err(Self::broken()));
-        };
-        ready!(Pin::new(io).poll_flush(cx))?;
-        self.unflushed = false;
-        Poll::Ready(Ok(()))
-    }
-
-    fn head(&self) -> Option<u64> {
-        self.waiting.front().map(|(ticket, _)| *ticket)
-    }
-
-    fn wait(&mut self, cx: &mut Context<'_>, ticket: &mut Option<u64>) {
-        let queued = ticket.and_then(|ticket| self.waiting.iter_mut().find(|(t, _)| *t == ticket));
-        match queued {
-            Some((_, waker)) => waker.clone_from(cx.waker()),
-            None => {
-                let next = self.next_ticket;
-                self.next_ticket += 1;
-                *ticket = Some(next);
-                self.waiting.push_back((next, cx.waker().clone()));
-            }
-        }
-    }
-
-    fn fail(&mut self) -> Vec<Waker> {
-        self.io = None;
-        self.frame.clear();
-        self.off = 0;
-        self.waiting
-            .drain(..)
-            .map(|(_, waker)| waker)
-            .chain(self.driver.take())
-            .collect()
-    }
-}
-
-impl FrameWriter {
-    fn new(io: BoxWrite) -> Arc<Self> {
-        Arc::new(FrameWriter(Mutex::new(WriterState {
-            io: Some(io),
-            frame: Vec::new(),
-            off: 0,
-            unflushed: false,
-            waiting: VecDeque::new(),
-            next_ticket: 0,
-            driver: None,
-        })))
-    }
-
-    /// Waits for `ticket`'s turn behind the frame in progress and the writers that came
-    /// first, then takes the frame `make` builds and writes what the connection accepts
-    /// now; the last writer in line also flushes. Waiting holds no lock, and only the
-    /// connection itself not taking bytes stops every stream, as it stops smux's sendLoop.
-    fn poll_send(
-        &self,
-        cx: &mut Context<'_>,
-        ticket: &mut Option<u64>,
-        make: impl FnOnce(&mut Vec<u8>),
-    ) -> Poll<io::Result<()>> {
-        let mut wake = Vec::new();
-        let result = {
-            let mut state = lock(&self.0);
-            Self::poll_send_locked(&mut state, cx, ticket, make, &mut wake)
-        };
-        for waker in wake {
-            waker.wake();
-        }
-        result
-    }
-
-    fn poll_send_locked(
-        state: &mut WriterState,
-        cx: &mut Context<'_>,
-        ticket: &mut Option<u64>,
-        make: impl FnOnce(&mut Vec<u8>),
-        wake: &mut Vec<Waker>,
-    ) -> Poll<io::Result<()>> {
-        match state.poll_progress(cx) {
-            Poll::Pending => {
-                state.wait(cx, ticket);
-                return Poll::Pending;
-            }
-            Poll::Ready(Err(err)) => {
-                *ticket = None;
-                wake.extend(state.fail());
-                return Poll::Ready(Err(err));
-            }
-            Poll::Ready(Ok(())) => {}
-        }
-        let head = state.head();
-        if head.is_some() && head != *ticket {
-            state.wait(cx, ticket);
-            wake.extend(state.waiting.front().map(|(_, waker)| waker.clone()));
-            return Poll::Pending;
-        }
-        if head.is_some() {
-            state.waiting.pop_front();
-        }
-        *ticket = None;
-        state.frame.clear();
-        make(&mut state.frame);
-        state.off = 0;
-        // The writer returns once its frame is taken, so the connection wakes the driver,
-        // not the writer; a writer that comes back first registers itself instead.
-        let written = match state.driver.clone() {
-            Some(driver) => state.write_taken(&mut Context::from_waker(&driver)),
-            None => state.write_taken(cx),
-        };
-        if let Poll::Ready(Err(err)) = written {
-            wake.extend(state.fail());
-            return Poll::Ready(Err(err));
-        }
-        wake.extend(state.waiting.front().map(|(_, waker)| waker.clone()));
-        Poll::Ready(Ok(()))
-    }
-
-    fn leave(&self, ticket: u64) {
-        let waker = {
-            let mut state = lock(&self.0);
-            let was_head = state.head() == Some(ticket);
-            state.waiting.retain(|(t, _)| *t != ticket);
-            match state.waiting.front() {
-                Some((_, head)) if was_head => Some(head.clone()),
-                None if state.busy() || state.unflushed => state.driver.clone(),
-                _ => None,
-            }
-        };
-        if let Some(waker) = waker {
-            waker.wake();
-        }
-    }
-
-    /// The session's driver: finishes a frame its writer left half written and flushes
-    /// what the last writer could not, and otherwise sleeps.
-    fn poll_drive(&self, cx: &mut Context<'_>) -> Poll<()> {
-        let mut state = lock(&self.0);
-        if state.io.is_none() {
-            return Poll::Ready(());
-        }
-        match state.driver.as_mut() {
-            Some(driver) => driver.clone_from(cx.waker()),
-            None => state.driver = Some(cx.waker().clone()),
-        }
-        let done = if state.unflushed && state.waiting.is_empty() {
-            state.poll_flush(cx)
-        } else {
-            state.poll_progress(cx)
-        };
-        let wake = match done {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(_)) => state.fail(),
-            Poll::Ready(Ok(())) => state
-                .waiting
-                .front()
-                .map(|(_, waker)| waker.clone())
-                .into_iter()
-                .collect(),
-        };
-        drop(state);
-        for waker in wake {
-            waker.wake();
-        }
-        Poll::Pending
-    }
-
-    fn poll_flush(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        lock(&self.0).poll_flush(cx)
-    }
-
-    fn poll_shutdown(&self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let mut state = lock(&self.0);
-        ready!(state.poll_flush(cx))?;
-        match state.io.as_mut() {
-            Some(io) => Pin::new(io).poll_shutdown(cx),
-            None => Poll::Ready(Err(WriterState::broken())),
-        }
-    }
-
-    fn close(&self) {
-        let wakers = lock(&self.0).fail();
-        for waker in wakers {
-            waker.wake();
-        }
-    }
-}
 
 async fn send_frame(writer: &Arc<FrameWriter>, cmd: u8, sid: u32) -> io::Result<()> {
     let mut turn = Turn::new(writer.clone());
@@ -386,6 +75,8 @@ struct Core {
     mode: Mode,
     first_id: u32,
     tasks: Tasks,
+    /// Where a peer's SYN goes on a session that serves; None on one that only opens.
+    accept: Mutex<Option<mpsc::Sender<BoxStream>>>,
 }
 
 enum Mode {
@@ -399,6 +90,7 @@ enum Mode {
 impl Core {
     fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
+        lock(&self.accept).take();
         let streams = std::mem::take(&mut *lock(&self.streams));
         for entry in streams.values() {
             entry
@@ -423,17 +115,36 @@ pub(super) struct SmuxSession {
 
 impl SmuxSession {
     pub fn new(io: BoxStream, tasks: &Tasks) -> Self {
-        Self::start(io, FIRST_STREAM_ID, Mode::Shared, tasks)
+        Self::start(io, FIRST_STREAM_ID, Mode::Shared, None, tasks)
+    }
+
+    /// A session that takes the streams its peer opens, as `smux.Server`.
+    pub(super) fn server(io: BoxStream, tasks: &Tasks) -> (Self, mpsc::Receiver<BoxStream>) {
+        let (accept, accepted) = mpsc::channel(ACCEPT_BACKLOG);
+        let session = Self::start(
+            io,
+            FIRST_SERVER_STREAM_ID,
+            Mode::Shared,
+            Some(accept),
+            tasks,
+        );
+        (session, accepted)
     }
 
     pub(super) fn with_first_id(io: BoxStream, first_id: u32, tasks: &Tasks) -> Self {
         let mode = Mode::Single {
             fin_sent: AtomicBool::new(false),
         };
-        Self::start(io, first_id, mode, tasks)
+        Self::start(io, first_id, mode, None, tasks)
     }
 
-    fn start(io: BoxStream, first_id: u32, mode: Mode, tasks: &Tasks) -> Self {
+    fn start(
+        io: BoxStream,
+        first_id: u32,
+        mode: Mode,
+        accept: Option<mpsc::Sender<BoxStream>>,
+        tasks: &Tasks,
+    ) -> Self {
         let (read, write) = Box::new(io).into_split();
         let core = Arc::new(Core {
             streams: Mutex::new(HashMap::new()),
@@ -445,6 +156,7 @@ impl SmuxSession {
             mode,
             first_id,
             tasks: tasks.clone(),
+            accept: Mutex::new(accept),
         });
         let reader = {
             let core = core.clone();
@@ -467,7 +179,7 @@ impl SmuxSession {
     }
 }
 
-async fn read_loop(core: &Core, mut io: BoxRead) -> io::Result<()> {
+async fn read_loop(core: &Arc<Core>, mut io: BoxRead) -> io::Result<()> {
     loop {
         while core.bucket.load(Ordering::Relaxed) <= 0 {
             if core.closed.load(Ordering::Relaxed) {
@@ -484,7 +196,8 @@ async fn read_loop(core: &Core, mut io: BoxRead) -> io::Result<()> {
         let len = usize::from(u16::from_le_bytes([l0, l1]));
         let sid = u32::from_le_bytes([s0, s1, s2, s3]);
         match cmd {
-            CMD_NOP | CMD_SYN => {}
+            CMD_NOP => {}
+            CMD_SYN => accept(core, sid).await,
             CMD_FIN => {
                 if let Some(entry) = lock(&core.streams).get(&sid) {
                     entry.remote_fin.store(true, Ordering::Relaxed);
@@ -513,6 +226,27 @@ async fn read_loop(core: &Core, mut io: BoxRead) -> io::Result<()> {
             _ => return Err(invalid("smux: invalid command")),
         }
     }
+}
+
+/// A SYN for a stream id already open is ignored, as xtaci/smux does.
+async fn accept(core: &Arc<Core>, sid: u32) {
+    let Some(accept) = lock(&core.accept).clone() else {
+        return;
+    };
+    let entry = {
+        let mut streams = lock(&core.streams);
+        if streams.contains_key(&sid) {
+            return;
+        }
+        let entry = Arc::new(Entry {
+            inbox: Inbox::default(),
+            remote_fin: AtomicBool::new(false),
+        });
+        streams.insert(sid, entry.clone());
+        entry
+    };
+    let stream = SmuxStream::new(sid, core.clone(), entry);
+    let _ = accept.send(Box::new(stream)).await;
 }
 
 impl Drop for SmuxSession {
@@ -772,6 +506,7 @@ impl Stream for SmuxStream {
 
 #[cfg(test)]
 mod tests {
+    use std::task::Wake;
     use std::time::Duration;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};

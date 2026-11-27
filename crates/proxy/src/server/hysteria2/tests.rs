@@ -23,6 +23,7 @@ fn config(users: &[(&str, &str)]) -> Hysteria2Server {
         max_stream_window: 0,
         initial_conn_window: 0,
         max_conn_window: 0,
+        mux: Default::default(),
     }
 }
 
