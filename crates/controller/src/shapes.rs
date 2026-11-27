@@ -1,12 +1,15 @@
 //! Concord's API types in the JSON shapes of the Clash API, as mihomo's controller writes them.
 
 use std::collections::HashMap;
+use std::io::Cursor;
 
 use concord_platform::local_utc_offset;
 use concord_proto::types::{
     ConnectionInfo, DelayRecord, DnsQueryResult, DnsRecord, GeneralState, GroupInfo, LogLevel,
-    NodeInfo, ProviderInfo, ProxyGroups, ProxyState, RuleEntry,
+    Network, NodeInfo, ProviderInfo, ProxyGroups, ProxyState, RuleEntry,
 };
+use serde::ser::{SerializeSeq, SerializeStruct};
+use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
@@ -380,61 +383,180 @@ pub fn configs(state: &GeneralState) -> Value {
     general
 }
 
-/// `statistic.TrackerInfo` with `C.Metadata`: ports are strings, as mihomo
-/// keeps them for old dashboards (`constant/metadata.go:199-202`).
-pub fn connection(info: &ConnectionInfo) -> Value {
-    json!({
-        "id": info.id.to_string(),
-        "metadata": {
-            "network": info.network,
-            "type": info.inbound_type,
-            "sourceIP": info.source_ip,
-            "destinationIP": info.destination_ip.clone().unwrap_or_default(),
-            "sourceGeoIP": info.source_geo_ip,
-            "destinationGeoIP": info.destination_geo_ip,
-            "sourceIPASN": info.source_asn.clone().unwrap_or_default(),
-            "destinationIPASN": info.destination_asn.clone().unwrap_or_default(),
-            "sourcePort": info.source_port.to_string(),
-            "destinationPort": info.destination_port.to_string(),
-            "inboundIP": info.inbound_ip.clone().unwrap_or_default(),
-            "inboundPort": info.inbound_port.unwrap_or_default().to_string(),
-            "inboundName": info.inbound_name.clone().unwrap_or_default(),
-            "inboundUser": info.inbound_user.clone().unwrap_or_default(),
-            "rematchName": info.rematch_name.clone().unwrap_or_default(),
-            "host": info.host.clone().unwrap_or_default(),
-            "dnsMode": info.dns_mode.clone().unwrap_or_else(|| "normal".to_string()),
-            "uid": info.uid.unwrap_or_default(),
-            "process": info.process.clone().unwrap_or_default(),
-            "processPath": info.process_path.clone().unwrap_or_default(),
-            "specialProxy": info.special_proxy.clone().unwrap_or_default(),
-            "specialRules": info.special_rules.clone().unwrap_or_default(),
-            "remoteDestination": info.remote_destination.clone().unwrap_or_default(),
-            "dscp": 0,
-            "sniffHost": info.sniff_host.clone().unwrap_or_default(),
-        },
-        "upload": info.upload,
-        "download": info.download,
-        "start": time(info.start),
-        "chains": info.chains,
-        "providerChains": info.provider_chains,
-        "rule": info.rule,
-        "rulePayload": info.rule_payload,
-    })
+struct DecimalStr(u64);
+
+impl Serialize for DecimalStr {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(&self.0)
+    }
 }
 
-pub fn snapshot<'a>(
-    connections: impl Iterator<Item = &'a ConnectionInfo>,
+struct Rfc3339Time(i64);
+
+impl Serialize for Rfc3339Time {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut buf = [0u8; 32];
+        if let Ok(at) = OffsetDateTime::from_unix_timestamp_nanos(i128::from(self.0) * 1_000_000) {
+            let mut cursor = Cursor::new(buf.as_mut_slice());
+            if at.format_into(&mut cursor, &Rfc3339).is_ok() {
+                let len = cursor.position() as usize;
+                if let Ok(text) = std::str::from_utf8(&buf[..len]) {
+                    return serializer.serialize_str(text);
+                }
+            }
+        }
+        serializer.serialize_str(ZERO_TIME)
+    }
+}
+
+/// `C.Metadata` in mihomo's field order: ports are strings, as mihomo keeps
+/// them for old dashboards (`constant/metadata.go:199-202`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionMetadata<'a> {
+    network: Network,
+    #[serde(rename = "type")]
+    inbound_type: &'a str,
+    #[serde(rename = "sourceIP")]
+    source_ip: &'a str,
+    #[serde(rename = "destinationIP")]
+    destination_ip: &'a str,
+    #[serde(rename = "sourceGeoIP")]
+    source_geo_ip: Option<&'a [String]>,
+    #[serde(rename = "destinationGeoIP")]
+    destination_geo_ip: Option<&'a [String]>,
+    #[serde(rename = "sourceIPASN")]
+    source_ip_asn: &'a str,
+    #[serde(rename = "destinationIPASN")]
+    destination_ip_asn: &'a str,
+    source_port: DecimalStr,
+    destination_port: DecimalStr,
+    #[serde(rename = "inboundIP")]
+    inbound_ip: &'a str,
+    inbound_port: DecimalStr,
+    inbound_name: &'a str,
+    inbound_user: &'a str,
+    rematch_name: &'a str,
+    host: &'a str,
+    dns_mode: &'a str,
+    uid: u32,
+    process: &'a str,
+    process_path: &'a str,
+    special_proxy: &'a str,
+    special_rules: &'a str,
+    remote_destination: &'a str,
+    dscp: u8,
+    sniff_host: &'a str,
+}
+
+/// `statistic.TrackerInfo` in mihomo's field order, serialized directly from
+/// a borrowed `ConnectionInfo` without building an intermediate JSON DOM.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Connection<'a> {
+    id: DecimalStr,
+    metadata: ConnectionMetadata<'a>,
+    upload: u64,
+    download: u64,
+    start: Rfc3339Time,
+    chains: &'a [String],
+    provider_chains: &'a [String],
+    rule: &'a str,
+    rule_payload: &'a str,
+}
+
+pub fn connection(info: &ConnectionInfo) -> Connection<'_> {
+    Connection {
+        id: DecimalStr(info.id),
+        metadata: ConnectionMetadata {
+            network: info.network,
+            inbound_type: &info.inbound_type,
+            source_ip: &info.source_ip,
+            destination_ip: info.destination_ip.as_deref().unwrap_or_default(),
+            source_geo_ip: info.source_geo_ip.as_deref(),
+            destination_geo_ip: info.destination_geo_ip.as_deref(),
+            source_ip_asn: info.source_asn.as_deref().unwrap_or_default(),
+            destination_ip_asn: info.destination_asn.as_deref().unwrap_or_default(),
+            source_port: DecimalStr(u64::from(info.source_port)),
+            destination_port: DecimalStr(u64::from(info.destination_port)),
+            inbound_ip: info.inbound_ip.as_deref().unwrap_or_default(),
+            inbound_port: DecimalStr(u64::from(info.inbound_port.unwrap_or_default())),
+            inbound_name: info.inbound_name.as_deref().unwrap_or_default(),
+            inbound_user: info.inbound_user.as_deref().unwrap_or_default(),
+            rematch_name: info.rematch_name.as_deref().unwrap_or_default(),
+            host: info.host.as_deref().unwrap_or_default(),
+            dns_mode: info.dns_mode.as_deref().unwrap_or("normal"),
+            uid: info.uid.unwrap_or_default(),
+            process: info.process.as_deref().unwrap_or_default(),
+            process_path: info.process_path.as_deref().unwrap_or_default(),
+            special_proxy: info.special_proxy.as_deref().unwrap_or_default(),
+            special_rules: info.special_rules.as_deref().unwrap_or_default(),
+            remote_destination: info.remote_destination.as_deref().unwrap_or_default(),
+            dscp: 0,
+            sniff_host: info.sniff_host.as_deref().unwrap_or_default(),
+        },
+        upload: info.upload,
+        download: info.download,
+        start: Rfc3339Time(info.start),
+        chains: &info.chains,
+        provider_chains: &info.provider_chains,
+        rule: &info.rule,
+        rule_payload: &info.rule_payload,
+    }
+}
+
+struct ConnectionSeq<I>(I);
+
+impl<'a, I> Serialize for ConnectionSeq<I>
+where
+    I: Iterator<Item = &'a ConnectionInfo> + Clone,
+{
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let iter = self.0.clone();
+        let mut seq = serializer.serialize_seq(iter.size_hint().1)?;
+        for info in iter {
+            seq.serialize_element(&connection(info))?;
+        }
+        seq.end()
+    }
+}
+
+pub struct Snapshot<I> {
+    download_total: i64,
+    upload_total: i64,
+    connections: ConnectionSeq<I>,
+    memory: u64,
+}
+
+impl<'a, I> Serialize for Snapshot<I>
+where
+    I: Iterator<Item = &'a ConnectionInfo> + Clone,
+{
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut state = serializer.serialize_struct("Snapshot", 4)?;
+        state.serialize_field("downloadTotal", &self.download_total)?;
+        state.serialize_field("uploadTotal", &self.upload_total)?;
+        state.serialize_field("connections", &self.connections)?;
+        state.serialize_field("memory", &self.memory)?;
+        state.end()
+    }
+}
+
+pub fn snapshot<'a, I>(
+    connections: I,
     upload_total: i64,
     download_total: i64,
     memory: u64,
-) -> Value {
-    let list: Vec<Value> = connections.map(connection).collect();
-    json!({
-        "downloadTotal": download_total,
-        "uploadTotal": upload_total,
-        "connections": list,
-        "memory": memory,
-    })
+) -> Snapshot<I>
+where
+    I: Iterator<Item = &'a ConnectionInfo> + Clone,
+{
+    Snapshot {
+        download_total,
+        upload_total,
+        connections: ConnectionSeq(connections),
+        memory,
+    }
 }
 
 fn dns_records(records: &[DnsRecord]) -> Value {
@@ -488,6 +610,61 @@ pub fn dns(result: &DnsQueryResult) -> Value {
 mod tests {
     use super::*;
 
+    fn legacy_connection(info: &ConnectionInfo) -> Value {
+        json!({
+            "id": info.id.to_string(),
+            "metadata": {
+                "network": info.network,
+                "type": info.inbound_type,
+                "sourceIP": info.source_ip,
+                "destinationIP": info.destination_ip.clone().unwrap_or_default(),
+                "sourceGeoIP": info.source_geo_ip,
+                "destinationGeoIP": info.destination_geo_ip,
+                "sourceIPASN": info.source_asn.clone().unwrap_or_default(),
+                "destinationIPASN": info.destination_asn.clone().unwrap_or_default(),
+                "sourcePort": info.source_port.to_string(),
+                "destinationPort": info.destination_port.to_string(),
+                "inboundIP": info.inbound_ip.clone().unwrap_or_default(),
+                "inboundPort": info.inbound_port.unwrap_or_default().to_string(),
+                "inboundName": info.inbound_name.clone().unwrap_or_default(),
+                "inboundUser": info.inbound_user.clone().unwrap_or_default(),
+                "rematchName": info.rematch_name.clone().unwrap_or_default(),
+                "host": info.host.clone().unwrap_or_default(),
+                "dnsMode": info.dns_mode.clone().unwrap_or_else(|| "normal".to_string()),
+                "uid": info.uid.unwrap_or_default(),
+                "process": info.process.clone().unwrap_or_default(),
+                "processPath": info.process_path.clone().unwrap_or_default(),
+                "specialProxy": info.special_proxy.clone().unwrap_or_default(),
+                "specialRules": info.special_rules.clone().unwrap_or_default(),
+                "remoteDestination": info.remote_destination.clone().unwrap_or_default(),
+                "dscp": 0,
+                "sniffHost": info.sniff_host.clone().unwrap_or_default(),
+            },
+            "upload": info.upload,
+            "download": info.download,
+            "start": time(info.start),
+            "chains": info.chains,
+            "providerChains": info.provider_chains,
+            "rule": info.rule,
+            "rulePayload": info.rule_payload,
+        })
+    }
+
+    fn legacy_snapshot<'a>(
+        connections: impl Iterator<Item = &'a ConnectionInfo>,
+        upload_total: i64,
+        download_total: i64,
+        memory: u64,
+    ) -> Value {
+        let list: Vec<Value> = connections.map(legacy_connection).collect();
+        json!({
+            "downloadTotal": download_total,
+            "uploadTotal": upload_total,
+            "connections": list,
+            "memory": memory,
+        })
+    }
+
     #[test]
     fn rematch_name_reaches_clash_connection_metadata() {
         let mut info: ConnectionInfo = serde_json::from_value(json!({
@@ -497,9 +674,146 @@ mod tests {
             "rematchName": "Next"
         }))
         .unwrap();
-        assert_eq!(connection(&info)["metadata"]["rematchName"], "Next");
+        let value = serde_json::to_value(connection(&info)).unwrap();
+        assert_eq!(value["metadata"]["rematchName"], "Next");
         info.rematch_name = None;
-        assert_eq!(connection(&info)["metadata"]["rematchName"], "");
+        let value = serde_json::to_value(connection(&info)).unwrap();
+        assert_eq!(value["metadata"]["rematchName"], "");
+    }
+
+    #[test]
+    fn streaming_snapshot_is_byte_for_byte_identical_to_dom() {
+        let empty_new = serde_json::to_vec(&snapshot(std::iter::empty(), 0, 0, 0)).unwrap();
+        let empty_old = serde_json::to_vec(&legacy_snapshot(std::iter::empty(), 0, 0, 0)).unwrap();
+        assert_eq!(empty_new, empty_old);
+        assert_eq!(
+            std::str::from_utf8(&empty_new).unwrap(),
+            r#"{"downloadTotal":0,"uploadTotal":0,"connections":[],"memory":0}"#
+        );
+
+        let tcp_minimal: ConnectionInfo = serde_json::from_value(json!({
+            "id": 2,
+            "start": 0,
+            "network": "tcp",
+            "sourceIp": "127.0.0.1",
+            "sourcePort": 0,
+            "destinationPort": 443,
+            "inboundType": "socks5",
+            "chains": [],
+            "rule": "MATCH",
+            "upload": 0,
+            "download": 0,
+        }))
+        .unwrap();
+
+        let udp_multihop_special: ConnectionInfo = serde_json::from_value(json!({
+            "id": 10,
+            "start": 1_700_000_000_500i64,
+            "network": "udp",
+            "sourceIp": "::1",
+            "sourcePort": 65535,
+            "destinationIp": "2001:db8::1",
+            "destinationPort": 53,
+            "host": "sub.\"quoted\"\\host\n\t\u{0001}中文.example.test",
+            "sniffHost": "sniff/\"a\"\\b",
+            "inboundType": "tun",
+            "inboundIp": "198.18.0.1",
+            "inboundPort": 7890,
+            "inboundName": "in-\"main\"\\1",
+            "inboundUser": "u\"ser\r\n",
+            "dnsMode": "fake-ip",
+            "uid": 1000,
+            "process": "app \"name\" 日本語",
+            "processPath": "C:\\Program Files\\\"My App\"\\bin\\代理\t\u{001f}.exe",
+            "remoteDestination": "93.184.216.34",
+            "sourceGeoIp": ["CN", "PRIVATE"],
+            "destinationGeoIp": [],
+            "sourceAsn": "AS13335",
+            "destinationAsn": "AS15169",
+            "rematchName": "re\"match",
+            "specialRules": "sp\\rules",
+            "specialProxy": "sp\"proxy",
+            "chains": ["exit-node", "relay-hop-2", "relay-hop-1", "GLOBAL"],
+            "providerChains": ["provider-a", "provider-b"],
+            "rule": "DOMAIN-SUFFIX",
+            "rulePayload": "example.\"test\"\\path",
+            "upload": 18_446_744_073_709_551_615u64,
+            "download": 987_654_321_000u64,
+        }))
+        .unwrap();
+
+        let boundary_time: ConnectionInfo = serde_json::from_value(json!({
+            "id": 18_446_744_073_709_551_615u64,
+            "start": i64::MAX,
+            "network": "tcp",
+            "sourceIp": "10.0.0.2",
+            "sourcePort": 12345,
+            "destinationPort": 80,
+            "inboundType": "http",
+            "chains": ["DIRECT"],
+            "rule": "IP-CIDR",
+            "rulePayload": "10.0.0.0/8",
+            "upload": 42,
+            "download": 99,
+        }))
+        .unwrap();
+
+        let neg_time: ConnectionInfo = serde_json::from_value(json!({
+            "id": 100,
+            "start": -1_250i64,
+            "network": "udp",
+            "sourceIp": "192.168.1.10",
+            "sourcePort": 5353,
+            "destinationPort": 5353,
+            "inboundType": "mixed",
+            "chains": ["REJECT"],
+            "rule": "MATCH",
+            "upload": 1,
+            "download": 2,
+        }))
+        .unwrap();
+
+        let list = [tcp_minimal, udp_multihop_special, neg_time, boundary_time];
+        for info in &list {
+            let new_bytes = serde_json::to_vec(&connection(info)).unwrap();
+            let old_bytes = serde_json::to_vec(&legacy_connection(info)).unwrap();
+            assert_eq!(
+                std::str::from_utf8(&new_bytes).unwrap(),
+                std::str::from_utf8(&old_bytes).unwrap()
+            );
+        }
+
+        let snap_new = serde_json::to_vec(&snapshot(list.iter(), 123_456, 789_012, 4_096)).unwrap();
+        let snap_old =
+            serde_json::to_vec(&legacy_snapshot(list.iter(), 123_456, 789_012, 4_096)).unwrap();
+        assert_eq!(
+            std::str::from_utf8(&snap_new).unwrap(),
+            std::str::from_utf8(&snap_old).unwrap()
+        );
+    }
+
+    #[test]
+    fn rfc3339_streaming_matches_time_across_edge_cases() {
+        for millis in [
+            i64::MIN,
+            -62_167_219_200_000,
+            -1_500,
+            -1_001,
+            -1,
+            0,
+            1,
+            1_001,
+            1_250,
+            1_500,
+            1_700_000_000_000,
+            1_700_000_000_123,
+            253_402_300_799_999,
+            i64::MAX,
+        ] {
+            let direct = serde_json::to_string(&Rfc3339Time(millis)).unwrap();
+            let legacy = serde_json::to_string(&time(millis)).unwrap();
+            assert_eq!(direct, legacy, "millis={millis}");
+        }
     }
 
     #[test]

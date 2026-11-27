@@ -20,7 +20,8 @@ use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper_util::rt::TokioIo;
-use serde_json::{Value, json};
+use serde::{Serialize, Serializer};
+use serde_json::json;
 use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
@@ -29,19 +30,22 @@ use tokio_tungstenite::tungstenite::protocol::{Message, Role};
 use crate::http::{Body, is_websocket};
 use crate::shapes;
 
-pub type Values = BoxStream<'static, Value>;
+pub type Frames = BoxStream<'static, String>;
 
 /// mihomo's tickers for `/traffic`, `/memory` and the default `/connections` interval.
 const TICK: Duration = Duration::from_secs(1);
 
-/// Answers with `values` as a WebSocket when the request asks for one, otherwise
+fn encode_json(value: &impl Serialize) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+/// Answers with `frames` as a WebSocket when the request asks for one, otherwise
 /// as a chunked JSON stream.
-pub fn respond(request: Request<Incoming>, values: Values, sessions: &Tasks) -> Response<Body> {
+pub fn respond(request: Request<Incoming>, frames: Frames, sessions: &Tasks) -> Response<Body> {
     if !is_websocket(request.headers()) {
-        let lines = values.map(|value| {
-            let mut bytes = serde_json::to_vec(&value).unwrap_or_default();
-            bytes.push(b'\n');
-            Ok::<_, Infallible>(Frame::data(Bytes::from(bytes)))
+        let lines = frames.map(|mut text| {
+            text.push('\n');
+            Ok::<_, Infallible>(Frame::data(Bytes::from(text.into_bytes())))
         });
         let mut response = Response::new(StreamBody::new(lines).boxed_unsync());
         response.headers_mut().insert(
@@ -62,7 +66,7 @@ pub fn respond(request: Request<Incoming>, values: Values, sessions: &Tasks) -> 
         };
         let socket =
             WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
-        pump(socket, values).await;
+        pump(socket, frames).await;
     });
     let mut response = crate::http::empty(StatusCode::SWITCHING_PROTOCOLS);
     let headers = response.headers_mut();
@@ -83,18 +87,17 @@ fn accept_key(request: &Request<Incoming>) -> Option<String> {
     (key.len() == 24 && version_ok).then(|| derive_accept_key(key.as_bytes()))
 }
 
-/// Ends when the values end, the client closes, or a write fails.
-async fn pump<S>(socket: WebSocketStream<S>, mut values: Values)
+/// Ends when the frames end, the client closes, or a write fails.
+async fn pump<S>(socket: WebSocketStream<S>, mut frames: Frames)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (mut sink, mut incoming) = socket.split();
     loop {
         tokio::select! {
-            value = values.next() => {
-                let Some(value) = value else { break };
-                let text = serde_json::to_string(&value).unwrap_or_default();
-                if sink.send(Message::Text(text.into())).await.is_err() {
+            frame = frames.next() => {
+                let Some(frame) = frame else { break };
+                if sink.send(Message::Text(frame.into())).await.is_err() {
                     return;
                 }
             }
@@ -119,30 +122,30 @@ fn events<E: Send + 'static>(stream: EventStream<E>) -> BoxStream<'static, E> {
         .boxed()
 }
 
-fn traffic_value(traffic: &Traffic) -> Value {
-    json!({
+fn traffic_frame(traffic: &Traffic) -> String {
+    encode_json(&json!({
         "up": traffic.up,
         "down": traffic.down,
         "upTotal": traffic.total_up,
         "downTotal": traffic.total_down,
-    })
+    }))
 }
 
-pub async fn traffic(control: &Arc<Control>) -> Values {
+pub async fn traffic(control: &Arc<Control>) -> Frames {
     let params = TrafficWatchParams {
         interval_ms: Some(1000),
         ..Default::default()
     };
     match control.traffic_watch(params).await {
         Ok(subscription) => events(subscription.events)
-            .map(|traffic| traffic_value(&traffic))
+            .map(|traffic| traffic_frame(&traffic))
             .boxed(),
         Err(_) => stream::empty().boxed(),
     }
 }
 
 /// The first value is zero so a chart starts there (`server.go:440-446`).
-pub fn memory(control: Arc<Control>) -> Values {
+pub fn memory(control: Arc<Control>) -> Frames {
     let mut ticker = interval_at(Instant::now() + TICK, TICK);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     stream::unfold(
@@ -158,7 +161,7 @@ pub fn memory(control: Arc<Control>) -> Values {
                     .map_or(0, |stats| stats.rss)
             };
             Some((
-                json!({ "inuse": inuse, "oslimit": 0 }),
+                encode_json(&json!({ "inuse": inuse, "oslimit": 0 })),
                 (control, ticker, false),
             ))
         },
@@ -166,7 +169,7 @@ pub fn memory(control: Arc<Control>) -> Values {
     .boxed()
 }
 
-pub async fn logs(control: &Arc<Control>, level: LogLevel, structured: bool) -> Values {
+pub async fn logs(control: &Arc<Control>, level: LogLevel, structured: bool) -> Frames {
     let params = LogWatchParams {
         level: Some(level),
         ignore_log_level: true,
@@ -177,7 +180,14 @@ pub async fn logs(control: &Arc<Control>, level: LogLevel, structured: bool) -> 
             .filter(move |entry| {
                 std::future::ready(level != LogLevel::Silent && entry.level >= level)
             })
-            .map(move |entry| shapes::log(entry.level, entry.time, &entry.text, structured))
+            .map(move |entry| {
+                encode_json(&shapes::log(
+                    entry.level,
+                    entry.time,
+                    &entry.text,
+                    structured,
+                ))
+            })
             .boxed(),
         Err(_) => stream::empty().boxed(),
     }
@@ -254,44 +264,72 @@ impl Table {
         }
     }
 
-    pub async fn snapshot(&mut self) -> Value {
+    pub async fn snapshot(&mut self) -> String {
         self.catch_up().await;
-        snapshot_value(&self.control, self.open.values()).await
+        let (upload, download, memory) = snapshot_totals(&self.control).await;
+        encode_json(&shapes::snapshot(
+            self.open.values(),
+            upload,
+            download,
+            memory,
+        ))
     }
 }
 
-pub async fn connection_snapshot(control: &Arc<Control>) -> Value {
-    let mut list = control.connection_snapshot().connections;
-    sort_connections(&mut list);
-    snapshot_value(control, list.iter()).await
+pub struct ClashSnapshot {
+    connections: Vec<ConnectionInfo>,
+    upload_total: i64,
+    download_total: i64,
+    memory: u64,
+}
+
+impl Serialize for ClashSnapshot {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        shapes::snapshot(
+            self.connections.iter(),
+            self.upload_total,
+            self.download_total,
+            self.memory,
+        )
+        .serialize(serializer)
+    }
+}
+
+pub async fn connection_snapshot(control: &Arc<Control>) -> ClashSnapshot {
+    let mut connections = control.connection_snapshot().connections;
+    sort_connections(&mut connections);
+    let (upload_total, download_total, memory) = snapshot_totals(control).await;
+    ClashSnapshot {
+        connections,
+        upload_total,
+        download_total,
+        memory,
+    }
 }
 
 fn sort_connections(list: &mut [ConnectionInfo]) {
     list.sort_unstable_by_key(|info| info.id);
 }
 
-async fn snapshot_value<'a>(
-    control: &Arc<Control>,
-    connections: impl Iterator<Item = &'a ConnectionInfo>,
-) -> Value {
+async fn snapshot_totals(control: &Arc<Control>) -> (i64, i64, u64) {
     let (upload, download) = control.traffic_totals();
     let memory = control
         .core_stats(Empty {})
         .await
         .map_or(0, |stats| stats.rss);
-    shapes::snapshot(connections, upload, download, memory)
+    (upload, download, memory)
 }
 
 /// A snapshot now, then one every `period` (`connections.go:60-70`).
-pub fn connections(control: Arc<Control>, period: Duration) -> Values {
+pub fn connections(control: Arc<Control>, period: Duration) -> Frames {
     let mut ticker = interval_at(Instant::now(), period.max(Duration::from_millis(1)));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     stream::unfold(
         (Table::new(control), ticker),
         |(mut table, mut ticker)| async move {
             ticker.tick().await;
-            let value = table.snapshot().await;
-            Some((value, (table, ticker)))
+            let frame = table.snapshot().await;
+            Some((frame, (table, ticker)))
         },
     )
     .boxed()
@@ -322,7 +360,23 @@ mod tests {
     fn direct_snapshot_sorts_connection_ids_numerically() {
         let mut list = vec![info(10), info(2), info(100), info(1)];
         sort_connections(&mut list);
-        let value = shapes::snapshot(list.iter(), 100, 200, 4096);
+        let snap = ClashSnapshot {
+            connections: list,
+            upload_total: 100,
+            download_total: 200,
+            memory: 4096,
+        };
+        let direct_bytes = serde_json::to_string(&snap).unwrap();
+        let map: BTreeMap<u64, ConnectionInfo> = snap
+            .connections
+            .iter()
+            .cloned()
+            .map(|item| (item.id, item))
+            .collect();
+        let ws_bytes = encode_json(&shapes::snapshot(map.values(), 100, 200, 4096));
+        assert_eq!(direct_bytes, ws_bytes);
+
+        let value: serde_json::Value = serde_json::from_str(&direct_bytes).unwrap();
         let ids: Vec<&str> = value["connections"]
             .as_array()
             .unwrap()
@@ -334,7 +388,7 @@ mod tests {
         assert_eq!(value["downloadTotal"], 200);
         assert_eq!(value["memory"], 4096);
 
-        let empty = shapes::snapshot(std::iter::empty(), 0, 0, 0);
+        let empty = serde_json::to_value(shapes::snapshot(std::iter::empty(), 0, 0, 0)).unwrap();
         assert_eq!(empty["connections"], json!([]));
     }
 }

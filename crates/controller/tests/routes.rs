@@ -1061,3 +1061,155 @@ async fn websocket_connections_rebuilds_cleanly_after_resync_overflow() {
     drop((socket, client1, far1, client2, far2));
     rig.control.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connections_rest_and_ws_emit_matching_wire_bytes() {
+    let proxy = port_to_bind_later();
+    let rig = Rig::with_profile(
+        false,
+        &format!("mixed-port: {proxy}\nrules:\n  - MATCH,DIRECT\n"),
+    )
+    .await;
+    rig.control.engine_start(Empty {}).await.unwrap();
+
+    let empty_reply = rig.call("GET", "/connections", None).await;
+    assert_eq!(empty_reply.status, 200);
+    let empty_rest = empty_reply.body.strip_suffix('\n').unwrap();
+    let empty_rest_mem = serde_json::from_str::<Value>(empty_rest).unwrap()["memory"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        empty_rest,
+        format!(
+            r#"{{"downloadTotal":0,"uploadTotal":0,"connections":[],"memory":{empty_rest_mem}}}"#
+        )
+    );
+
+    let ws_url = format!(
+        "ws://127.0.0.1:{}/connections?interval=200&token={}",
+        rig.port, rig.secret
+    );
+    let (mut empty_socket, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let empty_ws_frame = timeout(PATIENCE, empty_socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let empty_ws = empty_ws_frame.to_text().unwrap();
+    let empty_ws_mem = serde_json::from_str::<Value>(empty_ws).unwrap()["memory"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(
+        empty_ws,
+        format!(
+            r#"{{"downloadTotal":0,"uploadTotal":0,"connections":[],"memory":{empty_ws_mem}}}"#
+        )
+    );
+    drop(empty_socket);
+
+    let mut watch_with = rig
+        .control
+        .connection_watch(ConnectionWatchParams {
+            counters: Some(true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut watch_without = rig
+        .control
+        .connection_watch(ConnectionWatchParams {
+            counters: Some(false),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(watch_with.snapshot.as_ref().unwrap().connections.is_empty());
+    assert!(
+        watch_without
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .connections
+            .is_empty()
+    );
+
+    let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let mut clients = Vec::new();
+    let mut peers = Vec::new();
+    for idx in 0..3usize {
+        let (mut client, mut far) = open_proxied(proxy, &target).await;
+        let payload = format!("payload-{idx}");
+        client.write_all(payload.as_bytes()).await.unwrap();
+        let mut received = vec![0u8; payload.len()];
+        far.read_exact(&mut received).await.unwrap();
+        clients.push(client);
+        peers.push(far);
+    }
+
+    let mut seen_with = 0usize;
+    let mut seen_without = 0usize;
+    timeout(PATIENCE, async {
+        while seen_with < 3 {
+            if let Some(Delivery::Event { data, .. }) = watch_with.events.next().await {
+                seen_with += data.opened.len();
+            }
+        }
+        while seen_without < 3 {
+            if let Some(Delivery::Event { data, .. }) = watch_without.events.next().await {
+                assert!(
+                    data.counters.is_empty(),
+                    "counters=false must not emit live counter updates while connections are open"
+                );
+                seen_without += data.opened.len();
+            }
+        }
+    })
+    .await
+    .unwrap();
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let ws_first = timeout(PATIENCE, socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let ws_raw = ws_first.to_text().unwrap();
+
+    let rest_reply = rig.call("GET", "/connections", None).await;
+    assert_eq!(rest_reply.status, 200);
+    let rest_raw = rest_reply.body.strip_suffix('\n').unwrap();
+
+    let (rest_prefix, rest_mem_tail) = rest_raw.rsplit_once(",\"memory\":").unwrap();
+    let (ws_prefix, ws_mem_tail) = ws_raw.rsplit_once(",\"memory\":").unwrap();
+    assert_eq!(rest_prefix, ws_prefix);
+    assert!(
+        rest_mem_tail
+            .strip_suffix('}')
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
+    );
+    assert!(
+        ws_mem_tail
+            .strip_suffix('}')
+            .unwrap()
+            .parse::<u64>()
+            .is_ok()
+    );
+
+    let parsed: Value = serde_json::from_str(rest_raw).unwrap();
+    let top_keys: Vec<&str> = parsed
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        top_keys,
+        ["downloadTotal", "uploadTotal", "connections", "memory"]
+    );
+    assert_eq!(parsed["connections"].as_array().unwrap().len(), 3);
+
+    drop((socket, watch_with, watch_without, clients, peers));
+    rig.control.shutdown().await;
+}
