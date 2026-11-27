@@ -26,6 +26,8 @@ mod pattern;
 #[cfg(feature = "script")]
 mod quickjs;
 #[cfg(test)]
+mod reload_tests;
+#[cfg(test)]
 mod routing_tests;
 mod rules;
 mod script;

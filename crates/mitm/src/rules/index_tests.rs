@@ -184,6 +184,41 @@ fn a_case_insensitive_pattern_is_found_in_any_case() {
 }
 
 #[test]
+fn only_case_insensitive_patterns_go_to_the_folded_automaton() {
+    let patterns = [
+        r"^https://API\.Mixed\.test/v1",
+        r"(?i)^https://www\.example\.org/promotions/summer-sale/banner",
+        r"(?i)^https://cdn\.ads\.test/",
+        r"/collect\?",
+        r"(?i)/ad",
+        r"^https://(?i:Shop)\.test/cart",
+        r"(?-i)^https://\(?inner\.test/",
+        r"(?P<x>a)\.test/(?m)line",
+    ];
+    let rules = rules_of(&patterns);
+    let index = rules.index_of_url_rewrites();
+    assert_eq!(index.literal_owners(false), [0, 3, 7]);
+    assert_eq!(index.literal_owners(true), [1, 2, 4, 5, 6]);
+    for url in [
+        "https://API.Mixed.test/v1",
+        "https://api.mixed.test/v1",
+        "HTTPS://WWW.EXAMPLE.ORG/PROMOTIONS/SUMMER-SALE/BANNER",
+        "https://Cdn.Ads.Test/x",
+        "https://x.test/collect?a=1",
+        "https://x.test/COLLECT?a=1",
+        "https://x.test/AD",
+        "https://x.test/aD",
+        "https://sHoP.test/cart",
+        "https://shop.test/CART",
+        "https://(inner.test/",
+        "https://inner.test/",
+        "a.test/line",
+    ] {
+        assert_eq!(indexed(&rules, url), naive(&rules, url), "{url}");
+    }
+}
+
+#[test]
 fn a_url_builds_only_the_patterns_it_may_match() {
     let patterns: Vec<String> = (0..1000)
         .map(|n| format!(r"^https?://ad{n}\.example\.com/banner"))
@@ -227,4 +262,111 @@ fn relaxing_a_pattern_keeps_every_match() {
     for (source, relaxed) in cases {
         assert_eq!(super::relax(source), relaxed, "{source}");
     }
+}
+
+#[test]
+fn unicode_case_folding_and_regex_set_match_linear_oracle() {
+    let patterns = [
+        // Unicode Kelvin sign (K U+212A) and long s (ſ U+017F) with scoped flags.
+        r"(?i:kelvin)/Case",
+        r"(?i)s",
+        r"(?i)^https?://api\.mod-alpha\.example\.com/v1/feed",
+        r"(?i)^https?://static\.example\.com/ads/splash",
+        r"^https://a\.test/(foo|)",
+        r"^https://a\.test/(foo|bar)/x",
+        r"^https://a\.test/aa/aa",
+        r"^https?://[^/]+/\d+/\w+$",
+        r"(?i)^https?://[^/]+/[a-z]+\d+$",
+        r"^\p{Greek}+$",
+        r"^https?://(?=\w+\.a\.test/)[^/]+/v1$",
+        r"^https?://(\w+)\.a\.test/\1$",
+        r"^https?:\/\/res\.a\.test\/ad.\cnews\/",
+        r"^https?://.+",
+    ];
+    let urls = [
+        "https://x.test/\u{212A}ELVIN/Case",
+        "https://x.test/\u{212A}elvin/case",
+        "https://x.test/kelvin/Case",
+        "https://x.test/kelvin/case",
+        "https://x.test/\u{017F}",
+        "https://x.test/S",
+        "https://x.test/z",
+        "HTTPS://API.MOD-ALPHA.EXAMPLE.COM/V1/FEED",
+        "https://\u{017F}tatic.example.com/ad\u{017F}/\u{017F}pla\u{017F}h",
+        "https://a.test/",
+        "https://a.test/foo",
+        "https://a.test/foo/x",
+        "https://a.test/bar/x",
+        "https://a.test/aa/aa",
+        "https://any.example.org/123/abc",
+        "https://any.example.org/AbC99",
+        "https://any.example.org/nomatch!",
+        "αβγ",
+        "https://ok.a.test/v1",
+        "https://dup.a.test/dup",
+        "https://dup.a.test/other",
+        "https://res.a.test/ad.\u{000E}ews/",
+        "https://res.a.test/ad.news/",
+        "http://other.example.net/plain",
+        "",
+    ];
+    let rules = rules_of(&patterns);
+    for url in urls {
+        assert_eq!(indexed(&rules, url), naive(&rules, url), "{url}");
+    }
+    let idx = rules.index_of_url_rewrites();
+    assert!(
+        !idx.regex_set_owners().is_empty(),
+        "pure no-literal patterns should be indexed by RegexSet"
+    );
+    let fancy_only = rules_of(&[r"^(\w+)\1$", r"^(?=\d)\w+$", r"^\d+$"]);
+    let fidx = fancy_only.index_of_url_rewrites();
+    assert_eq!(fidx.always_fancy(), &[0, 1]);
+    assert_eq!(fidx.regex_set_owners(), &[2]);
+    for url in ["abab", "ab", "1abc", "abc", "12345", ""] {
+        assert_eq!(indexed(&fancy_only, url), naive(&fancy_only, url), "{url}");
+    }
+}
+
+#[test]
+fn non_http_scripts_are_excluded_from_http_indexes_and_hooks_take_first() {
+    use crate::script::testkit::{host_with, sync_program};
+    use crate::script::{Script, ScriptKind, ScriptResult, compile_script};
+    let dir = tempfile::tempdir().unwrap();
+    let host = host_with(
+        dir.path(),
+        vec![("a", sync_program(|_| Ok(ScriptResult::default())))],
+    );
+    let make = |line: &str| -> std::sync::Arc<Script> {
+        let def = concord_config::mitm::parse_script(line).unwrap();
+        std::sync::Arc::new(compile_script(&def, dir.path(), &host).unwrap())
+    };
+    let mut rules = Rules::default();
+    rules.scripts.push(make(
+        r#"c1 = type=cron,cronexp="0 8 * * *",script-path=a.js"#,
+    ));
+    rules.scripts.push(make(
+        r"e1 = type=event,event-name=network-changed,script-path=a.js",
+    ));
+    rules
+        .scripts
+        .push(make(r"dup = type=rule,script-path=a.js,argument=first"));
+    rules
+        .scripts
+        .push(make(r"dup = type=rule,script-path=a.js,argument=second"));
+    rules
+        .scripts
+        .push(make(r"g1 = type=generic,script-path=a.js"));
+    rules.index();
+
+    let scan = rules.scan_request("https://example.com/anything");
+    assert!(scan.scripts.is_empty());
+    let plan = rules.prepare_response("https://example.com/anything");
+    assert!(plan.scripts.is_empty());
+    let found = rules.script_by_name(ScriptKind::Rule, "dup").unwrap();
+    assert_eq!(
+        found.argument.as_ref().and_then(|v| v.as_str()),
+        Some("first"),
+        "duplicate hook names must pick the first definition"
+    );
 }

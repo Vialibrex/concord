@@ -23,7 +23,9 @@ pub use hosts::{
     SourceEntryDef, parse_host_line, parse_source_line,
 };
 pub use issue::{IssueKind, LineError};
-pub use pattern::{MULTILINE, check_multiline, check_pattern, multiline, parses, regex_source};
+pub use pattern::{
+    MULTILINE, check_multiline, check_pattern, delegatable_regex, multiline, parses, regex_source,
+};
 pub use relax::relax;
 pub use rules::{
     BodyActionDef, BodyRewriteDef, DataType, HeaderEditDef, HeaderRewriteDef, MapLocalBody,
@@ -267,6 +269,13 @@ fn same_reads<T: PartialEq>(lines: &[MitmLine<T>], other: &[MitmLine<T>]) -> boo
         .eq(other.iter().map(|line| &line.read))
 }
 
+fn same_text<T>(lines: &[MitmLine<T>], other: &[MitmLine<T>]) -> bool {
+    fn written<T>(line: &MitmLine<T>) -> (&str, Option<&str>) {
+        (&line.text, line.origin.as_deref())
+    }
+    lines.iter().map(written).eq(other.iter().map(written))
+}
+
 fn bad<'a, T>(
     list: &'static str,
     lines: &'a [MitmLine<T>],
@@ -354,6 +363,38 @@ impl MitmDef {
             && same_reads(map_local, &other.map_local)
             && same_reads(request_body_mock, &other.request_body_mock)
             && same_reads(script, &other.script)
+    }
+
+    /// As [MitmDef::reads_the_same], and each line is also written the same and comes from
+    /// the same module, so what is said of a line names it as `other` does.
+    pub fn written_the_same(&self, other: &MitmDef) -> bool {
+        let MitmDef {
+            hostname,
+            hostname_disabled,
+            skip_server_cert_verify_hostname,
+            client_source_address,
+            url_rewrite,
+            header_rewrite,
+            body_rewrite,
+            map_local,
+            request_body_mock,
+            script,
+            ..
+        } = self;
+        self.reads_the_same(other)
+            && same_text(hostname, &other.hostname)
+            && same_text(hostname_disabled, &other.hostname_disabled)
+            && same_text(
+                skip_server_cert_verify_hostname,
+                &other.skip_server_cert_verify_hostname,
+            )
+            && same_text(client_source_address, &other.client_source_address)
+            && same_text(url_rewrite, &other.url_rewrite)
+            && same_text(header_rewrite, &other.header_rewrite)
+            && same_text(body_rewrite, &other.body_rewrite)
+            && same_text(map_local, &other.map_local)
+            && same_text(request_body_mock, &other.request_body_mock)
+            && same_text(script, &other.script)
     }
 
     /// The lines that cannot be read, list by list in the order the engine reads them.

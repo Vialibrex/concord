@@ -133,6 +133,15 @@ pub(crate) fn host_of(flow: &InterceptFlow) -> String {
     }
 }
 
+/// Formats `ip` into a stack buffer (RFC 4291 IPv6 text form is at most 45 bytes).
+fn fmt_ip(ip: std::net::IpAddr, buf: &mut [u8; 45]) -> &str {
+    use std::io::Write as _;
+    let mut cur = io::Cursor::new(&mut buf[..]);
+    let _ = write!(cur, "{ip}");
+    let len = cur.position() as usize;
+    std::str::from_utf8(&buf[..len]).unwrap_or_default()
+}
+
 fn looks_like_http(data: &[u8]) -> bool {
     HTTP_METHODS.iter().any(|method| data.starts_with(method))
 }
@@ -208,6 +217,17 @@ impl Core {
         Some(ca)
     }
 
+    /// Fast check for whether TLS decryption currently has a valid CA, avoiding `Arc<Ca>` clone.
+    fn has_authority(&self) -> bool {
+        if !self.config.decrypt_tls {
+            return false;
+        }
+        if self.config.ca_fingerprint.is_empty() {
+            return self.shared.authority.has_available();
+        }
+        self.authority().is_some()
+    }
+
     /// Runs for every TCP connection, so it has to be cheap. Without TLS
     /// decryption only plain HTTP is offered, which never runs on 443.
     pub fn match_tcp(&self, flow: &InterceptFlow) -> bool {
@@ -222,11 +242,14 @@ impl Core {
         let domain = domain_of(flow);
         if port == HTTP_PORT && (self.config.plain_http || self.shared.dialer.reads_http(flow)) {
             return match (domain, flow.dst_ip) {
-                ("", Some(ip)) => !hosts.excludes(&ip.to_string(), port),
+                ("", Some(ip)) => {
+                    let mut buf = [0u8; 45];
+                    !hosts.excludes(fmt_ip(ip, &mut buf), port)
+                }
                 (domain, _) => !hosts.excludes(domain, port),
             };
         }
-        if port == HTTPS_PORT && self.authority().is_none() {
+        if port == HTTPS_PORT && !self.has_authority() {
             return false;
         }
         if !domain.is_empty() {
@@ -239,13 +262,17 @@ impl Core {
         let Some(ip) = flow.dst_ip else {
             return false;
         };
-        port == HTTPS_PORT && hosts.includes_any() || hosts.matches(&ip.to_string(), port)
+        if port == HTTPS_PORT && hosts.includes_any() {
+            return true;
+        }
+        let mut buf = [0u8; 45];
+        hosts.matches(fmt_ip(ip, &mut buf), port)
     }
 
     pub fn drop_quic(&self, flow: &InterceptFlow) -> bool {
         if !self.config.auto_quic_block
             || self.shared.pressure.level() >= PRESSURE_RELAY
-            || self.authority().is_none()
+            || !self.has_authority()
             || !self.config.sources.allows(flow.meta.src.ip())
         {
             return false;

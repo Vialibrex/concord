@@ -21,23 +21,25 @@ use crate::headers::{
 use crate::heads::Heads;
 use crate::limits::{BODY_WAIT, PRESSURE_NO_BODIES};
 use crate::pattern::Pattern;
-use crate::rules::{BodyRewrite, HeaderRewrite, LocalBody};
+use crate::rules::{BodyRewrite, HeaderRewrite, LocalBody, RequestScan, ResponsePlan};
 use crate::script::DEFAULT_SCRIPT_TIMEOUT;
 use crate::session::{PoolKey, Routed, Sender, Session};
 use crate::target::TargetUrl;
 use http_body_util::BodyExt;
 
 impl Session {
-    /// Applies the rules to a request about to go upstream.
+    /// Applies the rules to a request about to go upstream and prepares the response-phase plan
+    /// for the final sent URL.
     pub(crate) async fn rewrite_request(
         self: &Arc<Self>,
         out: &mut OutRequest,
         target: &mut Target,
-    ) {
-        self.apply_request_rules(out, target).await;
+        scan: &RequestScan,
+    ) -> ResponsePlan {
+        let plan = self.apply_request_rules(out, target, scan).await;
         let cap = &target.cap;
         if !cap.is_some() {
-            return;
+            return plan;
         }
         cap.set_request_length(
             out.length
@@ -55,43 +57,70 @@ impl Session {
             .boxed_unsync();
         }
         cap.sent(&out.url.raw, || with_host(&out.headers, &out.host_header()));
+        plan
     }
 
     /// Header Rewrite comes first, as in Surge, so a URL rewrite and Map Local see its result.
-    pub(crate) fn rewrite_request_headers(&self, out: &mut OutRequest, target: &Target) {
+    /// Returns `true` when a whole-head rewrite may have changed `out.url`.
+    pub(crate) fn rewrite_request_headers(
+        &self,
+        out: &mut OutRequest,
+        target: &Target,
+        scan: &RequestScan,
+    ) -> bool {
+        if scan.headers.is_empty() {
+            return false;
+        }
         let header_rules = {
             let request = || request_text(out, target.version);
             let heads = Heads::new(Some(&request), None);
             self.core
                 .config
                 .rules
-                .header_rewrites_for(&out.url.raw, false, &heads)
+                .request_header_rewrites_from(scan, &out.url.raw, &heads)
         };
+        if header_rules.is_empty() {
+            return false;
+        }
+        let mut url_changed = false;
         let rewritten =
             apply_header_rules(header_rules, &target.cap, PHASE_REQUEST, |rule| match rule
                 .whole_head()
             {
-                Some((pattern, with)) => replace_request_head(out, target.version, pattern, with),
+                Some((pattern, with)) => {
+                    let changed = replace_request_head(out, target.version, pattern, with);
+                    url_changed |= changed;
+                    changed
+                }
                 None => rule.apply(&mut out.headers),
             });
         if rewritten {
             tracing::info!("[MITM] rewrite request headers of {}", out.url.raw);
         }
+        url_changed
     }
 
-    async fn apply_request_rules(self: &Arc<Self>, out: &mut OutRequest, target: &mut Target) {
+    async fn apply_request_rules(
+        self: &Arc<Self>,
+        out: &mut OutRequest,
+        target: &mut Target,
+        scan: &RequestScan,
+    ) -> ResponsePlan {
         let rules = &self.core.config.rules;
         let max_body = self.core.config.limits.max_body_size;
         let address = out.url.raw.clone();
-        let (mock, body_rules, script) = {
-            let request = || request_text(out, target.version);
-            let heads = Heads::new(Some(&request), None);
-            (
-                rules.request_mock(&address, &heads),
-                rules.body_rewrites_for(&address, false, &heads),
-                rules.script_for(&address, false, &heads),
-            )
-        };
+        let (mock, body_rules, script) =
+            if scan.request_mocks.is_empty() && scan.bodies.is_empty() && scan.scripts.is_empty() {
+                (None, Vec::new(), None)
+            } else {
+                let request = || request_text(out, target.version);
+                let heads = Heads::new(Some(&request), None);
+                (
+                    rules.request_mock_from(scan, &address, &heads),
+                    rules.request_body_rewrites_from(scan, &address, &heads),
+                    rules.request_script_from(scan, &address, &heads),
+                )
+            };
         if let Some(mock) = mock {
             mock_body(out, &mock.header, &mock.body).await;
             target.cap.note(
@@ -121,26 +150,19 @@ impl Session {
                 }
                 Err(err) => {
                     out.body = failing(err);
-                    return;
+                    return rules.prepare_response(&out.url.raw);
                 }
             }
         }
         if let Some(script) = script {
             self.run_request_script(out, target, script).await;
         }
-        if !grpc && self.rewrites_response_body(&out.url.raw) {
+        let plan = rules.prepare_response(&out.url.raw);
+        if !grpc && rules.response_plan_rewrites_body(&plan) {
             out.headers
                 .insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
         }
-    }
-
-    fn rewrites_response_body(&self, address: &str) -> bool {
-        let rules = &self.core.config.rules;
-        let heads = Heads::new(None, None);
-        !rules.body_rewrites_for(address, true, &heads).is_empty()
-            || rules
-                .script_for(address, true, &heads)
-                .is_some_and(|script| script.requires_body)
+        plan
     }
 
     /// Makes room for a body about to be read whole: its length, or the size
@@ -192,7 +214,11 @@ impl Session {
         body: &mut Body,
         sent: &Sent,
         target: &mut Target,
+        plan: &ResponsePlan,
     ) -> Result<(), ReplyError> {
+        if plan.headers.is_empty() && plan.bodies.is_empty() && plan.scripts.is_empty() {
+            return Ok(());
+        }
         let rules = &self.core.config.rules;
         let max_body = self.core.config.limits.max_body_size;
         let address = sent.url.raw.clone();
@@ -208,11 +234,7 @@ impl Session {
             };
             let response = || response_head(head.status, version_text(head.version), &head.headers);
             let heads = Heads::new(Some(&request), Some(&response));
-            (
-                rules.header_rewrites_for(&address, true, &heads),
-                rules.body_rewrites_for(&address, true, &heads),
-                rules.script_for(&address, true, &heads),
-            )
+            rules.response_rules_from(plan, &heads)
         };
         let rewritten =
             apply_header_rules(header_rules, &target.cap, PHASE_RESPONSE, |rule| match rule

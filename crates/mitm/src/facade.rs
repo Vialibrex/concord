@@ -13,7 +13,9 @@ use crate::capture::{Body, CaptureStore, Exchange, ExchangeList, QueryAnswer};
 use concord_config::mitm::MitmDef;
 use concord_config::mitm::module::ModuleInput;
 
-use crate::config::{Config, ParseEnv, RawConfig, Validation, check, normalize_fingerprint};
+use crate::config::{
+    Config, ParseEnv, RawConfig, Resources, Validation, check, normalize_fingerprint,
+};
 use crate::cron::LocalClock;
 use crate::engine::{MitmEngine, Shared};
 use crate::limits::Pressure;
@@ -189,10 +191,22 @@ impl Mitm {
             }
             return Vec::new();
         };
-        let (config, errors) = Config::compile(def, &self.parse_env(), unread);
-        if let Some(previous) = &previous
+        let env = self.parse_env();
+        let resources = Resources::read(&def, &env);
+        let kept = previous
+            .as_ref()
+            .filter(|previous| previous.trusts(&self.shared.trust.load()));
+        if let Some(previous) = kept
+            && previous.config().compiles_from(&def, &resources)
+        {
+            if state.running {
+                previous.notify(EVENT_PROFILE_RELOADED);
+            }
+            return previous.config().errors(unread);
+        }
+        let (config, errors) = Config::compile_from(def, &env, resources, unread);
+        if let Some(previous) = kept
             && previous.config().same(&config)
-            && previous.trusts(&self.shared.trust.load())
         {
             if state.running {
                 previous.notify(EVENT_PROFILE_RELOADED);

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 
 use concord_common::{InboundKind, Network};
+use concord_config::mitm::regex_source;
 use concord_config::net::IpCidr;
 use concord_config::rule::{NetworkKind, parse_rule};
 use indexmap::IndexMap;
@@ -53,6 +54,34 @@ const WILDCARDS: [&str; 4] = ["*.a.com", "x.*.com", "*b*", "d?.c.org"];
 const REGEXES: [&str; 3] = ["^x\\.", "\\.org$", "^[a-z]{1,2}\\.com$"];
 const TARGETS: [&str; 6] = ["T0", "T1", "T2", "T3", "PASS", "PASS-RULE"];
 const PROCESSES: [&str; 3] = ["curl", "chrome", "wget"];
+const URLS: [&str; 6] = [
+    "https://a.com/ad?x=1",
+    "http://b.com/api/v2/list",
+    "https://kw.io/track/AD",
+    "https://x.a.com/",
+    "http://zzz.net/aa/bb",
+    "https://c.org/img.png",
+];
+/// The first six run as one regex set; the last three need fancy-regex.
+const URL_PATTERNS: [&str; 9] = [
+    r"^https://a\.com/",
+    "/ad",
+    "(?i)/TRACK/",
+    r"api/v\d+",
+    r"\.png$",
+    "^http://",
+    r"^https://(?!a\.)",
+    r"/(\w)\1/",
+    r"(?<=\.)net/",
+];
+
+fn url_line(rng: &mut StdRng) -> String {
+    format!(
+        "URL-REGEX,{},{}",
+        choose(rng, &URL_PATTERNS),
+        choose(rng, &TARGETS)
+    )
+}
 
 struct SetModel {
     behavior: Behavior,
@@ -139,6 +168,9 @@ fn rule_line(rng: &mut StdRng, sub_names: &[&str]) -> String {
     if roll == 0 {
         return logic(rng, 0);
     }
+    if roll == 2 {
+        return url_line(rng);
+    }
     if roll == 1 && !sub_names.is_empty() {
         return format!(
             "SUB-RULE,({}),{}",
@@ -169,7 +201,7 @@ fn list(rng: &mut StdRng, length: usize, sub_names: &[&str]) -> Vec<String> {
         } else {
             1
         };
-        let family = rng.random_range(0..3);
+        let family = rng.random_range(0..4);
         for _ in 0..burst {
             let line = match family {
                 0 => {
@@ -193,6 +225,7 @@ fn list(rng: &mut StdRng, length: usize, sub_names: &[&str]) -> Vec<String> {
                     let cidr = choose(rng, &CIDRS);
                     format!("IP-CIDR,{cidr},{target}{}", flags(rng))
                 }
+                2 => url_line(rng),
                 _ => rule_line(rng, sub_names),
             };
             out.push(line);
@@ -242,6 +275,7 @@ fn flow(rng: &mut StdRng) -> Flow {
     flow.kind = *[InboundKind::Http, InboundKind::Socks5, InboundKind::Tun]
         .choose(rng)
         .unwrap();
+    flow.http = rng.random_bool(0.6).then(|| (choose(rng, &URLS), None));
     flow.process = rng.random_bool(0.7).then(|| {
         (
             choose(rng, &PROCESSES),
@@ -453,6 +487,16 @@ impl Model<'_> {
                 want == self.flow.kind.rule_name()
                     || (want == "SOCKS" && self.flow.kind == InboundKind::Socks5)
             }),
+            Cond::UrlRegex(pattern) => match self.flow.http {
+                Some((url, _)) => fancy_regex::Regex::new(&regex_source(pattern))
+                    .unwrap()
+                    .is_match(url)
+                    .unwrap(),
+                None => {
+                    self.trace.http_pending = true;
+                    false
+                }
+            },
             Cond::And(children) => children.iter().all(|c| self.eval(c, false, true, view)),
             Cond::Or(children) => children.iter().any(|c| self.eval(c, false, true, view)),
             Cond::Not(child) => !self.eval(child, false, true, view),
@@ -619,6 +663,7 @@ struct Coverage {
     accepted: usize,
     ip_lookups: u32,
     process_lookups: u32,
+    http_pending: usize,
 }
 
 fn run_seed(seed: u64, cases: usize, flows: usize) -> Coverage {
@@ -640,9 +685,10 @@ fn run_seed(seed: u64, cases: usize, flows: usize) -> Coverage {
                     seen.accepted += usize::from(got.accepted.is_some());
                     seen.ip_lookups += got.ip_lookups;
                     seen.process_lookups += got.process_lookups;
+                    seen.http_pending += usize::from(got.http_pending);
                     assert!(
                         want == got,
-                        "seed {seed} case {case_no} merge {merge} accept_first {accept_first}\nrules: {:#?}\nsubs: {:#?}\nflow host {:?} ip {:?} resolves {:?} net {:?} src {} port {} proc {:?}\nwant {want:?}\n got {got:?}",
+                        "seed {seed} case {case_no} merge {merge} accept_first {accept_first}\nrules: {:#?}\nsubs: {:#?}\nflow host {:?} ip {:?} resolves {:?} net {:?} src {} port {} proc {:?} http {:?}\nwant {want:?}\n got {got:?}",
                         case.rules,
                         case.subs,
                         flow.host,
@@ -652,6 +698,7 @@ fn run_seed(seed: u64, cases: usize, flows: usize) -> Coverage {
                         flow.src,
                         flow.dst_port,
                         flow.process,
+                        flow.http,
                     );
                 }
             }
@@ -670,6 +717,7 @@ fn programs_agree_with_a_linear_evaluator() {
         total.accepted += seen.accepted;
         total.ip_lookups += seen.ip_lookups;
         total.process_lookups += seen.process_lookups;
+        total.http_pending += seen.http_pending;
     }
     eprintln!(
         "probes {} candidates {} accepted {} ip lookups {} process lookups {}",
@@ -678,6 +726,7 @@ fn programs_agree_with_a_linear_evaluator() {
     assert!(total.accepted > total.probes / 4);
     assert!(total.candidates > total.probes);
     assert!(total.ip_lookups > 1000 && total.process_lookups > 1000);
+    assert!(total.http_pending > total.probes / 20);
 }
 
 #[test]

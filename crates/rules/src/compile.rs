@@ -9,6 +9,7 @@ use concord_config::mitm::regex_source;
 use concord_config::rule::{Cond, NetworkKind, RuleDef, RuleLines, parse_rule};
 use indexmap::IndexMap;
 
+use crate::Behavior;
 use crate::eval::{GeoIpSource, Node, PortKind, ProcessMode, inbound_bit};
 use crate::geo::{GeoError, GeoFile};
 use crate::kind::RuleKind;
@@ -16,7 +17,7 @@ use crate::payload::rule_payload;
 use crate::prog::{Op, Prog, host_match};
 use crate::program::{CompileEnv, CompileError, Demands, RouteProgram};
 use crate::ruleset::RuleSetHandle;
-use crate::runs::{DomainItem, DomainRun, IpRun};
+use crate::runs::{DomainItem, DomainRun, IpRun, UrlRun};
 use crate::table::TableBuilder;
 use crate::text::go_lower;
 
@@ -28,6 +29,7 @@ pub(crate) use classical::compile_classical;
 enum Class {
     Domain(bool),
     Ip { src: bool, resolves: bool },
+    Url,
     Other,
 }
 
@@ -46,6 +48,7 @@ fn class_of(def: &RuleDef) -> Class {
             src: true,
             resolves: false,
         },
+        Cond::UrlRegex(_) => Class::Url,
         _ => Class::Other,
     }
 }
@@ -161,11 +164,20 @@ fn compile_from<D: Borrow<RuleDef>>(
         progs.push(compile_list(&mut cx, list.iter().map(Ok), &section)?);
     }
     progs.push(Default::default());
+    let mut classical: Vec<Arc<RuleSetHandle>> = Vec::new();
+    for (handle, _, _) in &cx.rule_sets {
+        if handle.behavior() == Behavior::Classical
+            && !classical.iter().any(|known| Arc::ptr_eq(known, handle))
+        {
+            classical.push(handle.clone());
+        }
+    }
     Ok(RouteProgram {
         progs: progs.into_boxed_slice(),
         sub_rule_names: sub_rules.keys().map(|name| name.as_str().into()).collect(),
         targets: cx.targets.into_boxed_slice(),
         rule_sets: cx.rule_sets.into_boxed_slice(),
+        classical: classical.into_boxed_slice(),
         demands: cx.demands,
         deferred_geo: cx.deferred_geo.into_boxed_slice(),
         scripts: cx.scripts.into_boxed_slice(),
@@ -209,6 +221,7 @@ struct OpenRun<D> {
     held: Vec<D>,
     domains: Vec<(u32, DomainItem)>,
     nets: Vec<(u32, IpAddr, u8)>,
+    urls: Vec<(u32, fancy_regex::Regex)>,
 }
 
 impl<D: Borrow<RuleDef>> OpenRun<D> {
@@ -220,6 +233,7 @@ impl<D: Borrow<RuleDef>> OpenRun<D> {
             held: Vec::new(),
             domains: Vec::new(),
             nets: Vec::new(),
+            urls: Vec::new(),
         }
     }
 
@@ -243,6 +257,14 @@ impl<D: Borrow<RuleDef>> OpenRun<D> {
             Cond::IpCidr(net) | Cond::IpCidr6(net) | Cond::SrcIpCidr(net) => {
                 self.nets.push((index as u32, net.addr, net.prefix));
             }
+            Cond::UrlRegex(pattern) => {
+                let loc = Loc {
+                    section,
+                    index,
+                    line: &def.text,
+                };
+                self.urls.push((index as u32, url_regex(pattern, &loc)?));
+            }
             _ => {
                 if let Some(item) = domain_item(def, index, section)? {
                     self.domains.push((index as u32, item));
@@ -260,6 +282,7 @@ struct ListBuilder {
     nodes: Vec<Node>,
     domain_runs: Vec<DomainRun>,
     ip_runs: Vec<IpRun>,
+    url_runs: Vec<UrlRun>,
 }
 
 impl ListBuilder {
@@ -320,6 +343,11 @@ impl ListBuilder {
                     .push(IpRun::build(start, end, src, resolves, &run.nets));
                 self.ops.push(Op::Ip(self.ip_runs.len() as u32 - 1));
             }
+            Class::Url => {
+                cx.demands.http = true;
+                self.url_runs.push(UrlRun::build(start, end, run.urls));
+                self.ops.push(Op::Url(self.url_runs.len() as u32 - 1));
+            }
             Class::Other => {}
         }
         Ok(())
@@ -371,6 +399,7 @@ fn compile_list<D: Borrow<RuleDef>>(
         nodes: list.nodes.into_boxed_slice(),
         domain_runs: list.domain_runs.into_boxed_slice(),
         ip_runs: list.ip_runs.into_boxed_slice(),
+        url_runs: list.url_runs.into_boxed_slice(),
     })
 }
 
@@ -428,6 +457,10 @@ fn domain_item(
         }
         _ => return Ok(None),
     }))
+}
+
+fn url_regex(pattern: &str, loc: &Loc<'_>) -> Result<fancy_regex::Regex, CompileError> {
+    fancy_regex::Regex::new(&regex_source(pattern)).map_err(|err| loc.invalid(err.to_string()))
 }
 
 fn regex(pattern: &str, loc: &Loc<'_>) -> Result<Matcher, CompileError> {
@@ -619,9 +652,7 @@ fn node_for_cond(
         }
         Cond::UrlRegex(pattern) => {
             cx.demands.http = true;
-            let regex = fancy_regex::Regex::new(&regex_source(pattern))
-                .map_err(|err| loc.invalid(err.to_string()))?;
-            Node::Url(Box::new(regex))
+            Node::Url(Box::new(url_regex(pattern, loc)?))
         }
         Cond::UserAgent(pattern) => {
             cx.demands.http = true;

@@ -4,13 +4,17 @@ use std::sync::Arc;
 
 pub use concord_config::mitm::MitmSection as RawConfig;
 use concord_config::mitm::text::quote;
-use concord_config::mitm::{HostEntryDef, IssueKind, Items, LineError, MitmDef, MitmLine, Read};
+use concord_config::mitm::{
+    BodyActionDef, BodyRewriteDef, HostEntryDef, IssueKind, Items, LineError, MapLocalBody,
+    MapLocalDef, MitmDef, MitmLine, Read,
+};
 use serde::Serialize;
 
 use crate::hostlist::{HostList, hosts_view};
 use crate::limits::{Limits, Resolve};
 use crate::rules::{
-    Rules, compile_body_rewrite, compile_header_rewrite, compile_map_local, compile_url_rewrite,
+    ResourceSeen, Rules, compile_body_rewrite, compile_header_rewrite, compile_map_local,
+    compile_url_rewrite, local_file_seen, resource_digest,
 };
 use crate::script::{ScriptHost, compile_script};
 use crate::sources::SourceList;
@@ -44,6 +48,70 @@ pub struct Config {
     /// Surge's HTTP engine reads it without a hostname entry.
     pub(crate) plain_http: bool,
     def: MitmDef,
+    resources: Resources,
+    errors: Vec<LineIssue>,
+}
+
+struct LineIssue {
+    text: String,
+    unread: bool,
+}
+
+/// What the files a section names in the resources directory held, in the order its lines
+/// name them, taken before they are read for compiling so that a file changing meanwhile
+/// makes the next apply compile again; and the script runtime that compiles its scripts.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Resources {
+    dir: PathBuf,
+    runtime: u64,
+    files: Vec<Result<ResourceSeen, LineError>>,
+}
+
+/// The files of `lines`, each with whether it is base64, which the compile reads whole.
+fn local_files(lines: &[MitmLine<Read<MapLocalDef>>]) -> impl Iterator<Item = (&str, bool)> {
+    lines.iter().filter_map(|line| match &line.read {
+        Ok(local) => match local.body {
+            MapLocalBody::File { base64 } => Some((local.data.as_str(), base64)),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+impl Resources {
+    pub(crate) fn read(def: &MitmDef, env: &ParseEnv) -> Resources {
+        let runtime = env.scripts.generation();
+        let jq = def.body_rewrite.iter().filter_map(|line| match &line.read {
+            Ok(BodyRewriteDef {
+                action: BodyActionDef::JqFile(name),
+                ..
+            }) => Some(name.as_str()),
+            _ => None,
+        });
+        let scripts = def.script.iter().filter_map(|line| match &line.read {
+            Ok(script) => Some(script.path.as_str()),
+            Err(_) => None,
+        });
+        let locals = local_files(&def.map_local)
+            .chain(local_files(&def.request_body_mock))
+            .map(|(name, base64)| {
+                if base64 {
+                    resource_digest(&env.resources, name)
+                } else {
+                    local_file_seen(&env.resources, name)
+                }
+            });
+        let files = jq
+            .chain(scripts)
+            .map(|name| resource_digest(&env.resources, name))
+            .chain(locals)
+            .collect();
+        Resources {
+            dir: env.resources.clone(),
+            runtime,
+            files,
+        }
+    }
 }
 
 /// What a line put in force and what of it could not be read or compiled: a hostname or
@@ -101,7 +169,7 @@ fn each<T>(
 }
 
 fn read_hosts(list: &mut HostList, read: &Items<HostEntryDef>) -> LineRead {
-    list.extend(HostList::from(read.items.clone()));
+    list.extend_entries(&read.items);
     items(read, hosts_view(read))
 }
 
@@ -121,6 +189,8 @@ impl Config {
             rules: Rules::default(),
             plain_http: false,
             def: MitmDef::default(),
+            resources: Resources::default(),
+            errors: Vec::new(),
         }
     }
 
@@ -134,7 +204,7 @@ impl Config {
             &def.hostname_disabled,
             visit,
             |read, _| {
-                self.hosts.remove(&HostList::from(read.items.clone()));
+                self.hosts.remove_entries(&read.items);
                 items(read, hosts_view(read))
             },
         );
@@ -228,28 +298,60 @@ impl Config {
     /// The section in force, and the lines that could not be compiled, with those that
     /// could not be read when `unread`.
     pub(crate) fn compile(def: MitmDef, env: &ParseEnv, unread: bool) -> (Config, Vec<String>) {
+        let resources = Resources::read(&def, env);
+        Config::compile_from(def, env, resources, unread)
+    }
+
+    /// As [Config::compile], from `resources` taken of `def` beforehand.
+    pub(crate) fn compile_from(
+        def: MitmDef,
+        env: &ParseEnv,
+        resources: Resources,
+        unread: bool,
+    ) -> (Config, Vec<String>) {
         let mut config = Config::empty(&def);
         let mut errors = Vec::new();
         config.add_lines(&def, env, &mut |key, _, text, origin, read| {
-            if let Some(err) = read.error
-                && (unread || !read.unread)
-            {
+            if let Some(err) = read.error {
                 let line = format!("{key} {}: {err}", quote(text));
-                errors.push(match origin {
-                    Some(module) => format!("module {module}: {line}"),
-                    None => line,
+                errors.push(LineIssue {
+                    text: match origin {
+                        Some(module) => format!("module {module}: {line}"),
+                        None => line,
+                    },
+                    unread: read.unread,
                 });
             }
         });
+        config.errors = errors;
+        config.resources = resources;
         env.scripts.keep(&config.rules.scripts);
+        config.hosts.index();
+        config.skip_verify_hosts.index();
         config.rules.index();
         config.plain_http = config.rules.acts_on_requests();
         config.def = def;
+        let errors = config.errors(unread);
         (config, errors)
     }
 
+    /// The lines that could not be compiled, with those that could not be read when `unread`.
+    pub(crate) fn errors(&self, unread: bool) -> Vec<String> {
+        self.errors
+            .iter()
+            .filter(|issue| unread || !issue.unread)
+            .map(|issue| issue.text.clone())
+            .collect()
+    }
+
+    /// Whether `other` puts the same section in force from the same resource contents.
     pub fn same(&self, other: &Config) -> bool {
-        self.def.reads_the_same(&other.def)
+        self.def.reads_the_same(&other.def) && self.resources == other.resources
+    }
+
+    /// Whether compiling `def` from `resources` would give this section and these errors.
+    pub(crate) fn compiles_from(&self, def: &MitmDef, resources: &Resources) -> bool {
+        self.resources == *resources && self.def.written_the_same(def)
     }
 
     pub fn script_names(&self) -> Vec<&str> {

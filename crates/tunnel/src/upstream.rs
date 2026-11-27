@@ -207,7 +207,7 @@ impl UpstreamDialer for TunnelUpstream {
         self.inner
             .upgrade()
             .and_then(|inner| inner.runtime_for(flow.meta.inbound.kind))
-            .is_some_and(|runtime| runtime.program.demands().http)
+            .is_some_and(|runtime| runtime.program.reads_http())
     }
 
     fn record_closed(

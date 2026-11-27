@@ -470,6 +470,14 @@ impl Authority {
         self.current().ok()
     }
 
+    /// Fast check for whether a CA is available without cloning `Arc<Ca>`.
+    pub fn has_available(&self) -> bool {
+        if !self.loaded.load(Ordering::Acquire) {
+            return self.available().is_some();
+        }
+        self.state.load().ca.is_some()
+    }
+
     pub fn renew(&self) -> Result<Arc<Ca>, CaError> {
         let ca = generate_ca(&self.home)?;
         self.replace(Ok(ca));

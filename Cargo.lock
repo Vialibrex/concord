@@ -1293,6 +1293,7 @@ dependencies = [
  "jaq-std",
  "rand 0.9.5",
  "rcgen",
+ "regex",
  "regex-syntax",
  "rquickjs",
  "rustls",

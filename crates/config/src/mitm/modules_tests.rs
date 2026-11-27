@@ -116,6 +116,25 @@ fn a_module_edits_dns_and_hosts_and_leaves_routes_to_the_host() {
 }
 
 #[test]
+fn the_modules_network_edits_add_up_in_module_order() {
+    let modules = [
+        "[General]\nskip-proxy = %APPEND% one.test\n",
+        "[General]\nskip-proxy = %INSERT% two.test\n",
+        "[General]\nskip-proxy = %APPEND% three.test\n",
+        "[General]\nskip-proxy = %INSERT% four.test\n",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, text)| inline(&format!("m{i}"), text))
+    .collect::<String>();
+    let profile = profile(&modules, BTreeMap::new());
+    let bypass = host_network(&profile.modules).bypass_domain.unwrap();
+    assert_eq!(bypass.before, ["four.test", "two.test"]);
+    assert_eq!(bypass.after, ["one.test", "three.test"]);
+    assert!(!bypass.replace);
+}
+
+#[test]
 fn a_module_that_cannot_be_read_or_is_named_twice_takes_no_effect() {
     let modules = format!(
         "    - {{name: gone, path: modules/gone.txt}}\n{}{}    - {{name: none}}\n",

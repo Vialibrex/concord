@@ -116,3 +116,79 @@ fn two_million_rules() {
         times[times.len() - 1]
     );
 }
+
+fn url_pattern(i: usize) -> String {
+    match i % 5 {
+        0 => format!(r"^https?://([a-z0-9-]+\.)*ads{i}\.example\.com/"),
+        1 => format!(r"/api/v\d+/track{i}\?"),
+        2 => format!(r"(?i)\.example{i}\.net/.*\.(gif|png)$"),
+        3 => format!(r"^https://cdn{i}\.test/(?!static/)"),
+        _ => format!(r"/collect{i}/"),
+    }
+}
+
+fn url_lines(rules: usize, interleaved: bool) -> Vec<String> {
+    let mut lines = Vec::with_capacity(rules * 2 + 1);
+    for i in 0..rules {
+        if interleaved {
+            lines.push(format!("DOMAIN-SUFFIX,site{i}.example.org,D"));
+        }
+        lines.push(format!("URL-REGEX,{},U{}", url_pattern(i), i % 3));
+    }
+    lines.push("MATCH,FINAL".to_string());
+    lines
+}
+
+fn url_sweep(program: &RouteProgram, kit: &Kit, urls: &[String], rounds: usize) -> Vec<u128> {
+    let mut times = Vec::with_capacity(urls.len() * rounds);
+    for _ in 0..rounds {
+        for url in urls {
+            let meta = Flow::domain("www.unlisted.test").meta();
+            let mut state = concord_common::RouteState::seed(&meta.dst);
+            state.http = Some(std::sync::Arc::new(concord_common::HttpFacts {
+                url: url.as_str().into(),
+                host: "www.unlisted.test".into(),
+                user_agent: None,
+            }));
+            let ctx = MatchCtx::new(&kit.geo);
+            let started = Instant::now();
+            let mut run = program.start();
+            loop {
+                match run.step(&meta, &state, &ctx) {
+                    Step::NeedIp => state.ip_resolved = true,
+                    Step::NeedProcess => state.process_looked_up = true,
+                    Step::NeedScript { id, .. } => state.scripts.push((id, false)),
+                    Step::Candidate { .. } | Step::Done => break,
+                }
+            }
+            times.push(started.elapsed().as_nanos());
+        }
+    }
+    times.sort_unstable();
+    times
+}
+
+#[test]
+#[ignore = "benchmark; run with --release -- --ignored --nocapture"]
+fn url_rules() {
+    let kit = Kit::new();
+    let urls: Vec<String> = (0..64)
+        .map(|i| format!("https://www.unlisted.test/path/{i}/page?q={i}&r=x"))
+        .collect();
+    for interleaved in [false, true] {
+        for rules in [10, 100, 1000] {
+            let text = url_lines(rules, interleaved);
+            let defs = defs(&text.iter().map(String::as_str).collect::<Vec<_>>());
+            let program = RouteProgram::compile(&defs, &Default::default(), &kit.env(8)).unwrap();
+            url_sweep(&program, &kit, &urls, 2);
+            let times = url_sweep(&program, &kit, &urls, 40);
+            let at = |q: f64| times[((times.len() as f64 * q) as usize).min(times.len() - 1)];
+            println!(
+                "url-rules interleaved={interleaved} n={rules} match ns: p50 {} p90 {} p99 {}",
+                at(0.5),
+                at(0.9),
+                at(0.99)
+            );
+        }
+    }
+}

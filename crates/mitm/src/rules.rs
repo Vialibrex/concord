@@ -10,6 +10,7 @@ use concord_config::mitm::{
 };
 use http::StatusCode;
 use http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use sha2::{Digest, Sha256};
 
 use crate::heads::{HeadConditions, Heads};
 use crate::jq::{Jq, JqOutcome};
@@ -319,6 +320,52 @@ pub(crate) fn read_resource(dir: &Path, param: &str, name: &str) -> Result<Vec<u
         .map_err(|_| LineError::resource(format!("{param} {} cannot be read", quote(name))))
 }
 
+/// What compiling a section would take from one of its files.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ResourceSeen {
+    /// The SHA-256 of a file the compile reads whole.
+    Content([u8; 32]),
+    /// A `map-local` file larger than [LOCAL_PIECE]: each answer reads it from disk, so its
+    /// content is not part of what the compile made.
+    ReadAtAnswer,
+}
+
+/// What [read_resource] finds of `name` now, hashed piece by piece, or why it cannot be read.
+pub(crate) fn resource_digest(dir: &Path, name: &str) -> Result<ResourceSeen, LineError> {
+    let (path, _) = resource_file(dir, "file", name)?;
+    digest_file(&path)
+        .map(ResourceSeen::Content)
+        .map_err(|_| LineError::resource(format!("file {} cannot be read", quote(name))))
+}
+
+/// As [resource_digest] for a raw `map-local` file, whose content counts only while
+/// [local_file] keeps it in memory.
+pub(crate) fn local_file_seen(dir: &Path, name: &str) -> Result<ResourceSeen, LineError> {
+    let (path, len) = resource_file(dir, "data", name)?;
+    let unreadable = |_| LineError::resource(format!("data {} cannot be read", quote(name)));
+    if len <= LOCAL_PIECE as u64 {
+        return digest_file(&path)
+            .map(ResourceSeen::Content)
+            .map_err(unreadable);
+    }
+    std::fs::File::open(&path).map_err(unreadable)?;
+    Ok(ResourceSeen::ReadAtAnswer)
+}
+
+fn digest_file(path: &Path) -> std::io::Result<[u8; 32]> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut piece = vec![0; LOCAL_PIECE];
+    loop {
+        match std::io::Read::read(&mut file, &mut piece) {
+            Ok(0) => return Ok(hasher.finalize().into()),
+            Ok(read) => hasher.update(piece.get(..read).unwrap_or_default()),
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// The path and length of a regular file in the resources directory.
 fn resource_file(dir: &Path, param: &str, name: &str) -> Result<(PathBuf, u64), LineError> {
     if name.contains("://") {
@@ -451,6 +498,8 @@ fn first_local<'r>(
     rules.find(|rule| rule.pattern.is_match(url) && heads.allow(&rule.conditions))
 }
 
+pub(crate) use index::{RequestScan, ResponsePlan};
+
 impl Rules {
     pub(crate) fn acts_on_requests(&self) -> bool {
         !self.url_rewrites.is_empty()
@@ -466,12 +515,16 @@ impl Rules {
             })
     }
 
-    pub(crate) fn rewrite_url(
+    pub(crate) fn rewrite_url_from(
         &self,
+        scan: &RequestScan,
         url: &str,
         heads: &Heads<'_>,
     ) -> Option<(&UrlRewrite, String)> {
-        for rule in self.url_rewrite_candidates(url) {
+        for &idx in &scan.url_rewrites {
+            let Some(rule) = self.url_rewrites.get(idx as usize) else {
+                continue;
+            };
             if !rule.pattern.is_match(url) || !heads.request_allows(rule.head.as_ref()) {
                 continue;
             }
@@ -484,51 +537,186 @@ impl Rules {
         None
     }
 
-    pub(crate) fn map_local(&self, url: &str, heads: &Heads<'_>) -> Option<&MapLocal> {
-        first_local(self.map_local_candidates(url), url, heads)
+    pub(crate) fn map_local_from(
+        &self,
+        scan: &RequestScan,
+        url: &str,
+        heads: &Heads<'_>,
+    ) -> Option<&MapLocal> {
+        first_local(
+            scan.map_locals
+                .iter()
+                .filter_map(|&idx| self.map_locals.get(idx as usize)),
+            url,
+            heads,
+        )
     }
 
+    pub(crate) fn request_mock_from(
+        &self,
+        scan: &RequestScan,
+        url: &str,
+        heads: &Heads<'_>,
+    ) -> Option<&MapLocal> {
+        first_local(
+            scan.request_mocks
+                .iter()
+                .filter_map(|&idx| self.request_mocks.get(idx as usize)),
+            url,
+            heads,
+        )
+    }
+
+    pub(crate) fn request_header_rewrites_from(
+        &self,
+        scan: &RequestScan,
+        url: &str,
+        heads: &Heads<'_>,
+    ) -> Vec<&HeaderRewrite> {
+        scan.headers
+            .iter()
+            .filter_map(|&idx| self.header_rewrites.get(idx as usize))
+            .filter(|rule| rule.pattern.is_match(url) && heads.allow(&rule.conditions))
+            .collect()
+    }
+
+    pub(crate) fn request_body_rewrites_from(
+        &self,
+        scan: &RequestScan,
+        url: &str,
+        heads: &Heads<'_>,
+    ) -> Vec<Arc<BodyRewrite>> {
+        scan.bodies
+            .iter()
+            .filter_map(|&idx| self.body_rewrites.get(idx as usize))
+            .filter(|rule| rule.pattern.is_match(url) && heads.allow(&rule.conditions))
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn request_script_from(
+        &self,
+        scan: &RequestScan,
+        url: &str,
+        heads: &Heads<'_>,
+    ) -> Option<&std::sync::Arc<Script>> {
+        scan.scripts
+            .iter()
+            .filter_map(|&idx| self.scripts.get(idx as usize))
+            .find(|script| script.matches_http(url, false) && heads.allow(&script.conditions))
+    }
+
+    pub(crate) fn response_plan_rewrites_body(&self, plan: &ResponsePlan) -> bool {
+        !plan.bodies.is_empty()
+            || plan.scripts.first().is_some_and(|&idx| {
+                self.scripts
+                    .get(idx as usize)
+                    .is_some_and(|script| script.requires_body)
+            })
+    }
+
+    pub(crate) fn response_rules_from(
+        &self,
+        plan: &ResponsePlan,
+        heads: &Heads<'_>,
+    ) -> (
+        Vec<&HeaderRewrite>,
+        Vec<Arc<BodyRewrite>>,
+        Option<&std::sync::Arc<Script>>,
+    ) {
+        let headers = plan
+            .headers
+            .iter()
+            .filter_map(|&idx| self.header_rewrites.get(idx as usize))
+            .filter(|rule| heads.allow(&rule.conditions))
+            .collect();
+        let bodies = plan
+            .bodies
+            .iter()
+            .filter_map(|&idx| self.body_rewrites.get(idx as usize))
+            .filter(|rule| heads.allow(&rule.conditions))
+            .cloned()
+            .collect();
+        let script = plan
+            .scripts
+            .iter()
+            .filter_map(|&idx| self.scripts.get(idx as usize))
+            .find(|script| heads.allow(&script.conditions));
+        (headers, bodies, script)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rewrite_url(
+        &self,
+        url: &str,
+        heads: &Heads<'_>,
+    ) -> Option<(&UrlRewrite, String)> {
+        let scan = self.scan_request(url);
+        self.rewrite_url_from(&scan, url, heads)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn map_local(&self, url: &str, heads: &Heads<'_>) -> Option<&MapLocal> {
+        let scan = self.scan_request(url);
+        self.map_local_from(&scan, url, heads)
+    }
+
+    #[cfg(test)]
     pub(crate) fn request_mock(&self, url: &str, heads: &Heads<'_>) -> Option<&MapLocal> {
-        first_local(self.request_mock_candidates(url), url, heads)
+        let scan = self.scan_request(url);
+        self.request_mock_from(&scan, url, heads)
     }
 
     /// The header rewrites for an exchange, picked before any of them runs so that each
     /// condition reads the head as the phase began.
+    #[cfg(test)]
     pub(crate) fn header_rewrites_for(
         &self,
         url: &str,
         response: bool,
         heads: &Heads<'_>,
     ) -> Vec<&HeaderRewrite> {
-        self.header_rewrite_candidates(url)
-            .filter(|rule| rule.response == response && rule.pattern.is_match(url))
-            .filter(|rule| heads.allow(&rule.conditions))
-            .collect()
+        if response {
+            let plan = self.prepare_response(url);
+            self.response_rules_from(&plan, heads).0
+        } else {
+            let scan = self.scan_request(url);
+            self.request_header_rewrites_from(&scan, url, heads)
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn body_rewrites_for(
         &self,
         url: &str,
         response: bool,
         heads: &Heads<'_>,
     ) -> Vec<Arc<BodyRewrite>> {
-        self.body_rewrite_candidates(url)
-            .filter(|rule| rule.response == response && rule.pattern.is_match(url))
-            .filter(|rule| heads.allow(&rule.conditions))
-            .cloned()
-            .collect()
+        if response {
+            let plan = self.prepare_response(url);
+            self.response_rules_from(&plan, heads).1
+        } else {
+            let scan = self.scan_request(url);
+            self.request_body_rewrites_from(&scan, url, heads)
+        }
     }
 
     /// The first script whose URL and conditions match; one whose conditions do not
     /// leaves the turn to the next.
+    #[cfg(test)]
     pub(crate) fn script_for(
         &self,
         url: &str,
         response: bool,
         heads: &Heads<'_>,
     ) -> Option<&std::sync::Arc<Script>> {
-        self.script_candidates(url)
-            .find(|script| script.matches_http(url, response) && heads.allow(&script.conditions))
+        if response {
+            let plan = self.prepare_response(url);
+            self.response_rules_from(&plan, heads).2
+        } else {
+            let scan = self.scan_request(url);
+            self.request_script_from(&scan, url, heads)
+        }
     }
 }
 
@@ -951,6 +1139,30 @@ mod tests {
             "{:?}",
             large.body
         );
+    }
+
+    #[test]
+    fn a_file_is_hashed_piece_by_piece_and_a_large_map_local_file_not_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let content: Vec<u8> = (0..LOCAL_PIECE * 3 + 7)
+            .map(|at| (at % 251) as u8)
+            .collect();
+        std::fs::write(dir.path().join("large"), &content).unwrap();
+        std::fs::write(dir.path().join("small"), b"small").unwrap();
+        let whole: [u8; 32] = Sha256::digest(&content).into();
+        assert_eq!(
+            resource_digest(dir.path(), "large"),
+            Ok(ResourceSeen::Content(whole))
+        );
+        assert_eq!(
+            local_file_seen(dir.path(), "large"),
+            Ok(ResourceSeen::ReadAtAnswer)
+        );
+        assert_eq!(
+            local_file_seen(dir.path(), "small"),
+            Ok(ResourceSeen::Content(Sha256::digest(b"small").into()))
+        );
+        assert!(local_file_seen(dir.path(), "gone").is_err());
     }
 
     #[test]

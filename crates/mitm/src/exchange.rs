@@ -18,7 +18,7 @@ use crate::capture::{AnsweredBy, Cap};
 use crate::forward::request_text;
 use crate::headers::{remove_hop_by_hop, text, to_list, version_text, with_host};
 use crate::heads::Heads;
-use crate::rules::{LocalBody, UrlAction, tiny_gif};
+use crate::rules::{LocalBody, RequestScan, UrlAction, tiny_gif};
 use crate::session::{ActivityGuard, Routed, Session};
 use crate::target::{TargetUrl, default_port};
 
@@ -71,6 +71,15 @@ pub(crate) struct Target {
     pub cap: Cap,
 }
 
+impl Target {
+    pub(crate) fn request_id(&mut self) -> String {
+        if self.id.is_empty() {
+            self.id = new_request_id();
+        }
+        self.id.clone()
+    }
+}
+
 /// The request about to go upstream.
 pub(crate) struct OutRequest {
     pub method: Method,
@@ -102,6 +111,26 @@ pub(crate) struct Sent {
     pub url: TargetUrl,
     pub headers: HeaderMap,
     pub host: String,
+}
+
+impl Sent {
+    /// The request as sent, with its headers only when a response rule reads them.
+    fn of(out: &OutRequest, with_headers: bool) -> Sent {
+        Sent {
+            method: out.method.clone(),
+            url: out.url.clone(),
+            headers: if with_headers {
+                out.headers.clone()
+            } else {
+                HeaderMap::new()
+            },
+            host: if with_headers {
+                out.host_header()
+            } else {
+                String::new()
+            },
+        }
+    }
 }
 
 /// Keeps `Content-Length` true to the body, which has a length only when it is known.
@@ -423,13 +452,18 @@ impl Session {
         &self,
         out: &mut OutRequest,
         target: &mut Target,
+        scan: &mut RequestScan,
     ) -> Option<(StatusCode, HeaderMap, LocalBody)> {
-        self.rewrite_request_headers(out, target);
+        if self.rewrite_request_headers(out, target, scan) {
+            *scan = self.core.config.rules.scan_request(&out.url.raw);
+        }
         target.url = out.url.clone();
-        let answer = {
+        let answer = if scan.url_rewrites.is_empty() && scan.map_locals.is_empty() {
+            None
+        } else {
             let version = target.version;
             let head = || request_text(out, version);
-            self.answer_locally(&Heads::new(Some(&head), None), target)
+            self.answer_locally(&Heads::new(Some(&head), None), target, scan)
         };
         if answer.is_none() && target.rewritten {
             out.url = target.url.clone();
@@ -444,9 +478,10 @@ impl Session {
         &self,
         heads: &Heads<'_>,
         target: &mut Target,
+        scan: &mut RequestScan,
     ) -> Option<(StatusCode, HeaderMap, LocalBody)> {
         let rules = &self.core.config.rules;
-        if let Some((rule, replaced)) = rules.rewrite_url(&target.url.raw, heads) {
+        if let Some((rule, replaced)) = rules.rewrite_url_from(scan, &target.url.raw, heads) {
             match rule.action {
                 UrlAction::Redirect302 | UrlAction::Redirect307 => {
                     target.cap.note(
@@ -488,6 +523,7 @@ impl Session {
                         tracing::info!("[MITM] rewrite {} --> {}", target.url.raw, rewritten.raw);
                         target.url = rewritten;
                         target.rewritten = true;
+                        *scan = rules.scan_request(&target.url.raw);
                     }
                     None => tracing::warn!(
                         "[MITM] rewrite of {} gave {replaced:?}, which is not an http or https URL",
@@ -509,7 +545,7 @@ impl Session {
                 }
             }
         }
-        let rule = rules.map_local(&target.url.raw, heads)?;
+        let rule = rules.map_local_from(scan, &target.url.raw, heads)?;
         target.cap.note("map-local", "", "", rule.module.as_deref());
         self.answered(target, AnsweredBy::MapLocal, RULE_MAP_LOCAL, rule.source());
         tracing::info!("[MITM] map local {}", target.url.raw);
@@ -570,23 +606,16 @@ impl Session {
             has_body,
             length,
         };
-        if let Some((status, headers, data)) = self.rewrite_head(&mut out, &mut target) {
+        let mut scan = self.core.config.rules.scan_request(&out.url.raw);
+        if let Some((status, headers, data)) = self.rewrite_head(&mut out, &mut target, &mut scan) {
             return Ok(answer_local(&cap, status, headers, data, guard).await);
         }
-        if !self.core.config.rules.scripts.is_empty() {
-            target.id = new_request_id();
-        }
         tracing::debug!("[MITM] {} {}", out.method, target.url.raw);
-        self.rewrite_request(&mut out, &mut target).await;
+        let resp_plan = self.rewrite_request(&mut out, &mut target, &scan).await;
         if target.abort {
             return Err(aborted(&cap, "aborted by a script"));
         }
-        let sent = Sent {
-            method: out.method.clone(),
-            url: out.url.clone(),
-            headers: out.headers.clone(),
-            host: out.host_header(),
-        };
+        let sent = Sent::of(&out, resp_plan.needs_sent_headers);
         let (mut head, body, upstream_upgrade) = match target.answer.take() {
             Some(answer) => {
                 let mut head = Response::new(()).into_parts().0;
@@ -602,7 +631,7 @@ impl Session {
                 let (mut head, incoming) = response.into_parts();
                 let mut body = from_incoming(incoming);
                 match self
-                    .rewrite_response(&mut head, &mut body, &sent, &mut target)
+                    .rewrite_response(&mut head, &mut body, &sent, &mut target, &resp_plan)
                     .await
                 {
                     Ok(()) => {}

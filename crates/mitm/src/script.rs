@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -164,6 +165,8 @@ pub trait ScriptProgram: Send + Sync {
 pub struct ScriptHost {
     runtime: Mutex<Option<Arc<dyn ScriptRuntime>>>,
     programs: Mutex<HashMap<[u8; 32], Arc<dyn ScriptProgram>>>,
+    /// Counts the runtimes set, so a section compiled under another one compiles again.
+    generation: AtomicU64,
 }
 
 impl ScriptHost {
@@ -171,7 +174,12 @@ impl ScriptHost {
         ScriptHost {
             runtime: Mutex::new(runtime),
             programs: Mutex::default(),
+            generation: AtomicU64::new(0),
         }
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     pub fn set_runtime(&self, runtime: Option<Arc<dyn ScriptRuntime>>) {
@@ -183,6 +191,7 @@ impl ScriptHost {
             let mut programs = lock(&self.programs);
             programs.clear();
         }
+        self.generation.fetch_add(1, Ordering::AcqRel);
     }
 
     fn compile(
@@ -209,8 +218,9 @@ impl ScriptHost {
 
     pub(crate) fn keep(&self, scripts: &[Arc<Script>]) {
         {
+            let keys: HashSet<&[u8; 32]> = scripts.iter().map(|script| &script.key).collect();
             let mut programs = lock(&self.programs);
-            programs.retain(|key, _| scripts.iter().any(|script| &script.key == key));
+            programs.retain(|key, _| keys.contains(key));
         }
     }
 }

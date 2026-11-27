@@ -1179,3 +1179,208 @@ fn a_rule_set_leaves_out_its_script_rules() {
             .all(|warning| warning.contains("SCRIPT"))
     );
 }
+
+fn classical(kit: &Kit, entries: &[&str]) -> RuleSet {
+    let entries: Vec<String> = entries.iter().map(|e| e.to_string()).collect();
+    RuleSet::from_entries(Behavior::Classical, &entries, &kit.env(8)).set
+}
+
+#[test]
+fn whether_a_program_reads_http_follows_its_classical_sets_as_they_change() {
+    let kit = Kit::new();
+    let first = kit.sets.declare("first", Behavior::Classical);
+    let second = kit.sets.declare("second", Behavior::Classical);
+    let staged = kit.sets.declare("staged", Behavior::Classical);
+    fill(&kit, "domains", Behavior::Domain, &["a.test"]);
+    fill(&kit, "ips", Behavior::IpCidr, &["10.0.0.0/8"]);
+    let program = kit.compile(
+        &[
+            "RULE-SET,first,A",
+            "RULE-SET,first,B,src",
+            "RULE-SET,second,C,no-resolve",
+            "RULE-SET,domains,D",
+            "RULE-SET,ips,E",
+            "MATCH,F",
+        ],
+        8,
+    );
+    let other = kit.compile(&["RULE-SET,first,X", "MATCH,Y"], 8);
+    let check = |want: bool| {
+        for program in [&program, &other] {
+            assert_eq!(program.reads_http(), program.demands().http);
+        }
+        assert_eq!(program.reads_http(), want);
+    };
+    check(false);
+
+    assert!(first.store(classical(&kit, &[r"URL-REGEX,^https://a\.test/"])));
+    check(true);
+    assert!(other.reads_http());
+    assert!(second.store(classical(&kit, &["USER-AGENT,Bot*"])));
+    check(true);
+    assert!(first.store(classical(&kit, &["DOMAIN,a.test"])));
+    check(true);
+    assert!(!other.reads_http());
+    assert!(second.store(classical(&kit, &[])));
+    check(false);
+
+    assert!(staged.store(classical(&kit, &[r"URL-REGEX,/ad"])));
+    assert!(first.take_from(&staged));
+    check(true);
+    assert!(staged.store(classical(&kit, &[])));
+    assert!(first.take_from(&staged));
+    check(false);
+
+    assert!(!first.store(RuleSet::empty(Behavior::Domain)));
+    assert!(!first.take_from(&kit.sets.declare("domains", Behavior::Domain)));
+    check(false);
+}
+
+#[test]
+fn a_program_with_its_own_http_rule_reads_http_whatever_its_sets_hold() {
+    let kit = Kit::new();
+    fill(&kit, "empty", Behavior::Classical, &[]);
+    let program = kit.compile(&["RULE-SET,empty,A", "URL-REGEX,/ad,B"], 8);
+    assert!(program.reads_http());
+    assert_eq!(program.reads_http(), program.demands().http);
+}
+
+fn url_runs(program: &RouteProgram) -> Vec<usize> {
+    program
+        .progs
+        .iter()
+        .map(|prog| prog.url_runs.len())
+        .collect()
+}
+
+#[test]
+fn a_url_run_offers_each_matching_rule_in_list_order() {
+    let kit = Kit::new();
+    let lines = [
+        r"URL-REGEX,^https://a\.test/,PASS",
+        r"URL-REGEX,/(\w)\1/,A",
+        "URL-REGEX,/never,B",
+        "URL-REGEX,(?<=/)ad,C",
+        "URL-REGEX,(?i)/AD,D",
+        "DOMAIN,a.test,E",
+        "MATCH,F",
+    ];
+    for merge in MERGES {
+        let program = kit.compile(&lines, merge);
+        assert_eq!(url_runs(&program)[0], usize::from(merge == 2));
+        let flow = request("a.test", "https://a.test/ad", None);
+        let all = drive(&program, &kit.geo, &flow, false);
+        let want: Vec<(usize, String)> = [(0, "PASS"), (3, "C"), (4, "D"), (5, "E"), (6, "F")]
+            .map(|(index, target)| (index, target.to_string()))
+            .into();
+        assert_eq!(all.candidates, want, "merge {merge}");
+        assert_eq!(accepted(&kit, &program, &flow), pick(3, "C"));
+        let twice = request("a.test", "https://a.test/xx/", None);
+        assert_eq!(accepted(&kit, &program, &twice), pick(1, "A"));
+        let other = request("b.test", "https://b.test/AD", None);
+        assert_eq!(accepted(&kit, &program, &other), pick(4, "D"));
+        assert!(!drive(&program, &kit.geo, &other, true).http_pending);
+    }
+}
+
+#[test]
+fn a_url_run_in_a_sub_rule_list_passes_on_to_the_list_after_it() {
+    let kit = Kit::new();
+    let inner: &[&str] = &[
+        "URL-REGEX,/ad,PASS-RULE",
+        "URL-REGEX,/ad,PASS",
+        "URL-REGEX,(?<!x)/ad,IN",
+        "URL-REGEX,/ad,LATE",
+    ];
+    for merge in MERGES {
+        let program = kit.compile_with(
+            &[
+                "SUB-RULE,(DOMAIN,a.test),inner",
+                "URL-REGEX,/ad,OUT",
+                "MATCH,F",
+            ],
+            &[("inner", inner)],
+            merge,
+        );
+        assert_eq!(url_runs(&program)[1], usize::from(merge == 2));
+        let flow = request("a.test", "https://a.test/ad", None);
+        let all = drive(&program, &kit.geo, &flow, false);
+        let want: Vec<(usize, String)> = [(0, "PASS-RULE"), (0, "PASS"), (1, "OUT"), (2, "F")]
+            .map(|(index, target)| (index, target.to_string()))
+            .into();
+        assert_eq!(all.candidates, want, "merge {merge}");
+    }
+}
+
+#[test]
+fn a_url_run_waits_for_the_request_only_when_reached_undecided() {
+    let kit = Kit::new();
+    let lines = [
+        "DOMAIN,a.test,A",
+        "URL-REGEX,/one,B",
+        "URL-REGEX,/two,C",
+        r"URL-REGEX,/(\w)\1$,D",
+        "MATCH,F",
+    ];
+    for merge in MERGES {
+        let program = kit.compile(&lines, merge);
+        assert!(program.reads_http());
+        let decided = drive(&program, &kit.geo, &Flow::domain("a.test"), true);
+        assert_eq!(decided.accepted, pick(0, "A"));
+        assert!(!decided.http_pending);
+        let unread = drive(&program, &kit.geo, &Flow::domain("b.test"), true);
+        assert_eq!(unread.accepted, pick(4, "F"));
+        assert!(unread.http_pending);
+        let none = drive(
+            &program,
+            &kit.geo,
+            &request("b.test", "https://b.test/x", None),
+            true,
+        );
+        assert_eq!(none.accepted, pick(4, "F"));
+        assert!(!none.http_pending);
+        let both = request("b.test", "https://b.test/two/ll", None);
+        assert_eq!(accepted(&kit, &program, &both), pick(2, "C"));
+        let fancy = request("b.test", "https://b.test/ll", None);
+        assert_eq!(accepted(&kit, &program, &fancy), pick(3, "D"));
+    }
+}
+
+#[test]
+fn url_rules_in_a_classical_set_match_as_a_run() {
+    let kit = Kit::new();
+    let mut entries = vec![r"URL-REGEX,(?<=/)deep"];
+    entries.extend(["URL-REGEX,/x"; 9]);
+    entries.push("URL-REGEX,/ad");
+    fill(&kit, "urls", Behavior::Classical, &entries);
+    let program = kit.compile(&["RULE-SET,urls,REJECT", "MATCH,PROXY"], 8);
+    let unread = drive(&program, &kit.geo, &Flow::domain("a.test"), true);
+    assert_eq!(unread.accepted, pick(1, "PROXY"));
+    assert!(unread.http_pending);
+    for (url, want) in [
+        ("https://a.test/ad", pick(0, "REJECT")),
+        ("https://a.test/deep", pick(0, "REJECT")),
+        ("https://a.test/y", pick(1, "PROXY")),
+    ] {
+        let flow = request("a.test", url, None);
+        assert_eq!(accepted(&kit, &program, &flow), want, "{url}");
+    }
+}
+
+#[test]
+fn a_url_run_rejects_a_bad_pattern_as_a_lone_rule_does() {
+    let kit = Kit::new();
+    let mut rules = defs(&["URL-REGEX,/a,A", "URL-REGEX,/b,B", "URL-REGEX,/c,C"]);
+    rules[1].cond = Cond::UrlRegex("/(".into());
+    let errors = [1, 1000].map(|merge| {
+        let err = RouteProgram::compile(&rules, &IndexMap::new(), &kit.env(merge))
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&err, CompileError::Invalid { index: 1, .. }),
+            "{err}"
+        );
+        err.to_string()
+    });
+    assert_eq!(errors[0], errors[1]);
+}

@@ -1,7 +1,7 @@
 use concord_config::rule::{Cond, RuleDef};
 
 use crate::eval::{Ev, EvResult, Node, has_domain_suffix};
-use crate::runs::{DomainRun, IpRun};
+use crate::runs::{DomainRun, IpRun, UrlRun};
 use crate::table::RuleTable;
 
 #[derive(Clone, Copy)]
@@ -40,6 +40,7 @@ pub(crate) enum Op {
     },
     Domain(u32),
     Ip(u32),
+    Url(u32),
 }
 
 /// One compiled rule list: the main list, a sub-rule list, or a classical rule set.
@@ -50,6 +51,7 @@ pub(crate) struct Prog {
     pub(crate) nodes: Box<[Node]>,
     pub(crate) domain_runs: Box<[DomainRun]>,
     pub(crate) ip_runs: Box<[IpRun]>,
+    pub(crate) url_runs: Box<[UrlRun]>,
 }
 
 impl Prog {
@@ -63,6 +65,7 @@ impl Prog {
                 .map(DomainRun::heap_bytes)
                 .sum::<usize>()
             + self.ip_runs.iter().map(IpRun::heap_bytes).sum::<usize>()
+            + self.url_runs.iter().map(UrlRun::heap_bytes).sum::<usize>()
     }
 
     /// True when any rule of the list holds, evaluated in order.
@@ -105,6 +108,22 @@ impl Prog {
                     };
                     if ip.is_some_and(|ip| run.next_from(ip, run.start).is_some()) {
                         return Ok(true);
+                    }
+                }
+                Op::Url(run) => {
+                    let Some(run) = self.url_runs.get(*run as usize) else {
+                        continue;
+                    };
+                    match &ev.state.http {
+                        Some(http) => {
+                            if run.next_from(&http.url, run.start).is_some() {
+                                return Ok(true);
+                            }
+                        }
+                        None => {
+                            ev.http_gap = true;
+                            unknown = true;
+                        }
                     }
                 }
             }

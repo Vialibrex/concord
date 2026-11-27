@@ -1038,3 +1038,186 @@ async fn a_notice_on_a_request_bound_elsewhere_names_no_connection_until_it_is_s
         "the response names the connection to other.test: {named:?}"
     );
 }
+
+#[tokio::test]
+async fn stage_boundaries_rescan_url_after_whole_head_url_rewrite_and_request_script() {
+    let seen_ids = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let req_ids = seen_ids.clone();
+    let req_script = sync_program(move |inv| {
+        lock(&req_ids).push(inv.request.as_ref().unwrap().id.clone());
+        Ok(ScriptResult {
+            url: "https://example.test/three".to_string(),
+            ..ScriptResult::default()
+        })
+    });
+    let resp_ids = seen_ids.clone();
+    let resp_script = sync_program(move |inv| {
+        lock(&resp_ids).push(inv.request.as_ref().unwrap().id.clone());
+        let mut header = inv.response.as_ref().unwrap().header.clone();
+        header.insert("X-Resp-Script".to_string(), vec!["ran".to_string()]);
+        Ok(ScriptResult {
+            header: Some(header),
+            ..ScriptResult::default()
+        })
+    });
+
+    // Case A: whole-head rewrites /A%2fb?q=%2B -> /one, url-rewrite -> /two, map-local hits /two.
+    let (_server, rig) = scripted(vec![("req", req_script), ("resp", resp_script)]).await;
+    let errors = rig.config(json!({
+        "enable": true,
+        "hostname": ["example.test"],
+        "skip-server-cert-verify": true,
+        "header-rewrite": [
+            r"http-request ^https://example\.test/A%2fb\?q=%2B header-text-replace ^(GET\s+)/A%2fb\?q=%2B(\s+HTTP/) $1/one$2",
+        ],
+        "url-rewrite": [
+            r"^https://example\.test/one https://example.test/two header",
+        ],
+        "map-local": [
+            r#"^https://example\.test/two data-type=text data="local-two" status-code=200"#,
+        ],
+    }));
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+    let reply = client.get("/A%2fb?q=%2B").await;
+    assert_eq!(reply.text(), "local-two");
+
+    // Case B: no map-local; request script rewrites /two -> /three; response rules + script hit /three
+    // and both request & response scripts receive the same non-empty request ID.
+    let errors = rig.config(json!({
+        "enable": true,
+        "hostname": ["example.test"],
+        "skip-server-cert-verify": true,
+        "header-rewrite": [
+            r"http-request ^https://example\.test/A%2fb\?q=%2B header-text-replace ^(GET\s+)/A%2fb\?q=%2B(\s+HTTP/) $1/one$2",
+            r"http-response ^https://example\.test/three header-add X-Resp-Rule yes",
+        ],
+        "url-rewrite": [
+            r"^https://example\.test/one https://example.test/two header",
+        ],
+        "script": [
+            r"req = type=http-request,pattern=^https://example\.test/two,script-path=req.js",
+            r"resp = type=http-response,pattern=^https://example\.test/three,script-path=resp.js",
+        ],
+    }));
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+    let reply = client.get("/A%2fb?q=%2B").await;
+    assert_eq!(reply.header("x-resp-rule"), "yes");
+    assert_eq!(reply.header("x-resp-script"), "ran");
+    let ids = lock(&seen_ids).clone();
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    assert!(!ids[0].is_empty() && ids[0] == ids[1], "{ids:?}");
+}
+
+#[tokio::test]
+async fn response_precheck_preserves_identity_fallback_sent_headers_and_response_only_id() {
+    use crate::testing::{Service, start_service};
+    use http_body_util::BodyExt as _;
+
+    let saw_accept_encoding = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let mode_on = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ae_log = saw_accept_encoding.clone();
+    let mode_flag = mode_on.clone();
+    let service: Service = Arc::new(move |req| {
+        let ae = req
+            .headers()
+            .get(http::header::ACCEPT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        lock(&ae_log).push(ae);
+        let on = mode_flag.load(std::sync::atomic::Ordering::Relaxed);
+        Box::pin(async move {
+            let mut builder = http::Response::builder().status(200);
+            if on {
+                builder = builder.header("X-Mode", "on");
+            }
+            builder
+                .body(
+                    http_body_util::Full::new(bytes::Bytes::from_static(b"body"))
+                        .map_err(|never| match never {})
+                        .boxed(),
+                )
+                .unwrap()
+        })
+    });
+
+    let ran = Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let ran1 = ran.clone();
+    let first = sync_program(move |inv| {
+        lock(&ran1).push((
+            "first".to_string(),
+            inv.request.as_ref().unwrap().id.clone(),
+        ));
+        Ok(ScriptResult::default())
+    });
+    let ran2 = ran.clone();
+    let second = sync_program(move |inv| {
+        lock(&ran2).push((
+            "second".to_string(),
+            inv.request.as_ref().unwrap().id.clone(),
+        ));
+        Ok(ScriptResult::default())
+    });
+
+    let server = start_service(&["http/1.1"], service).await;
+    let mut runtime = FakeRuntime::default();
+    runtime.0.insert("first".into(), first);
+    runtime.0.insert("second".into(), second);
+    let rig = rig_for(&server, Some(Arc::new(runtime) as Arc<dyn ScriptRuntime>));
+    std::fs::create_dir_all(rig.resources()).unwrap();
+    std::fs::write(rig.resources().join("first.js"), "first").unwrap();
+    std::fs::write(rig.resources().join("second.js"), "second").unwrap();
+
+    // Two response scripts on the same URL: first requires-body + X-Mode: on, second unconditional.
+    let errors = rig.config(json!({
+        "enable": true,
+        "hostname": ["example.test"],
+        "skip-server-cert-verify": true,
+        "script": [
+            r"s1 = type=http-response,pattern=^https://example\.test/item,requires-body=1,response-head=X-Mode:\s*on,script-path=first.js",
+            r"s2 = type=http-response,pattern=^https://example\.test/item,script-path=second.js",
+        ],
+    }));
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+    client.get("/item").await;
+    mode_on.store(true, std::sync::atomic::Ordering::Relaxed);
+    client.get("/item").await;
+
+    let ae = lock(&saw_accept_encoding).clone();
+    assert_eq!(ae, vec!["identity", "identity"]);
+    let log = lock(&ran).clone();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!(log[0].0, "second");
+    assert!(
+        !log[0].1.is_empty(),
+        "response-only script must have non-empty request ID"
+    );
+    assert_eq!(log[1].0, "first");
+    assert!(!log[1].1.is_empty());
+
+    // Response header rewrite with request-head condition sees rewritten request header even with NO scripts.
+    let errors = rig.config(json!({
+        "enable": true,
+        "hostname": ["example.test"],
+        "skip-server-cert-verify": true,
+        "header-rewrite": [
+            r"http-request ^https://example\.test/cond header-add X-Tag matched",
+            r"http-response ^https://example\.test/cond request-head X-Tag:\s*matched header-add X-Saw-Tag yes",
+        ],
+    }));
+    assert!(errors.is_empty(), "{errors:?}");
+    let mut client = Client::tls(&rig, "example.test", 443, &["http/1.1"])
+        .await
+        .unwrap();
+    let reply = client.get("/cond").await;
+    assert_eq!(reply.header("x-saw-tag"), "yes");
+}

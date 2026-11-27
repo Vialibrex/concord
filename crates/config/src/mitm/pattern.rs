@@ -1,11 +1,45 @@
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
-use fancy_regex::{Expr, Regex};
+use fancy_regex::{Assertion, Expr, Regex};
 use regex_syntax::ast::{self, Ast, ClassSetItem, Flag, FlagsItemKind, GroupKind, Visitor};
 use regex_syntax::hir::translate::Translator;
 
 use super::issue::{IssueKind, LineError};
+
+/// Returns the cooked `regex`-crate pattern iff `fancy-regex` delegates `source` wholly to
+/// `regex-automata` with identical semantics (no lookaround, backreference, atomic group, etc.).
+pub fn delegatable_regex(source: &str) -> Option<String> {
+    let tree = Expr::parse_tree(source).ok()?;
+    if !is_pure_regex(&tree.expr) {
+        return None;
+    }
+    let mut cooked = String::with_capacity(source.len());
+    tree.expr.to_str(&mut cooked, 0);
+    regex_syntax::parse(&cooked).ok()?;
+    Some(cooked)
+}
+
+fn is_pure_regex(expr: &Expr) -> bool {
+    match expr {
+        Expr::Empty | Expr::Any { .. } | Expr::Literal { .. } | Expr::Delegate { .. } => true,
+        Expr::Assertion(assertion) => matches!(
+            assertion,
+            Assertion::StartText
+                | Assertion::EndText
+                | Assertion::StartLine { .. }
+                | Assertion::EndLine { .. }
+                | Assertion::WordBoundary
+                | Assertion::NotWordBoundary
+                | Assertion::LeftWordBoundary
+                | Assertion::RightWordBoundary
+        ),
+        Expr::Concat(parts) | Expr::Alt(parts) => parts.iter().all(is_pure_regex),
+        Expr::Group(sub) => is_pure_regex(sub),
+        Expr::Repeat { child, .. } => is_pure_regex(child),
+        _ => false,
+    }
+}
 
 /// A line's regex as fancy-regex takes it. ICU (Apple's NSRegularExpression) and ECMAScript
 /// read `\cX` as the control character X & 0x1F, which fancy-regex rejects as an escape.
@@ -122,6 +156,84 @@ impl Visitor for CannotFail {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both users put the cooked sources of a run of patterns into one `RegexSet`.
+    #[test]
+    fn a_delegated_pattern_matches_in_a_set_as_fancy_regex_matches_it() {
+        let patterns = [
+            r"(?i)^https://a\.test/path",
+            r"(?i)kelvin",
+            r"(?i)ſtart",
+            r"(?i)STRASSE",
+            r"(?i:é)T",
+            r"(?i)[a-c]+x",
+            r"(?m)^second",
+            r"(?m)line$",
+            r"^line2",
+            r"line1$",
+            r"(?m)\Aline1",
+            r"(?m)line2\z",
+            r"(?s)path.second",
+            r"path.second",
+            r"(?ms)^line1.line2$",
+            r"(?m)^$",
+            r"(?mR)^line2$",
+            r"\bbar\b",
+            r"\Bbar",
+            r"\b{start}foo",
+            r"foo\b{end}",
+            r"\b{start}bar\b{end}",
+            r"\w+é",
+            r"(?x) a \. test  # comment",
+            r"\d{2,}",
+        ];
+        let texts = [
+            "https://a.test/path\nsecond line",
+            "HTTPS://A.TEST/PATH",
+            "https://a.test/\u{212A}elvin",
+            "KELVIN",
+            "START",
+            "strasse",
+            "ÉT",
+            "ABCX",
+            "line1\nline2\n",
+            "line1\r\nline2\r\n",
+            "line1\n\nline2",
+            "foo bar",
+            "foobar",
+            "barfoo bar_",
+            "café",
+            "a.test",
+            "12",
+            "",
+        ];
+        let left: Vec<&str> = patterns
+            .iter()
+            .filter(|source| delegatable_regex(source).is_none())
+            .copied()
+            .collect();
+        assert!(left.is_empty(), "not delegated: {left:?}");
+        assert_eq!(delegatable_regex(r"(?-u:\w)+"), None);
+        let cooked: Vec<String> = patterns
+            .iter()
+            .filter_map(|source| delegatable_regex(source))
+            .collect();
+        let set = regex::RegexSet::new(&cooked).unwrap();
+        let fancy: Vec<fancy_regex::Regex> = patterns
+            .iter()
+            .map(|source| fancy_regex::Regex::new(source).unwrap())
+            .collect();
+        for text in texts {
+            let in_set = set.matches(text);
+            for (at, (source, regex)) in patterns.iter().zip(&fancy).enumerate() {
+                assert_eq!(
+                    in_set.matched(at),
+                    regex.is_match(text).unwrap(),
+                    "{source} on {text:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_control_escape_compiles() {

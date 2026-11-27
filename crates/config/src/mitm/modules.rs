@@ -3,7 +3,7 @@
 //! rule providers, their DNS and hosts entries edit the profile's own, and their section lines
 //! follow the profile's, each remote file a line reads named by the file it is stored in.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -374,29 +374,35 @@ pub fn script_names(own: &MitmDef, modules: &[AppliedModule], kind: ScriptKind) 
         .collect()
 }
 
-fn joined<T: Clone>(a: &[T], b: &[T]) -> Vec<T> {
-    [a, b].concat()
+/// Puts `next` after what `merged` edits so far.
+fn edit_after(merged: &mut Option<ListEdit>, next: &Option<ListEdit>) {
+    if let Some(next) = next {
+        *merged = Some(match merged.take() {
+            Some(earlier) => earlier.then(next.clone()),
+            None => next.clone(),
+        });
+    }
 }
 
 fn merged_network<'a>(modules: impl Iterator<Item = &'a AppliedModule>) -> NetworkDef {
-    let edit = |a: &Option<ListEdit>, b: &Option<ListEdit>| match (a, b) {
-        (Some(a), Some(b)) => Some(a.clone().then(b.clone())),
-        (a, b) => a.clone().or_else(|| b.clone()),
-    };
-    modules.fold(NetworkDef::default(), |merged, module| {
+    let mut merged = NetworkDef::default();
+    for module in modules {
         let next = &module.def.network;
-        NetworkDef {
-            nameserver: edit(&merged.nameserver, &next.nameserver),
-            default_nameserver: edit(&merged.default_nameserver, &next.default_nameserver),
-            fake_ip_filter: edit(&merged.fake_ip_filter, &next.fake_ip_filter),
-            nameserver_policy: joined(&merged.nameserver_policy, &next.nameserver_policy),
-            hosts: joined(&merged.hosts, &next.hosts),
-            route_address: joined(&merged.route_address, &next.route_address),
-            route_exclude_address: edit(&merged.route_exclude_address, &next.route_exclude_address),
-            bypass_domain: edit(&merged.bypass_domain, &next.bypass_domain),
-            lines: Vec::new(),
-        }
-    })
+        edit_after(&mut merged.nameserver, &next.nameserver);
+        edit_after(&mut merged.default_nameserver, &next.default_nameserver);
+        edit_after(&mut merged.fake_ip_filter, &next.fake_ip_filter);
+        merged
+            .nameserver_policy
+            .extend_from_slice(&next.nameserver_policy);
+        merged.hosts.extend_from_slice(&next.hosts);
+        merged.route_address.extend_from_slice(&next.route_address);
+        edit_after(
+            &mut merged.route_exclude_address,
+            &next.route_exclude_address,
+        );
+        edit_after(&mut merged.bypass_domain, &next.bypass_domain);
+    }
+    merged
 }
 
 /// What of the modules' network requests the host carries out: TUN routes and the system
@@ -430,8 +436,12 @@ fn edit_list(map: &mut Map, key: &str, edit: &ListEdit) {
 /// that writes it, as Surge adds up `[Ruleset]` sections of one name.
 fn rule_sets<'a>(modules: impl Iterator<Item = &'a AppliedModule>) -> Vec<RuleSetDef> {
     let mut sets: Vec<RuleSetDef> = Vec::new();
+    let mut named: HashMap<&str, usize> = HashMap::new();
     for set in modules.flat_map(|module| &module.def.rule_sets) {
-        match sets.iter_mut().find(|known| known.name == set.name) {
+        match named
+            .get(set.name.as_str())
+            .and_then(|&at| sets.get_mut(at))
+        {
             Some(known) => {
                 if let (RuleSetSource::Inline { rules }, RuleSetSource::Inline { rules: more }) =
                     (&mut known.source, &set.source)
@@ -439,7 +449,10 @@ fn rule_sets<'a>(modules: impl Iterator<Item = &'a AppliedModule>) -> Vec<RuleSe
                     rules.extend(more.iter().cloned());
                 }
             }
-            None => sets.push(set.clone()),
+            None => {
+                named.insert(&set.name, sets.len());
+                sets.push(set.clone());
+            }
         }
     }
     sets

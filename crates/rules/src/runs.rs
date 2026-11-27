@@ -5,6 +5,8 @@ use std::net::IpAddr;
 
 use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
 use concord_config::filter::Matcher;
+use concord_config::mitm::delegatable_regex;
+use regex::RegexSet;
 
 use crate::eval::Ev;
 use crate::index::{HashIdx, SuffixHash, hash_key};
@@ -305,5 +307,75 @@ impl IpRun {
             }
         }
         (best != u32::MAX).then_some(best)
+    }
+}
+
+/// A run of `URL-REGEX` rules. Patterns fancy-regex hands whole to the `regex` engine are
+/// matched together in one set; the rest are tried one at a time, in list order.
+pub(crate) struct UrlRun {
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+    set: Option<(RegexSet, Box<[u32]>)>,
+    fancy: Box<[(u32, fancy_regex::Regex)]>,
+}
+
+impl UrlRun {
+    pub(crate) fn build(start: u32, end: u32, items: Vec<(u32, fancy_regex::Regex)>) -> UrlRun {
+        let mut sources = Vec::new();
+        let mut owners = Vec::new();
+        let mut delegated = Vec::new();
+        let mut fancy = Vec::new();
+        for (idx, regex) in items {
+            match delegatable_regex(regex.as_str()) {
+                Some(cooked) => {
+                    sources.push(cooked);
+                    owners.push(idx);
+                    delegated.push((idx, regex));
+                }
+                None => fancy.push((idx, regex)),
+            }
+        }
+        let set = match RegexSet::new(&sources) {
+            Ok(set) if !sources.is_empty() => Some((set, owners.into_boxed_slice())),
+            _ => {
+                fancy.append(&mut delegated);
+                fancy.sort_unstable_by_key(|(idx, _)| *idx);
+                None
+            }
+        };
+        UrlRun {
+            start,
+            end,
+            set,
+            fancy: fancy.into_boxed_slice(),
+        }
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.set.as_ref().map_or(0, |(_, owners)| owners.len() * 4)
+            + self.fancy.len() * std::mem::size_of::<(u32, fancy_regex::Regex)>()
+    }
+
+    /// The smallest rule index in `from..end` whose pattern matches `url`.
+    pub(crate) fn next_from(&self, url: &str, from: u32) -> Option<u32> {
+        let from = from.max(self.start);
+        let best = self.set.as_ref().and_then(|(set, owners)| {
+            set.matches(url)
+                .iter()
+                .filter_map(|at| owners.get(at).copied())
+                .find(|idx| *idx >= from)
+        });
+        for (idx, regex) in self.fancy.iter() {
+            if *idx < from {
+                continue;
+            }
+            if best.is_some_and(|best| *idx >= best) {
+                break;
+            }
+            if regex.is_match(url).unwrap_or(false) {
+                return Some(*idx);
+            }
+        }
+        best
     }
 }

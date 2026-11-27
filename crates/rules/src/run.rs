@@ -5,6 +5,7 @@ use crate::eval::{Ev, Node, Yield};
 use crate::observed::Observed;
 use crate::prog::{Op, host_holds};
 use crate::program::{MatchCtx, RouteProgram, RuleRef, Step};
+use crate::runs::{IpRun, UrlRun};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Frame {
@@ -17,6 +18,17 @@ pub(crate) struct Frame {
 enum Advance {
     Leaf,
     Pos(u32),
+}
+
+/// A run's rule that holds is a candidate; if it is passed, the run goes on after it.
+fn run_candidate<'p>(found: Option<u32>) -> Outcome<'p> {
+    match found {
+        Some(idx) => Outcome::Candidate {
+            idx,
+            advance: Advance::Pos(idx + 1),
+        },
+        None => Outcome::Next,
+    }
 }
 
 enum Outcome<'p> {
@@ -147,34 +159,21 @@ impl<'p> Run<'p> {
                     None => Outcome::Next,
                     Some(run) => {
                         miss_end = Some(run.end);
-                        match run.next_in(&ev, frame.pos, &prog.table) {
-                            Some(idx) => Outcome::Candidate {
-                                idx,
-                                advance: Advance::Pos(idx + 1),
-                            },
-                            None => Outcome::Next,
-                        }
+                        run_candidate(run.next_in(&ev, frame.pos, &prog.table))
+                    }
+                },
+                Op::Url(run) => match prog.url_runs.get(run as usize) {
+                    None => Outcome::Next,
+                    Some(run) => {
+                        miss_end = Some(run.end);
+                        self.url_run(run, &ev, frame.pos)
                     }
                 },
                 Op::Ip(run) => match prog.ip_runs.get(run as usize) {
                     None => Outcome::Next,
                     Some(run) => {
                         miss_end = Some(run.end);
-                        let ip = if run.src {
-                            Ok(ev.src_ip())
-                        } else {
-                            ev.dst_ip(run.resolves)
-                        };
-                        match ip {
-                            Err(why) => Outcome::Yield(self.yielded(why)),
-                            Ok(ip) => match ip.and_then(|ip| run.next_from(ip, frame.pos)) {
-                                Some(idx) => Outcome::Candidate {
-                                    idx,
-                                    advance: Advance::Pos(idx + 1),
-                                },
-                                None => Outcome::Next,
-                            },
-                        }
+                        self.ip_run(run, &mut ev, frame.pos)
                     }
                 },
             };
@@ -224,6 +223,28 @@ impl<'p> Run<'p> {
             },
             self.frames.first().map_or(0, |frame| frame.prog),
         )
+    }
+
+    /// The first rule of `run` at or after `pos` that holds; without the request every rule
+    /// of it is undecided.
+    fn url_run(&mut self, run: &UrlRun, ev: &Ev<'_>, pos: u32) -> Outcome<'p> {
+        let Some(http) = &ev.state.http else {
+            self.http_pending = true;
+            return Outcome::Next;
+        };
+        run_candidate(run.next_from(&http.url, pos))
+    }
+
+    fn ip_run(&mut self, run: &IpRun, ev: &mut Ev<'_>, pos: u32) -> Outcome<'p> {
+        let ip = if run.src {
+            Ok(ev.src_ip())
+        } else {
+            ev.dst_ip(run.resolves)
+        };
+        match ip {
+            Err(why) => Outcome::Yield(self.yielded(why)),
+            Ok(ip) => run_candidate(ip.and_then(|ip| run.next_from(ip, pos))),
+        }
     }
 
     fn yielded(&mut self, why: Yield) -> Step<'p> {

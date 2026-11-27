@@ -91,7 +91,7 @@ impl Session {
         }
         let address = out.url.raw.clone();
         let mut request = ScriptRequest {
-            id: target.id.clone(),
+            id: target.request_id(),
             url: address.clone(),
             method: out.method.to_string(),
             header: with_host(&out.headers, &out.host_header()),
@@ -189,7 +189,7 @@ impl Session {
         }
         let address = sent.url.raw.clone();
         let request = ScriptRequest {
-            id: target.id.clone(),
+            id: target.request_id(),
             url: address.clone(),
             method: sent.method.to_string(),
             header: with_host(&sent.headers, &sent.host),

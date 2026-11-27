@@ -232,6 +232,9 @@ pub struct RouteProgram {
     pub(crate) sub_rule_names: Box<[Box<str>]>,
     pub(crate) targets: Box<[Box<str>]>,
     pub(crate) rule_sets: Box<[(Arc<RuleSetHandle>, bool, bool)]>,
+    /// The classical sets among `rule_sets`, once each: only their contents can ask for the
+    /// HTTP request.
+    pub(crate) classical: Box<[Arc<RuleSetHandle>]>,
     pub(crate) demands: Demands,
     pub(crate) deferred_geo: Box<[GeoFile]>,
     /// The rule scripts by the index `Node::Script` names them with.
@@ -285,6 +288,15 @@ impl RouteProgram {
             demands.merge(inner);
         }
         demands
+    }
+
+    /// As `demands().http`, asking only the sets whose contents can change it.
+    pub fn reads_http(&self) -> bool {
+        self.demands.http
+            || self
+                .classical
+                .iter()
+                .any(|handle| handle.load().demands().http)
     }
 
     pub fn rule_at(&self, rule: RuleRef) -> RuleInfo<'_> {

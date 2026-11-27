@@ -34,9 +34,7 @@ impl Hooks {
         let script = core
             .config
             .rules
-            .scripts
-            .iter()
-            .find(|script| script.kind == kind && script.name == name)
+            .script_by_name(kind, name)
             .ok_or_else(|| ScriptError("no such script".to_string()))?;
         let dial = Arc::new(TaskDial { core: core.clone() });
         let mut invocation = ScriptInvocation::base(dial.clone());
