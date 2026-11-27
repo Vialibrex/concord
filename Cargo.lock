@@ -1115,6 +1115,7 @@ dependencies = [
  "concord-net",
  "concord-platform",
  "concord-quic",
+ "concord-rules",
  "concord-test-support",
  "concord-tls",
  "futures-util",

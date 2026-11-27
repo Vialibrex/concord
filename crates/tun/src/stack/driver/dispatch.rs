@@ -146,7 +146,7 @@ impl<D: Device> Driver<D> {
             ) {
                 let handler = Arc::clone(&dns.handler);
                 let query = payload.to_vec();
-                let reply = reply.into_owned();
+                let reply = Arc::clone(reply);
                 self.handlers.spawn(async move {
                     let _permit = permit;
                     dns::answer_udp(handler, reply, dst, query).await;
@@ -155,7 +155,7 @@ impl<D: Device> Driver<D> {
             return;
         }
         self.sink
-            .udp(flow_key(Network::Udp, src, dst), payload, &reply);
+            .udp(flow_key(Network::Udp, src, dst), payload, reply);
     }
 
     pub(super) fn drain_handoffs(&mut self) -> bool {

@@ -1,25 +1,37 @@
+use std::borrow::Cow;
 use std::net::IpAddr;
 use std::sync::Arc;
 
 use concord_config::net::IpCidr;
 use concord_config::rule::{Cond, RuleDef};
+use concord_rules::cidr_set::IpCidrSet;
 
 use crate::trie::DomainSet;
 use crate::{DnsError, DomainMatch, GeoIpLookup, IpMatch, RuleEnv};
 
 pub struct CidrSet {
-    items: Vec<IpCidr>,
+    set: IpCidrSet,
 }
 
 impl CidrSet {
     pub fn new(items: Vec<IpCidr>) -> Self {
-        CidrSet { items }
+        let mut set = IpCidrSet::new();
+        for cidr in items {
+            set.add_prefix(cidr.addr, cidr.prefix);
+        }
+        set.merge();
+        CidrSet { set }
+    }
+
+    #[cfg(test)]
+    fn range_count(&self) -> usize {
+        self.set.range_count()
     }
 }
 
 impl IpMatch for CidrSet {
     fn matches(&self, ip: IpAddr) -> bool {
-        self.items.iter().any(|cidr| cidr.contains(ip))
+        self.set.contains(ip)
     }
 }
 
@@ -283,13 +295,27 @@ pub enum Skipper {
     },
 }
 
+fn normalize_host(domain: &str) -> Cow<'_, str> {
+    if domain
+        .bytes()
+        .any(|b| b.is_ascii_uppercase() || !b.is_ascii())
+    {
+        Cow::Owned(domain.to_lowercase())
+    } else {
+        Cow::Borrowed(domain)
+    }
+}
+
 impl Skipper {
     pub fn should_skip(&self, domain: &str) -> bool {
         match self {
-            Skipper::Rules(rules) if !rules.is_empty() => rules
-                .iter()
-                .find(|rule| rule.cond.matches(&domain.to_lowercase()))
-                .is_some_and(|rule| rule.real_ip),
+            Skipper::Rules(rules) if !rules.is_empty() => {
+                let host = normalize_host(domain);
+                rules
+                    .iter()
+                    .find(|rule| rule.cond.matches(&host))
+                    .is_some_and(|rule| rule.real_ip)
+            }
             Skipper::Rules(_) => false,
             Skipper::Hosts {
                 matchers,
@@ -390,5 +416,116 @@ mod tests {
         assert!(cond.matches("example.com"));
         assert!(cond.matches("a.example.com"));
         assert!(!cond.matches("badexample.com"));
+    }
+
+    #[test]
+    fn cidr_set_coalesces_ranges_and_matches_boundaries() {
+        let cidrs = [
+            "10.0.0.0/25",
+            "10.0.0.128/25",
+            "10.0.0.64/26",
+            "2001:db8::/33",
+            "2001:db8:8000::/33",
+        ]
+        .into_iter()
+        .map(|text| IpCidr::parse(text).unwrap())
+        .collect();
+        let set = CidrSet::new(cidrs);
+        assert_eq!(set.range_count(), 2);
+        for hit in [
+            "10.0.0.0",
+            "10.0.0.127",
+            "10.0.0.255",
+            "2001:db8::1",
+            "2001:db8:ffff::1",
+        ] {
+            assert!(set.matches(hit.parse().unwrap()), "expected hit for {hit}");
+        }
+        for miss in [
+            "9.255.255.255",
+            "10.0.1.0",
+            "2001:db7:ffff::1",
+            "2001:db9::",
+        ] {
+            assert!(
+                !set.matches(miss.parse().unwrap()),
+                "expected miss for {miss}"
+            );
+        }
+
+        let uncanonical = CidrSet::new(vec![IpCidr {
+            addr: "192.168.1.99".parse().unwrap(),
+            prefix: 24,
+        }]);
+        assert!(uncanonical.matches("192.168.1.1".parse().unwrap()));
+        assert!(!uncanonical.matches("192.168.2.1".parse().unwrap()));
+    }
+
+    struct RecordingMatcher {
+        seen: std::sync::Mutex<Vec<(usize, String)>>,
+    }
+
+    impl RecordingMatcher {
+        fn new() -> Self {
+            RecordingMatcher {
+                seen: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl DomainMatch for RecordingMatcher {
+        fn matches(&self, domain: &str) -> bool {
+            concord_common::sync::lock(&self.seen).push((domain.as_ptr() as usize, domain.into()));
+            false
+        }
+    }
+
+    #[test]
+    fn skipper_rules_normalize_host_once_outside_the_loop() {
+        let recorder = Arc::new(RecordingMatcher::new());
+        let rules = vec![
+            FilterRule {
+                cond: DomainCond::Set(Arc::clone(&recorder) as Arc<dyn DomainMatch>),
+                real_ip: false,
+            },
+            FilterRule {
+                cond: DomainCond::Set(Arc::clone(&recorder) as Arc<dyn DomainMatch>),
+                real_ip: false,
+            },
+            FilterRule {
+                cond: DomainCond::Set(Arc::clone(&recorder) as Arc<dyn DomainMatch>),
+                real_ip: false,
+            },
+            FilterRule {
+                cond: DomainCond::Exact("sub.example.com".into()),
+                real_ip: true,
+            },
+            FilterRule {
+                cond: DomainCond::Exact("fake.example.com".into()),
+                real_ip: false,
+            },
+            FilterRule {
+                cond: DomainCond::Suffix("example.com".into()),
+                real_ip: true,
+            },
+        ];
+        let skipper = Skipper::Rules(rules);
+
+        let lower = "sub.example.com";
+        assert!(skipper.should_skip(lower));
+        let seen = std::mem::take(&mut *concord_common::sync::lock(&recorder.seen));
+        assert_eq!(seen.len(), 3);
+        for (ptr, host) in seen {
+            assert_eq!(host, "sub.example.com");
+            assert_eq!(ptr, lower.as_ptr() as usize);
+        }
+
+        assert!(skipper.should_skip("SUB.Example.COM"));
+        let seen = std::mem::take(&mut *concord_common::sync::lock(&recorder.seen));
+        assert_eq!(seen.len(), 3);
+        assert!(seen.iter().all(|(_, host)| host == "sub.example.com"));
+
+        assert!(!skipper.should_skip("FAKE.Example.COM"));
+        assert!(skipper.should_skip("Other.Example.COM"));
     }
 }

@@ -1,5 +1,4 @@
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{BuildHasherDefault, Hasher};
 use std::io;
 use std::net::SocketAddr;
@@ -151,8 +150,15 @@ struct Entry {
     last_active: i64,
 }
 
+struct Recent {
+    local: SocketAddr,
+    seen: i64,
+}
+
 pub(crate) struct UdpTable {
     entries: HashMap<SocketAddr, Entry, FxBuild>,
+    recency: VecDeque<Recent>,
+    limit: usize,
     timeout_micros: i64,
     /// Set once a driver round: a flow's last use only needs the sweep's precision.
     now: i64,
@@ -160,6 +166,8 @@ pub(crate) struct UdpTable {
     replies: Weak<ReplyQueue>,
     mtu: usize,
     stats: Arc<StackStats>,
+    #[cfg(test)]
+    work_steps: usize,
 }
 
 impl UdpTable {
@@ -172,13 +180,24 @@ impl UdpTable {
     ) -> Self {
         UdpTable {
             entries: HashMap::with_capacity_and_hasher(256, FxBuild::default()),
+            recency: VecDeque::with_capacity(256),
+            limit: TABLE_LIMIT,
             timeout_micros,
             now: 0,
             pool,
             replies,
             mtu,
             stats,
+            #[cfg(test)]
+            work_steps: 0,
         }
+    }
+
+    #[cfg(test)]
+    fn with_limit(mut self, limit: usize) -> Self {
+        assert!(limit > 0);
+        self.limit = limit;
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -189,37 +208,67 @@ impl UdpTable {
         self.now = i64::try_from(now).unwrap_or(i64::MAX);
     }
 
-    /// Owned only when the table is full and the handle is not kept.
-    pub fn reply_for(&mut self, local: SocketAddr) -> Cow<'_, Arc<dyn UdpReply>> {
+    pub fn reply_for(&mut self, local: SocketAddr) -> &Arc<dyn UdpReply> {
         let now = self.now;
-        if self.entries.len() >= TABLE_LIMIT && !self.entries.contains_key(&local) {
-            self.sweep(now);
+        if self.entries.len() >= self.limit && !self.entries.contains_key(&local) {
+            self.evict_oldest();
         }
-        let full = self.entries.len() >= TABLE_LIMIT;
-        let (pool, replies, mtu, stats) = (&self.pool, &self.replies, self.mtu, &self.stats);
-        let new = || -> Arc<dyn UdpReply> {
-            Arc::new(UdpReplyHandle {
-                local,
-                pool: Arc::clone(pool),
-                replies: Weak::clone(replies),
-                mtu,
-                stats: Arc::clone(stats),
-            })
-        };
-        if full && !self.entries.contains_key(&local) {
-            return Cow::Owned(new());
-        }
-        let entry = self.entries.entry(local).or_insert_with(|| Entry {
-            reply: new(),
-            last_active: now,
+        let (pool, replies, mtu, stats, recency) = (
+            &self.pool,
+            &self.replies,
+            self.mtu,
+            &self.stats,
+            &mut self.recency,
+        );
+        let entry = self.entries.entry(local).or_insert_with(|| {
+            recency.push_back(Recent { local, seen: now });
+            Entry {
+                reply: Arc::new(UdpReplyHandle {
+                    local,
+                    pool: Arc::clone(pool),
+                    replies: Weak::clone(replies),
+                    mtu,
+                    stats: Arc::clone(stats),
+                }),
+                last_active: now,
+            }
         });
         entry.last_active = now;
-        Cow::Borrowed(&entry.reply)
+        &entry.reply
+    }
+
+    /// One eviction per insert into a full table, matching `tunnel::udp::nat::UdpNat::evict_oldest`.
+    fn evict_oldest(&mut self) {
+        while let Some(mut recent) = self.recency.pop_front() {
+            #[cfg(test)]
+            {
+                self.work_steps += 1;
+            }
+            let Some(entry) = self.entries.get(&recent.local) else {
+                continue;
+            };
+            if entry.last_active != recent.seen {
+                recent.seen = entry.last_active;
+                self.recency.push_back(recent);
+                continue;
+            }
+            self.entries.remove(&recent.local);
+            return;
+        }
     }
 
     pub fn sweep(&mut self, now: i64) {
         let cutoff = now - self.timeout_micros;
+        let before = self.entries.len();
+        #[cfg(test)]
+        {
+            self.work_steps += before;
+        }
         self.entries.retain(|_, entry| entry.last_active >= cutoff);
+        if self.entries.len() < before {
+            self.recency
+                .retain(|recent| self.entries.contains_key(&recent.local));
+        }
     }
 }
 
@@ -251,7 +300,7 @@ mod tests {
     fn replies_spoof_the_address_the_application_sent_to() {
         let (mut table, pool) = table(2);
         let local: SocketAddr = "10.0.0.2:5000".parse().unwrap();
-        let reply = table.reply_for(local).into_owned();
+        let reply = Arc::clone(table.reply_for(local));
         let from = Address::Socket("8.8.8.8:53".parse().unwrap());
         assert!(matches!(
             write(&*reply, b"answer", &from),
@@ -269,9 +318,7 @@ mod tests {
     #[test]
     fn wrong_family_domains_and_oversize_are_handled() {
         let (mut table, pool) = table(2);
-        let reply = table
-            .reply_for("10.0.0.2:5000".parse().unwrap())
-            .into_owned();
+        let reply = Arc::clone(table.reply_for("10.0.0.2:5000".parse().unwrap()));
         let v6 = Address::Socket("[::1]:53".parse().unwrap());
         assert!(matches!(write(&*reply, b"x", &v6), Poll::Ready(Err(_))));
         let domain = Address::Domain("example.com".into(), 53);
@@ -285,9 +332,7 @@ mod tests {
     #[test]
     fn an_oversize_reply_goes_out_as_fragments_that_reassemble() {
         let (mut table, pool) = table(8);
-        let reply = table
-            .reply_for("10.0.0.2:5000".parse().unwrap())
-            .into_owned();
+        let reply = Arc::clone(table.reply_for("10.0.0.2:5000".parse().unwrap()));
         let from = Address::Socket("8.8.8.8:53".parse().unwrap());
         let payload: Vec<u8> = (0..600).map(|i| i as u8).collect();
         assert!(matches!(
@@ -317,9 +362,7 @@ mod tests {
     fn fragments_wait_for_enough_free_slots_and_a_pool_too_small_counts_oversize() {
         let from = Address::Socket("8.8.8.8:53".parse().unwrap());
         let (mut tiny, pool) = table(1);
-        let reply = tiny
-            .reply_for("10.0.0.2:5000".parse().unwrap())
-            .into_owned();
+        let reply = Arc::clone(tiny.reply_for("10.0.0.2:5000".parse().unwrap()));
         assert!(matches!(
             write(&*reply, &[0; 300], &from),
             Poll::Ready(Ok(()))
@@ -328,9 +371,7 @@ mod tests {
         assert_eq!(tiny.stats.udp_oversize.load(Ordering::Relaxed), 1);
 
         let (mut small, pool) = table(3);
-        let reply = small
-            .reply_for("10.0.0.2:5000".parse().unwrap())
-            .into_owned();
+        let reply = Arc::clone(small.reply_for("10.0.0.2:5000".parse().unwrap()));
         let held = (pool.take_free().unwrap(), pool.take_free().unwrap());
         assert!(write(&*reply, &[0; 300], &from).is_pending());
         pool.release(held.0);
@@ -344,9 +385,7 @@ mod tests {
     #[test]
     fn a_full_pool_applies_backpressure() {
         let (mut table, pool) = table(1);
-        let reply = table
-            .reply_for("10.0.0.2:5000".parse().unwrap())
-            .into_owned();
+        let reply = Arc::clone(table.reply_for("10.0.0.2:5000".parse().unwrap()));
         let from = Address::Socket("8.8.8.8:53".parse().unwrap());
         assert!(matches!(write(&*reply, b"a", &from), Poll::Ready(Ok(()))));
         assert!(write(&*reply, b"b", &from).is_pending());
@@ -359,14 +398,80 @@ mod tests {
     fn handles_are_cached_per_source_and_swept_when_idle() {
         let (mut table, _pool) = table(1);
         let local: SocketAddr = "10.0.0.2:5000".parse().unwrap();
-        let first = table.reply_for(local).into_owned();
+        let first = Arc::clone(table.reply_for(local));
         table.set_now(1_500_000);
-        let second = table.reply_for(local).into_owned();
+        let second = Arc::clone(table.reply_for(local));
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(table.len(), 1);
         table.sweep(2_000_000);
         assert_eq!(table.len(), 1);
         table.sweep(3_000_000);
         assert_eq!(table.len(), 0);
+    }
+
+    fn source(index: u16) -> SocketAddr {
+        SocketAddr::from(([10, 0, (index >> 8) as u8, index as u8], 10_000 + index))
+    }
+
+    #[test]
+    fn full_table_evicts_oldest_in_amortized_constant_steps() {
+        let limit = 256usize;
+        let (table, _pool) = table(1);
+        let mut table = table.with_limit(limit);
+        let kept_addr = source(0);
+        let evicted_addr = source(1);
+        let kept_first = Arc::clone(table.reply_for(kept_addr));
+        let evicted_first = Arc::clone(table.reply_for(evicted_addr));
+        for index in 2..limit as u16 {
+            let _ = table.reply_for(source(index));
+        }
+        assert_eq!(table.len(), limit);
+
+        table.set_now(1_000);
+        let kept_refreshed = Arc::clone(table.reply_for(kept_addr));
+        assert!(Arc::ptr_eq(&kept_first, &kept_refreshed));
+        table.work_steps = 0;
+
+        let newcomers = limit - 1;
+        for offset in 0..newcomers as u16 {
+            let _ = table.reply_for(source(limit as u16 + offset));
+        }
+        assert_eq!(table.len(), limit);
+        assert!(
+            table.work_steps <= newcomers + 1,
+            "expected O(1) eviction per insert, got {} steps for {newcomers} inserts",
+            table.work_steps
+        );
+
+        let kept_after = Arc::clone(table.reply_for(kept_addr));
+        assert!(Arc::ptr_eq(&kept_first, &kept_after));
+        let newest = source(limit as u16 + newcomers as u16 - 1);
+        let newest_a = Arc::clone(table.reply_for(newest));
+        let newest_b = Arc::clone(table.reply_for(newest));
+        assert!(Arc::ptr_eq(&newest_a, &newest_b));
+        let evicted_after = Arc::clone(table.reply_for(evicted_addr));
+        assert!(!Arc::ptr_eq(&evicted_first, &evicted_after));
+    }
+
+    #[test]
+    fn sweep_prunes_recency_so_reinserted_sources_stay_cached() {
+        let (table, _pool) = table(1);
+        let mut table = table.with_limit(4);
+        let reused = source(0);
+        let _ = table.reply_for(reused);
+        let _ = table.reply_for(source(1));
+        table.sweep(2_000_000);
+        assert_eq!(table.len(), 0);
+        assert_eq!(table.recency.len(), 0);
+
+        table.set_now(2_000_000);
+        let _ = table.reply_for(source(1));
+        let _ = table.reply_for(source(2));
+        let _ = table.reply_for(source(3));
+        let reinserted = Arc::clone(table.reply_for(reused));
+        let _ = table.reply_for(source(4));
+        assert_eq!(table.len(), 4);
+        assert_eq!(table.recency.len(), 4);
+        assert!(Arc::ptr_eq(&reinserted, table.reply_for(reused)));
     }
 }
