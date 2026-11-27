@@ -417,7 +417,6 @@ mod tests {
         let mut slow_groups = fast_groups.clone();
         let mut slow_nodes = fast_nodes.clone();
 
-        // Single group change.
         let v1 = ProxyViews {
             all: vec![Arc::from("G1"), Arc::from("G2")],
             proxies: vec![
@@ -435,7 +434,6 @@ mod tests {
         assert!(d1.nodes.is_empty() && d1.removed.is_empty());
         apply_delta(&mut fast_order, &mut fast_groups, &mut fast_nodes, d1);
 
-        // Revert to v0: slow consumer sees no effective change!
         let d_revert_slow = slow.advance(v0.clone());
         assert!(is_empty(&d_revert_slow));
         let d_revert_fast = fast.advance(v0);
@@ -446,7 +444,6 @@ mod tests {
             d_revert_fast,
         );
 
-        // Swap node<->group with same names, remove n1, reorder, and override provider.
         let v2 = ProxyViews {
             all: vec![Arc::from("swap"), Arc::from("G1")],
             proxies: vec![

@@ -425,6 +425,8 @@ impl Group {
     /// The names the host lists: the members, or the empty fallback standing in
     /// for none, or nothing when the group refuses.
     pub fn listing(&self, members: &Members) -> Vec<Arc<str>> {
+        #[cfg(test)]
+        LISTING_CALLS.with(|calls| calls.set(calls.get() + 1));
         match members.emptiness() {
             Emptiness::NotEmpty => members
                 .nodes()
@@ -714,4 +716,14 @@ impl Group {
         fail.checking = false;
         fail.count = 0;
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static LISTING_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_listing_calls() -> usize {
+    LISTING_CALLS.with(|calls| calls.replace(0))
 }

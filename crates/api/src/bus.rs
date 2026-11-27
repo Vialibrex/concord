@@ -168,10 +168,10 @@ impl ConnSub {
             apply(&mut pending);
             if pending.len() > CONN_CAPACITY {
                 pending.overflowed = true;
-                pending.opened.clear();
-                pending.opened_ids.clear();
-                pending.closed.clear();
-                pending.counters.clear();
+                let _ = std::mem::take(&mut pending.opened);
+                let _ = std::mem::take(&mut pending.opened_ids);
+                let _ = std::mem::take(&mut pending.closed);
+                let _ = std::mem::take(&mut pending.counters);
             }
             pending.waker.take()
         };
@@ -182,9 +182,11 @@ impl ConnSub {
 
     fn opened(&self, record: Arc<ConnRecord>) {
         self.change(|pending| {
-            let seq = record.seq;
-            pending.opened_ids.insert(seq);
-            pending.counters.remove(&seq);
+            if self.counters {
+                let seq = record.seq;
+                pending.opened_ids.insert(seq);
+                pending.counters.remove(&seq);
+            }
             pending.opened.push(record);
         });
     }
@@ -238,7 +240,7 @@ impl ConnSub {
                 pending.waker = Some(cx.waker().clone());
                 return Poll::Pending;
             }
-            pending.opened_ids.clear();
+            let _ = std::mem::take(&mut pending.opened_ids);
             (
                 std::mem::take(&mut pending.opened),
                 std::mem::take(&mut pending.closed),
@@ -968,6 +970,7 @@ mod tests {
         }
 
         let data = pull_event(&mut stream);
+        assert_eq!(lock(&stream.sub.pending).opened_ids.capacity(), 0);
         let opened_ids: Vec<u64> = data.opened.iter().map(|info| info.id).collect();
         assert_eq!(opened_ids, [opened_only.seq, short_lived.seq]);
         let mut expected_closed = vec![short_lived.seq, existing.seq];
@@ -977,6 +980,11 @@ mod tests {
             totals(&data),
             [(short_lived.seq, 25, 0), (existing.seq, 35, 0)]
         );
+
+        let mut no_counters = bus.watch_connections(false);
+        bus.publish(EngineEvent::Request(record()));
+        assert_eq!(lock(&no_counters.sub.pending).opened_ids.capacity(), 0);
+        assert_eq!(pull_event(&mut no_counters).opened.len(), 1);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use concord_common::{Address, Network};
 
 use crate::group::{Group, Policy};
 use crate::health::HealthSnapshot;
-use crate::node::Node;
+use crate::node::{Leaf, Node};
 use crate::outbounds::{Entry, Outbounds, dummy_flow};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +43,11 @@ pub struct ProxyViews {
     pub proxies: Vec<(Arc<str>, ProxyView)>,
 }
 
+enum Routable<'a> {
+    Leaf(&'a Arc<Leaf>),
+    Group(&'a Arc<Group>),
+}
+
 impl Outbounds {
     fn group_view(&self, group: &Arc<Group>) -> GroupView {
         let flow = dummy_flow(Address::new("", 0), Network::Tcp);
@@ -78,6 +83,54 @@ impl Outbounds {
         }
     }
 
+    fn visit_routable(&self, mut visit: impl FnMut(Routable<'_>)) {
+        let mut shadowed = std::collections::HashSet::new();
+        let mut from_providers = Vec::new();
+        for provider in self.providers() {
+            for item in provider.nodes().items() {
+                if let crate::node::Item::Live(Node::Leaf(leaf)) = item
+                    && shadowed.insert(leaf.name().clone())
+                {
+                    from_providers.push(leaf.clone());
+                }
+            }
+        }
+        for name in self.node_order() {
+            if shadowed.contains(name) {
+                continue;
+            }
+            if let Some(Entry::Leaf(leaf)) = self.table().get(name) {
+                visit(Routable::Leaf(leaf));
+            }
+        }
+        for leaf in &from_providers {
+            visit(Routable::Leaf(leaf));
+        }
+        for group in self.groups() {
+            if shadowed.contains(group.name()) {
+                continue;
+            }
+            visit(Routable::Group(group));
+        }
+    }
+
+    fn routable_names(&self) -> Vec<Arc<str>> {
+        let flow = dummy_flow(Address::new("", 0), Network::Tcp);
+        let mut names = Vec::new();
+        self.visit_routable(|item| match item {
+            Routable::Leaf(leaf) => names.push(leaf.name().clone()),
+            Routable::Group(group) => {
+                // Keep the selection side effects (`now`) of `group_view` in the same order
+                // without building member display lists or view strings.
+                if !matches!(group.policy(), Policy::LoadBalance(_)) {
+                    let _ = group.now(&flow);
+                }
+                names.push(group.name().clone());
+            }
+        });
+        names
+    }
+
     /// What `proxy.list` shows: group names in config order with the built-in
     /// `GLOBAL` first, and every routable name, where a provider's node wins a
     /// name it shares with a node of the profile.
@@ -93,49 +146,20 @@ impl Outbounds {
         }
 
         let mut proxies: Vec<(Arc<str>, ProxyView)> = Vec::new();
-        let mut shadowed = std::collections::HashSet::new();
-        let mut from_providers = Vec::new();
-        for provider in self.providers() {
-            for item in provider.nodes().items() {
-                if let crate::node::Item::Live(Node::Leaf(leaf)) = item
-                    && shadowed.insert(leaf.name().clone())
-                {
-                    from_providers.push((
-                        leaf.name().clone(),
-                        ProxyView::Node(NodeView {
-                            name: leaf.name().clone(),
-                            kind: leaf.info().kind.wire_name(),
-                            provider: leaf.provider().cloned(),
-                        }),
-                    ));
-                }
-            }
-        }
-        for name in self.node_order() {
-            if shadowed.contains(name) {
-                continue;
-            }
-            if let Some(Entry::Leaf(leaf)) = self.table().get(name) {
-                proxies.push((
-                    name.clone(),
-                    ProxyView::Node(NodeView {
-                        name: name.clone(),
-                        kind: leaf.info().kind.wire_name(),
-                        provider: None,
-                    }),
-                ));
-            }
-        }
-        proxies.extend(from_providers);
-        for group in self.groups() {
-            if shadowed.contains(group.name()) {
-                continue;
-            }
-            proxies.push((
+        self.visit_routable(|item| match item {
+            Routable::Leaf(leaf) => proxies.push((
+                leaf.name().clone(),
+                ProxyView::Node(NodeView {
+                    name: leaf.name().clone(),
+                    kind: leaf.info().kind.wire_name(),
+                    provider: leaf.provider().cloned(),
+                }),
+            )),
+            Routable::Group(group) => proxies.push((
                 group.name().clone(),
                 ProxyView::Group(self.group_view(group)),
-            ));
-        }
+            )),
+        });
         ProxyViews { all, proxies }
     }
 }
@@ -152,12 +176,7 @@ impl Outbounds {
     pub fn node_states(&self, names: Option<&[String]>) -> Vec<NodeStateView> {
         let listed: Vec<Arc<str>> = match names {
             Some(names) => names.iter().map(|name| Arc::from(name.as_str())).collect(),
-            None => self
-                .views()
-                .proxies
-                .into_iter()
-                .map(|(name, _)| name)
-                .collect(),
+            None => self.routable_names(),
         };
         listed
             .into_iter()

@@ -956,6 +956,53 @@ async fn plain_get_connections_snapshots_without_subscribing_and_matches_websock
     rig.control.shutdown().await;
 }
 
+fn dummy_conn_record() -> concord_common::ConnRecord {
+    concord_common::ConnRecord::new(
+        concord_common::ConnMeta {
+            network: concord_common::Network::Tcp,
+            inbound: concord_common::InboundInfo::new(concord_common::InboundKind::Socks5),
+            src: "127.0.0.1:1".parse().unwrap(),
+            dst_ip: None,
+            dst_port: 1,
+            host: concord_common::Host::default(),
+            sniff_host: concord_common::Host::default(),
+            dns_mode: None,
+            uid: None,
+            process: String::new(),
+            process_path: String::new(),
+            remote_destination: String::new(),
+            src_geoip: None,
+            dst_geoip: None,
+            src_asn: String::new(),
+            dst_asn: String::new(),
+            rematch_name: String::new(),
+            special_rules: String::new(),
+            special_proxy: String::new(),
+        },
+        Box::new([]),
+        Box::new([]),
+        Arc::from(""),
+        Arc::from(""),
+        false,
+        0,
+    )
+}
+
+async fn open_proxied(proxy: u16, target: &TcpListener) -> (TcpStream, TcpStream) {
+    let target_port = target.local_addr().unwrap().port();
+    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
+        .await
+        .unwrap();
+    client
+        .write_all(format!("CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut ok = [0u8; 39];
+    client.read_exact(&mut ok).await.unwrap();
+    let (far, _) = target.accept().await.unwrap();
+    (client, far)
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn websocket_connections_rebuilds_cleanly_after_resync_overflow() {
     let proxy = port_to_bind_later();
@@ -967,51 +1014,8 @@ async fn websocket_connections_rebuilds_cleanly_after_resync_overflow() {
     rig.control.engine_start(Empty {}).await.unwrap();
 
     let target = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-    let target_port = target.local_addr().unwrap().port();
-    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy))
-        .await
-        .unwrap();
-    client
-        .write_all(format!("CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n\r\n").as_bytes())
-        .await
-        .unwrap();
-    let mut ok = [0u8; 39];
-    client.read_exact(&mut ok).await.unwrap();
-    let (_far, _) = target.accept().await.unwrap();
-
-    let dummies: Vec<_> = (0..=8_192)
-        .map(|_| {
-            concord_common::ConnRecord::new(
-                concord_common::ConnMeta {
-                    network: concord_common::Network::Tcp,
-                    inbound: concord_common::InboundInfo::new(concord_common::InboundKind::Socks5),
-                    src: "127.0.0.1:1".parse().unwrap(),
-                    dst_ip: None,
-                    dst_port: 1,
-                    host: concord_common::Host::default(),
-                    sniff_host: concord_common::Host::default(),
-                    dns_mode: None,
-                    uid: None,
-                    process: String::new(),
-                    process_path: String::new(),
-                    remote_destination: String::new(),
-                    src_geoip: None,
-                    dst_geoip: None,
-                    src_asn: String::new(),
-                    dst_asn: String::new(),
-                    rematch_name: String::new(),
-                    special_rules: String::new(),
-                    special_proxy: String::new(),
-                },
-                Box::new([]),
-                Box::new([]),
-                Arc::from(""),
-                Arc::from(""),
-                false,
-                0,
-            )
-        })
-        .collect();
+    let (client1, far1) = open_proxied(proxy, &target).await;
+    let dummies: Vec<_> = (0..=8_192).map(|_| dummy_conn_record()).collect();
 
     let url = format!(
         "ws://127.0.0.1:{}/connections?interval=200&token={}",
@@ -1032,22 +1036,28 @@ async fn websocket_connections_rebuilds_cleanly_after_resync_overflow() {
     for dummy in &dummies {
         concord_common::EventSink::closed(rig.bus.as_ref(), dummy);
     }
+    let (client2, far2) = open_proxied(proxy, &target).await;
 
     let rebuilt = timeout(PATIENCE, async {
         loop {
             let msg = socket.next().await.unwrap().unwrap();
             let frame: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
-            if rig.bus.topic_joins()[4] > joins_before {
+            let conns = frame["connections"].as_array().unwrap();
+            if rig.bus.topic_joins()[4] > joins_before && conns.len() == 2 {
                 return frame;
             }
         }
     })
     .await
-    .expect("websocket table did not rebuild after Resync");
+    .expect("websocket table did not rebuild with both connections after Resync");
     let conns = rebuilt["connections"].as_array().unwrap();
-    assert_eq!(conns.len(), 1);
-    assert_eq!(conns[0]["id"].as_str(), Some(active_id.as_str()));
+    assert_eq!(conns.len(), 2);
+    assert!(
+        conns
+            .iter()
+            .any(|item| item["id"].as_str() == Some(active_id.as_str()))
+    );
 
-    drop((socket, client, _far));
+    drop((socket, client1, far1, client2, far2));
     rig.control.shutdown().await;
 }

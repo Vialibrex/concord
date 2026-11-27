@@ -150,3 +150,143 @@ proxy-groups:
     assert!(gone.all.as_ref().unwrap().is_empty());
     assert_eq!(gone.now.as_deref(), Some("ts"));
 }
+
+#[tokio::test]
+async fn node_states_skips_group_listings_and_matches_views_order_and_ghost_shadowing() {
+    let rig = Rig::new(
+        "proxies:
+  - {name: a, type: direct}
+  - {name: b, type: direct}
+proxy-providers:
+  first:
+    type: inline
+    payload:
+      - {name: shadow_live, type: tailscale}
+      - {name: shadow_group, type: tailscale}
+      - {name: p_clash, type: direct}
+  second:
+    type: inline
+    payload:
+      - {name: shadow_live, type: direct}
+      - {name: p_clash, type: direct}
+      - {name: second_only, type: direct}
+proxy-groups:
+  - {name: p_clash, type: select, proxies: [a]}
+  - {name: shadow_group, type: select, proxies: [a]}
+  - {name: inner, type: select, proxies: [a, b]}
+  - {name: nested, type: select, proxies: [inner]}
+  - {name: gone, type: select, use: [first], filter: shadow_live}
+  - {name: nested_ghost, type: select, proxies: [gone]}
+  - {name: empty_g, type: select, use: [second], filter: zzz}
+  - {name: lb, type: load-balance, proxies: [a, b]}
+",
+    );
+
+    let expected = [
+        "DIRECT",
+        "REJECT",
+        "REJECT-DROP",
+        "COMPATIBLE",
+        "PASS",
+        "PASS-RULE",
+        "a",
+        "b",
+        "p_clash",
+        "second_only",
+        "inner",
+        "nested",
+        "gone",
+        "nested_ghost",
+        "empty_g",
+        "lb",
+        "GLOBAL",
+    ];
+
+    let _ = crate::group::take_listing_calls();
+    let views = rig.out.views();
+    assert!(crate::group::take_listing_calls() > 0);
+    let view_names: Vec<&str> = views
+        .proxies
+        .iter()
+        .filter(|(name, _)| rig.out.node(name).is_some())
+        .map(|(name, _)| name.as_ref())
+        .collect();
+    assert_eq!(view_names, expected);
+
+    let _ = crate::group::take_listing_calls();
+    let states = rig.out.node_states(None);
+    assert_eq!(crate::group::take_listing_calls(), 0);
+    let state_names: Vec<&str> = states.iter().map(|state| state.name.as_ref()).collect();
+    assert_eq!(state_names, expected);
+
+    let udp_of = |name: &str| {
+        states
+            .iter()
+            .find(|state| state.name.as_ref() == name)
+            .map(|state| state.udp)
+    };
+    assert_eq!(udp_of("nested"), Some(true));
+    assert_eq!(udp_of("empty_g"), Some(true));
+    assert_eq!(udp_of("gone"), Some(false));
+    assert_eq!(udp_of("nested_ghost"), Some(false));
+
+    let targeted = rig.out.node_states(Some(&[
+        "b".to_string(),
+        "unknown".to_string(),
+        "b".to_string(),
+        "nested".to_string(),
+    ]));
+    let targeted_names: Vec<&str> = targeted.iter().map(|state| state.name.as_ref()).collect();
+    assert_eq!(targeted_names, ["b", "b", "nested"]);
+}
+
+#[tokio::test]
+async fn node_states_preserves_stale_pin_revocation_and_url_test_cache_switch() {
+    let rig = Rig::new(
+        "proxies:
+  - {name: a, type: direct}
+  - {name: b, type: direct}
+proxy-providers:
+  first:
+    type: inline
+    payload:
+      - {name: shadow_fb, type: tailscale}
+proxy-groups:
+  - {name: fb, type: fallback, proxies: [a, b], url: 'http://probe.test/generate_204'}
+  - {name: shadow_fb, type: fallback, proxies: [a, b], url: 'http://probe.test/generate_204'}
+  - {name: ut, type: url-test, proxies: [a, b], url: 'http://probe.test/generate_204', tolerance: 0}
+",
+    );
+
+    rig.book.get("a").set_delay(80);
+    rig.book.get("b").set_delay(120);
+    rig.test("a").await;
+    rig.test("b").await;
+    let flow = Rig::flow("example.com");
+    assert_eq!(rig.out.group("ut").unwrap().now(&flow), "a");
+
+    rig.out.select("fb", "a").await.unwrap();
+    rig.store.set("shadow_fb", "a");
+    rig.book.get("a").fail.store(true, Ordering::SeqCst);
+    rig.book.get("b").set_delay(10);
+    rig.test("a").await;
+    rig.test("b").await;
+    let moves_before = rig.moved.count();
+
+    let _ = crate::group::take_listing_calls();
+    let _ = crate::group::take_url_test_scans();
+    let states = rig.out.node_states(None);
+    assert_eq!(crate::group::take_listing_calls(), 0);
+    assert_eq!(crate::group::take_url_test_scans(), 1);
+    assert!(
+        !states
+            .iter()
+            .any(|state| state.name.as_ref() == "shadow_fb")
+    );
+    assert_eq!(rig.store.get("fb"), None);
+    assert_eq!(rig.store.get("shadow_fb"), None);
+    assert_eq!(rig.moved.count(), moves_before + 2);
+    assert_eq!(rig.out.group("fb").unwrap().now(&flow), "b");
+    assert_eq!(rig.out.group("ut").unwrap().now(&flow), "b");
+    assert_eq!(crate::group::take_url_test_scans(), 0);
+}
