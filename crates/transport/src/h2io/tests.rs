@@ -552,7 +552,10 @@ async fn a_tunnel_whose_peer_grants_no_window_is_reset_after_the_drain_limit() {
         .unwrap();
     let mut body = H2Body::new(send, Incoming::Response(response)).without_half_close();
     let started = Instant::now();
-    body.shutdown().await.unwrap();
+    tokio::time::timeout(RESET_DRAIN + Duration::from_secs(1), body.shutdown())
+        .await
+        .expect("shutdown outlived the drain limit")
+        .unwrap();
     let waited = started.elapsed();
     assert!(waited >= RESET_DRAIN, "{waited:?}");
     assert!(waited < RESET_DRAIN + Duration::from_secs(1), "{waited:?}");

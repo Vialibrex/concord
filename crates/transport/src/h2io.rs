@@ -354,6 +354,11 @@ impl AsyncRead for H2Reader {
                     Poll::Ready(Some(Err(err))) => {
                         this.finish_read(released, saw_data);
                         this.incoming = Incoming::Done;
+                        if let Some(ended) = &this.ended
+                            && ended.poll_ended(cx)
+                        {
+                            return Poll::Ready(Ok(()));
+                        }
                         let err = h2_io_error(err);
                         if copied > 0 {
                             this.pending_err = Some(err);
@@ -525,15 +530,18 @@ impl AsyncWrite for H2Writer {
             if this.send.has_direct_writer() {
                 ready!(this.send.poll_flush_direct(cx)).map_err(h2_io_error)?;
             }
-            let deadline = this
-                .drain
-                .get_or_insert_with(|| Box::pin(sleep(RESET_DRAIN)));
-            if this.send.poll_drained(cx).is_pending() && deadline.as_mut().poll(cx).is_pending() {
-                return Poll::Pending;
+            if this.send.poll_drained(cx).is_pending() {
+                let deadline = this
+                    .drain
+                    .get_or_insert_with(|| Box::pin(sleep(RESET_DRAIN)));
+                if deadline.as_mut().poll(cx).is_pending() {
+                    return Poll::Pending;
+                }
             }
+            // Ended before the reset, so a reader that sees the reset as an error also sees it ended.
+            end.end();
             this.send.send_reset(h2::Reason::CANCEL);
             this.ended = true;
-            end.end();
             return Poll::Ready(Ok(()));
         }
         if this.send.has_direct_writer() {
