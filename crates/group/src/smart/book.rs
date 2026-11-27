@@ -2,12 +2,22 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::IndexMap;
+use indexmap::map::Entry;
 
 use super::flow::{FlowEnd, FlowRef};
 use super::node::NodeState;
-use super::select::Row;
 use super::site::SiteBook;
-use super::{Actions, Arbitrate, Candidate, NO_RESPONSE, PENDING_LIMIT, Settings, Stamp};
+use super::{Actions, Arbitrate, CandidateView, NO_RESPONSE, PENDING_LIMIT, Settings, Stamp};
+
+#[cfg(test)]
+std::thread_local! {
+    static ALIGN_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_align_scans() -> usize {
+    ALIGN_SCANS.with(|scans| scans.replace(0))
+}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(super) struct Failure {
@@ -33,6 +43,7 @@ struct Running {
 pub(super) struct Book {
     /// In member order once a touching pick synced it, so a pick reads each member's state by position.
     pub nodes: IndexMap<Arc<str>, NodeState>,
+    synced_members: Option<u64>,
     pub sites: SiteBook,
     pub default: Option<Arc<str>>,
     runner_up: Option<Arc<str>>,
@@ -47,9 +58,13 @@ pub(super) struct Book {
 
 impl Book {
     pub fn node_mut(&mut self, name: &Arc<str>, now: Stamp) -> &mut NodeState {
-        self.nodes
-            .entry(name.clone())
-            .or_insert_with(|| NodeState::new(now))
+        match self.nodes.entry(name.clone()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                self.synced_members = None;
+                entry.insert(NodeState::new(now))
+            }
+        }
     }
 
     pub fn arc(&self, name: &str) -> Arc<str> {
@@ -69,37 +84,74 @@ impl Book {
         self.outbox.merge(actions);
     }
 
-    /// Whether the book holds a state for each member in `rows`, in their order, and for no one else.
-    pub fn holds_exactly(&self, rows: &[Row<'_>]) -> bool {
-        self.nodes.len() == rows.len() && rows.iter().all(|row| row.aligned)
+    pub fn is_synced(&self, candidates: &CandidateView<'_>) -> bool {
+        candidates
+            .synced_id()
+            .is_some_and(|id| self.synced_members == Some(id))
+    }
+
+    /// Ensures the book holds a state for each member in `candidates`, in order, and claims the
+    /// snapshot ID when unique names already match so subsequent picks skip scanning.
+    pub fn ensure_aligned(&mut self, candidates: &CandidateView<'_>, now: Stamp) -> bool {
+        if self.is_synced(candidates) {
+            return true;
+        }
+        #[cfg(test)]
+        ALIGN_SCANS.with(|scans| scans.set(scans.get() + 1));
+        let matches = self.nodes.len() == candidates.len()
+            && (0..candidates.len()).all(|index| {
+                self.nodes
+                    .get_index(index)
+                    .zip(candidates.name(index))
+                    .is_some_and(|((held, _), name)| Arc::ptr_eq(held, name) || held == name)
+            });
+        if matches {
+            self.synced_members = candidates.synced_id();
+            return true;
+        }
+        self.sync_members(candidates, now);
+        self.nodes.len() == candidates.len()
     }
 
     /// Keeps a state for exactly the current members, in their order, so any of them can witness.
-    pub fn sync_members(&mut self, candidates: &[Candidate<'_>], now: Stamp) {
+    pub fn sync_members(&mut self, candidates: &CandidateView<'_>, now: Stamp) {
         let mut old = std::mem::take(&mut self.nodes);
-        self.nodes = candidates
-            .iter()
-            .map(|candidate| {
+        self.nodes = (0..candidates.len())
+            .filter_map(|index| {
+                let name = candidates.name(index)?;
                 let state = old
-                    .swap_remove(&**candidate.name)
+                    .swap_remove(&**name)
                     .unwrap_or_else(|| NodeState::new(now));
-                (candidate.name.clone(), state)
+                Some((name.clone(), state))
             })
             .collect();
+        self.retain_failed_witnesses();
+        self.synced_members = candidates
+            .synced_id()
+            .filter(|_| self.nodes.len() == candidates.len());
+    }
+
+    #[cfg(test)]
+    pub fn set_runner_up(&mut self, name: Option<Arc<str>>) {
+        self.runner_up = name;
+    }
+
+    pub fn retain_failed_witnesses(&mut self) {
         let nodes = &self.nodes;
         self.failed_witnesses
             .retain(|name| nodes.contains_key(&**name));
     }
 
-    pub fn track_default(&mut self, rows: &[Row<'_>], default: usize, actions: &mut Actions) {
-        let name = rows.get(default).map(|row| row.name);
-        if self.default.as_deref() != name.map(|name| &**name) {
-            actions.refresh |= self.default.is_some() && name.is_some();
-            self.default = name.cloned();
+    pub fn track_default_names(
+        &mut self,
+        default: Option<&Arc<str>>,
+        runner_up: Option<&Arc<str>>,
+        actions: &mut Actions,
+    ) {
+        if self.default.as_deref() != default.map(|name| &**name) {
+            actions.refresh |= self.default.is_some() && default.is_some();
+            self.default = default.cloned();
         }
-        let runner_up = super::select::runner_up(rows, default)
-            .and_then(|index| rows.get(index))
-            .map(|row| row.name);
         if self.runner_up.as_deref() != runner_up.map(|name| &**name) {
             self.runner_up = runner_up.cloned();
         }
@@ -107,6 +159,7 @@ impl Book {
 
     pub fn reset(&mut self) {
         self.nodes.clear();
+        self.synced_members = None;
         self.sites.clear();
         self.pending.clear();
         self.running = None;

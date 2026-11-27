@@ -152,8 +152,7 @@ async fn selecting_a_dead_fallback_member_probes_it_first() {
     )));
     rig.book.get("b").fail.store(true, Ordering::SeqCst);
     let node = rig.out.node("b").unwrap();
-    node.health()
-        .record(TEST_URL, 0, true, false, &rig.out.shared.health_epoch);
+    node.health().record(TEST_URL, 0, true, false);
     rig.out.select("f", "b").await.unwrap();
     assert_eq!(rig.book.get("b").connects.load(Ordering::SeqCst), 1);
     assert_eq!(rig.leaf("f"), "a");
@@ -165,8 +164,7 @@ async fn routing_before_the_probe_of_a_dead_pick_leaves_the_pick_to_the_probe() 
         "  - {{name: f, type: fallback, proxies: [a, b], url: '{TEST_URL}'}}\n"
     )));
     let node = rig.out.node("b").unwrap();
-    node.health()
-        .record(TEST_URL, 0, true, false, &rig.out.shared.health_epoch);
+    node.health().record(TEST_URL, 0, true, false);
     let staged = rig.out.stage_selection("f", "b").unwrap();
     assert_eq!(rig.leaf("f"), "a");
     rig.out.probe_selection(&staged).await;

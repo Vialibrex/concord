@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,7 +28,6 @@ pub(crate) struct Shared {
     pub factory: Arc<dyn NodeFactory>,
     pub trust: Arc<TrustStore>,
     pub tasks: concord_common::Tasks,
-    pub health_epoch: AtomicU64,
     pub refresh: Notify,
     loop_reports: Mutex<HashMap<Arc<str>, Instant>>,
     pub missing_reported: AtomicBool,
@@ -46,7 +45,6 @@ impl Shared {
             factory: deps.factory.clone(),
             trust: deps.trust.clone(),
             tasks: deps.tasks.clone(),
-            health_epoch: AtomicU64::new(0),
             refresh: Notify::new(),
             loop_reports: Mutex::new(HashMap::new()),
             missing_reported: AtomicBool::new(false),

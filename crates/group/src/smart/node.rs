@@ -42,10 +42,22 @@ impl Rtt {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static EXP2_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_exp2_calls() -> usize {
+    EXP2_CALLS.with(|calls| calls.replace(0))
+}
+
 fn decay_factor(dt: Duration, half_life: Duration) -> f64 {
-    if half_life.is_zero() {
+    if half_life.is_zero() || dt.is_zero() {
         return 1.0;
     }
+    #[cfg(test)]
+    EXP2_CALLS.with(|calls| calls.set(calls.get() + 1));
     (-dt.as_secs_f64() / half_life.as_secs_f64()).exp2()
 }
 
@@ -93,19 +105,41 @@ impl NodeState {
 
     /// `p / (1 - p) * T_fail` with `p = F / (S + F + 1)`, which is `F / (S + 1) * T_fail`.
     pub fn penalty_ms(&self, now: Stamp, half_life: Duration) -> f64 {
+        if self.failures == 0.0 {
+            return 0.0;
+        }
+        let Some(t_fail_ms) = self.t_fail_ms.filter(|&t| t != 0.0) else {
+            return 0.0;
+        };
         let k = decay_factor(now.since(&self.counted_at), half_life);
         let (s, f) = (self.successes * k, self.failures * k);
-        f / (s + 1.0) * self.t_fail_ms.unwrap_or(0.0)
+        f / (s + 1.0) * t_fail_ms
+    }
+
+    pub fn ejection(&self, now: Stamp) -> (bool, Duration) {
+        let Some((at, span)) = self.eject else {
+            return (false, Duration::ZERO);
+        };
+        let elapsed = now.since(&at);
+        if elapsed < span {
+            (true, span.saturating_sub(elapsed))
+        } else {
+            (false, Duration::ZERO)
+        }
     }
 
     pub fn ejected(&self, now: Stamp) -> bool {
         self.eject.is_some_and(|(at, span)| now.since(&at) < span)
     }
 
-    pub fn ejection_left(&self, now: Stamp) -> Duration {
-        self.eject.map_or(Duration::ZERO, |(at, span)| {
-            span.saturating_sub(now.since(&at))
-        })
+    #[cfg(test)]
+    pub fn raw_penalty_parts(&self) -> (f64, f64, Stamp, Option<f64>) {
+        (
+            self.successes,
+            self.failures,
+            self.counted_at,
+            self.t_fail_ms,
+        )
     }
 
     /// Ends an expired ejection and lets the multiplier fall by one per `EJECT_DECAY` since it ended.

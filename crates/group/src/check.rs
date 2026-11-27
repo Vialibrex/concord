@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -24,8 +24,18 @@ pub struct Extra {
 }
 
 pub(crate) enum Source {
-    Static(Vec<Node>),
+    Static {
+        nodes: Vec<Node>,
+        names: HashSet<Arc<str>>,
+    },
     Provider(Weak<ProxyProvider>),
+}
+
+impl Source {
+    pub(crate) fn static_nodes(nodes: Vec<Node>) -> Self {
+        let names = nodes.iter().map(|node| node.name().clone()).collect();
+        Source::Static { nodes, names }
+    }
 }
 
 #[derive(Default)]
@@ -220,14 +230,14 @@ impl Check {
 
     pub fn version(&self) -> u32 {
         match &self.source {
-            Source::Static(_) => 0,
+            Source::Static { .. } => 0,
             Source::Provider(provider) => provider.upgrade().map_or(0, |p| p.version()),
         }
     }
 
     pub fn nodes(&self) -> (u32, Vec<Node>) {
         match &self.source {
-            Source::Static(nodes) => (0, nodes.clone()),
+            Source::Static { nodes, .. } => (0, nodes.clone()),
             Source::Provider(provider) => match provider.upgrade() {
                 Some(provider) => {
                     let snapshot = provider.nodes();
@@ -248,7 +258,7 @@ impl Check {
 
     pub fn covers(&self, name: &str) -> bool {
         match &self.source {
-            Source::Static(nodes) => nodes.iter().any(|node| node.name().as_ref() == name),
+            Source::Static { names, .. } => names.contains(name),
             Source::Provider(provider) => provider
                 .upgrade()
                 .is_some_and(|p| p.nodes().get(name).is_some()),

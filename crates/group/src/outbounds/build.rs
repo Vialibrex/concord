@@ -229,7 +229,7 @@ impl Builder<'_> {
                     lazy: def.lazy,
                     expected: expected.clone(),
                 },
-                Source::Static(nodes),
+                Source::static_nodes(nodes),
             ))
         };
         if let Some(explicit_url) = &def.explicit_url

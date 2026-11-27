@@ -234,8 +234,8 @@ fn the_live_members_left_are_the_redial_order_before_the_ejected() {
         timeout(&state, t0, "c", true);
     }
     let tried = [names[A].clone()];
-    let order = state.retry_order(t0, &all, &tried);
-    let mut live = state.live_untried(t0, &all, &tried);
+    let order = state.retry_order(t0, &all.view(), &tried);
+    let mut live = state.live_untried(t0, all.names(), &tried);
     assert_eq!(order.last(), Some(&C), "the ejected c comes last");
     let mut before_ejected = order[..order.len() - 1].to_vec();
     before_ejected.sort_unstable();

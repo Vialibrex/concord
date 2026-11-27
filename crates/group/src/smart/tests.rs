@@ -21,16 +21,32 @@ pub(super) fn names(list: &[&str]) -> Vec<Arc<str>> {
     list.iter().map(|name| Arc::from(*name)).collect()
 }
 
-pub(super) fn cands<'a>(names: &'a [Arc<str>], delays: &[u16]) -> Vec<Candidate<'a>> {
-    names
-        .iter()
-        .zip(delays)
-        .map(|(name, delay)| Candidate {
-            name,
-            delay_ms: Some(*delay),
-            factor: 1.0,
-        })
-        .collect()
+pub(super) struct TestCands {
+    members: crate::group::Members,
+    delays: Vec<Option<u16>>,
+}
+
+impl TestCands {
+    pub fn from_parts(names: &[Arc<str>], delays: &[Option<u16>], factors: &[f64]) -> Self {
+        TestCands {
+            members: crate::group::Members::for_test(names, factors),
+            delays: delays.to_vec(),
+        }
+    }
+
+    pub fn view(&self) -> CandidateView<'_> {
+        CandidateView::from_delays(&self.members, &self.delays)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &Arc<str>> {
+        self.members.nodes().iter().map(crate::node::Node::name)
+    }
+}
+
+pub(super) fn cands(names: &[Arc<str>], delays: &[u16]) -> TestCands {
+    let delays: Vec<Option<u16>> = delays.iter().map(|&delay| Some(delay)).collect();
+    let factors = vec![1.0; names.len()];
+    TestCands::from_parts(names, &delays, &factors)
 }
 
 pub(super) fn settings() -> Settings {
@@ -46,13 +62,8 @@ pub(super) fn state() -> Arc<SmartState> {
     SmartState::new(settings())
 }
 
-pub(super) fn pick(
-    state: &SmartState,
-    now: Stamp,
-    site: Option<&str>,
-    cands: &[Candidate<'_>],
-) -> usize {
-    state.pick(now, site, cands, None, true).0
+pub(super) fn pick(state: &SmartState, now: Stamp, site: Option<&str>, cands: &TestCands) -> usize {
+    state.pick(now, site, &cands.view(), None, true).0
 }
 
 pub(super) fn pair(actions: &Actions) -> Option<(Arc<str>, Option<Arc<str>>)> {
@@ -92,7 +103,7 @@ pub(super) fn left(state: &SmartState, node: &str, now: Stamp) -> Duration {
     lock(&state.book)
         .nodes
         .get(node)
-        .map_or(Duration::ZERO, |node| node.ejection_left(now))
+        .map_or(Duration::ZERO, |node| node.ejection(now).1)
 }
 
 fn ok_round(state: &SmartState, now: Stamp, names: &[Arc<str>]) {
@@ -189,7 +200,7 @@ fn twenty_percent_failures_move_the_default_and_one_failure_on_a_busy_node_does_
         ok_round(&busy, t0, &names);
     }
     timeout(&busy, t0, "a", true);
-    let (index, actions) = busy.pick(t0, None, &cands, None, true);
+    let (index, actions) = busy.pick(t0, None, &cands.view(), None, true);
     assert_eq!(index, A);
     assert!(!actions.refresh);
 
@@ -202,7 +213,7 @@ fn twenty_percent_failures_move_the_default_and_one_failure_on_a_busy_node_does_
             ok_round(&flaky, t0, &names);
         }
     }
-    let (index, actions) = flaky.pick(t0, None, &cands, None, true);
+    let (index, actions) = flaky.pick(t0, None, &cands.view(), None, true);
     assert_eq!(index, B);
     assert!(actions.refresh);
 }
@@ -219,7 +230,7 @@ fn an_idle_node_returns_to_the_default_after_a_single_timeout_in_1994_seconds() 
 
     // 100 + 5000 * 2^(-t/300) < 150 first holds at t = 300 * log2(100) = 1993.16 s.
     let back = (1..4000)
-        .find(|secs| state.default_index(at(t0, *secs), &cands) == A)
+        .find(|secs| state.default_index(at(t0, *secs), &cands.view()) == A)
         .expect("the default comes back");
     assert_eq!(back, 1994);
 }
@@ -350,33 +361,9 @@ fn a_node_without_a_delay_waits_and_none_at_all_means_the_first() {
     let state = state();
     let t0 = base();
     let names = names(&["a", "b", "c"]);
-    let none = |delay: Option<u16>| Candidate {
-        name: &names[A],
-        delay_ms: delay,
-        factor: 1.0,
-    };
-    let cold = [
-        none(None),
-        Candidate {
-            name: &names[B],
-            delay_ms: None,
-            factor: 1.0,
-        },
-    ];
+    let cold = TestCands::from_parts(&names[..2], &[None, None], &[1.0, 1.0]);
     assert_eq!(pick(&state, t0, None, &cold), A);
-    let warm = [
-        none(None),
-        Candidate {
-            name: &names[B],
-            delay_ms: Some(80),
-            factor: 1.0,
-        },
-        Candidate {
-            name: &names[C],
-            delay_ms: Some(60),
-            factor: 1.0,
-        },
-    ];
+    let warm = TestCands::from_parts(&names, &[None, Some(80), Some(60)], &[1.0, 1.0, 1.0]);
     assert_eq!(pick(&state, t0, None, &warm), C);
 }
 
@@ -384,18 +371,7 @@ fn a_node_without_a_delay_waits_and_none_at_all_means_the_first() {
 fn the_priority_factor_divides_the_delay_and_tolerance_keeps_the_previous_default() {
     let t0 = base();
     let names = names(&["a", "b"]);
-    let favoured = [
-        Candidate {
-            name: &names[A],
-            delay_ms: Some(100),
-            factor: 1.0,
-        },
-        Candidate {
-            name: &names[B],
-            delay_ms: Some(150),
-            factor: 2.0,
-        },
-    ];
+    let favoured = TestCands::from_parts(&names, &[Some(100), Some(150)], &[1.0, 2.0]);
     assert_eq!(pick(&state(), t0, None, &favoured), B);
 
     let tolerant = SmartState::new(Settings {
@@ -422,7 +398,7 @@ fn every_node_ejected_serves_the_one_whose_ejection_ends_first() {
     let now = at(t0, 12);
     assert_eq!(pick(&state, now, None, &cands), B);
     assert_eq!(pick(&state, now, Some("x"), &cands), B);
-    assert_eq!(state.default_index(now, &cands), B);
+    assert_eq!(state.default_index(now, &cands.view()), B);
 }
 
 #[test]
@@ -431,14 +407,14 @@ fn a_pin_is_honoured_until_its_node_is_ejected() {
     let t0 = base();
     let names = names(&["a", "b"]);
     let cands = cands(&names, &[10, 20]);
-    let (index, actions) = state.pick(t0, Some("x"), &cands, Some("b"), true);
+    let (index, actions) = state.pick(t0, Some("x"), &cands.view(), Some("b"), true);
     assert_eq!((index, actions.revoke_pin), (B, false));
     assert_eq!(state.book_sites(), 0, "a pinned pick leaves no site memory");
 
     eject(&state, t0, "b");
-    let (index, actions) = state.pick(t0, Some("x"), &cands, Some("b"), true);
+    let (index, actions) = state.pick(t0, Some("x"), &cands.view(), Some("b"), true);
     assert_eq!((index, actions.revoke_pin), (A, true));
-    let (_, quiet) = state.pick(t0, Some("x"), &cands, Some("b"), false);
+    let (_, quiet) = state.pick(t0, Some("x"), &cands.view(), Some("b"), false);
     assert_eq!(quiet, Actions::default());
 }
 
@@ -447,11 +423,11 @@ fn a_read_only_pick_changes_nothing() {
     let state = state();
     let t0 = base();
     let names = names(&["a", "b"]);
-    let (index, actions) = state.pick(t0, Some("x"), &cands(&names, &[10, 20]), None, false);
+    let (index, actions) = state.pick(t0, Some("x"), &cands(&names, &[10, 20]).view(), None, false);
     assert_eq!((index, actions), (A, Actions::default()));
     assert_eq!(state.book_sites(), 0);
     assert!(lock(&state.book).default.is_none());
-    assert_eq!(state.default_index(t0, &cands(&names, &[30, 20])), B);
+    assert_eq!(state.default_index(t0, &cands(&names, &[30, 20]).view()), B);
     assert!(lock(&state.book).default.is_none());
 }
 
@@ -489,11 +465,11 @@ fn the_first_pick_is_not_a_change_but_a_later_move_is() {
     let state = state();
     let t0 = base();
     let names = names(&["a", "b"]);
-    let (_, first) = state.pick(t0, None, &cands(&names, &[10, 20]), None, true);
+    let (_, first) = state.pick(t0, None, &cands(&names, &[10, 20]).view(), None, true);
     assert!(!first.refresh);
-    let (_, moved) = state.pick(t0, None, &cands(&names, &[90, 20]), None, true);
+    let (_, moved) = state.pick(t0, None, &cands(&names, &[90, 20]).view(), None, true);
     assert!(moved.refresh);
-    let (_, same) = state.pick(t0, None, &cands(&names, &[90, 20]), None, true);
+    let (_, same) = state.pick(t0, None, &cands(&names, &[90, 20]).view(), None, true);
     assert!(!same.refresh);
 }
 

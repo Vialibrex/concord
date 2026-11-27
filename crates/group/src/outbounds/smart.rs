@@ -6,8 +6,9 @@ use concord_common::{CoreError, FlowMeta, Network};
 use concord_platform::is_local_exhaustion;
 
 use super::{Entry, Outbounds, Resolved};
-use crate::group::{Group, Members, Policy, Touch};
-use crate::smart::{Candidate, FailKind, Owner, SmartFlow, Stamp, run};
+use crate::group::{Group, Members, Touch};
+use crate::node::Node;
+use crate::smart::{FailKind, Owner, SmartFlow, Stamp, run};
 use crate::strategy::destination_key;
 
 /// A smart group on a chain, with the member of it the chain went through.
@@ -43,19 +44,12 @@ fn fail_kind(err: &io::Error) -> Option<FailKind> {
 
 /// A selection the user made holds the group on its member, as `Owner::pick` reads it: one naming a proxy no
 /// longer a member is ignored there, and one on an ejected member was revoked by the pick that met it.
-fn pinned(group: &Group) -> bool {
+fn pinned(group: &Group, members: &Members) -> bool {
     group
         .shared()
         .selections
         .get(group.name())
-        .is_some_and(|pin| group.members().find(&pin).is_some())
-}
-
-fn smart_candidates<'m>(on: &OnChain<'_>, members: &'m Arc<Members>) -> Option<Vec<Candidate<'m>>> {
-    let Policy::Smart { priority, .. } = on.group.policy() else {
-        return None;
-    };
-    Some(on.owner.candidates(on.group, members, priority))
+        .is_some_and(|pin| members.find(&pin).is_some())
 }
 
 impl Outbounds {
@@ -194,16 +188,18 @@ impl Outbounds {
         tried: &[Arc<str>],
     ) -> Option<Duration> {
         let on = self.smart_on(chain).next()?;
-        if pinned(on.group) {
+        let members = on.group.members();
+        if pinned(on.group, &members) {
             return None;
         }
-        let members = on.group.members();
-        let candidates = smart_candidates(&on, &members)?;
-        let live = on
-            .owner
-            .state()
-            .live_untried(Stamp::now(), &candidates, tried);
-        self.route_through(&on, &members, live, meta, host, Touch::No)?;
+        let live = on.owner.state().live_untried(
+            Stamp::now(),
+            members.nodes().iter().map(Node::name),
+            tried,
+        );
+        if !self.has_route(&members, &live, meta, host) {
+            return None;
+        }
         on.owner.state().connect_budget(on.member)
     }
 
@@ -219,16 +215,33 @@ impl Outbounds {
         tried: &[Arc<str>],
     ) -> Option<(Resolved, Arc<str>)> {
         let on = self.smart_on(chain).next()?;
-        if pinned(on.group) {
+        let members = on.group.members();
+        if pinned(on.group, &members) {
             return None;
         }
-        let members = on.group.members();
-        let candidates = smart_candidates(&on, &members)?;
+        let candidates = on.owner.candidates(on.group, &members);
         let order = on
             .owner
             .state()
             .retry_order(Stamp::now(), &candidates, tried);
         self.route_through(&on, &members, order, meta, host, Touch::Yes)
+    }
+
+    fn has_route(
+        &self,
+        members: &Members,
+        order: &[usize],
+        meta: &FlowMeta,
+        host: Option<&str>,
+    ) -> bool {
+        order.iter().any(|&index| {
+            members.nodes().get(index).is_some_and(|node| {
+                matches!(
+                    self.walk(node.clone(), meta, host, Touch::No),
+                    Resolved::Route { .. }
+                )
+            })
+        })
     }
 
     /// The route through the first of `order` that walks to one, with the groups outside the smart group kept.

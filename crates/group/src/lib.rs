@@ -9,6 +9,7 @@ mod first_write;
 mod group;
 pub mod health;
 pub mod http;
+mod members;
 mod node;
 mod outbounds;
 mod priority;

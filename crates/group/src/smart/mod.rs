@@ -4,6 +4,8 @@
 #[cfg(test)]
 mod arbitration_tests;
 mod book;
+#[cfg(test)]
+mod diff_tests;
 mod flow;
 mod node;
 mod owner;
@@ -22,12 +24,20 @@ use std::time::Duration;
 use concord_common::sync::lock;
 use std::sync::Mutex;
 
+#[cfg(test)]
+pub(crate) use book::take_align_scans;
 use book::{Book, Failure};
 pub use flow::{FlowEnd, FlowTap};
 use node::Rtt;
+#[cfg(test)]
+pub(crate) use node::take_exp2_calls;
 pub use owner::SmartFlow;
-pub(crate) use owner::{Owner, answered, run};
+pub(crate) use owner::{CandidateView, Owner, answered, run};
+#[cfg(test)]
+pub(crate) use owner::{set_candidates_mid_scan, take_table_builds};
 use select::Row;
+#[cfg(test)]
+pub(crate) use select::take_row_allocs;
 pub use stamp::Stamp;
 
 const DEFAULT_HALF_LIFE: Duration = Duration::from_secs(300);
@@ -55,14 +65,6 @@ pub(crate) struct Settings {
     pub half_life: Duration,
     /// The group's test timeout, booked as the time a failed probe took.
     pub probe_timeout: Duration,
-}
-
-pub(crate) struct Candidate<'a> {
-    pub name: &'a Arc<str>,
-    /// Median of the node's successful probe delays; `None` when none succeeded.
-    pub delay_ms: Option<u16>,
-    /// Policy-priority factor, 1.0 when none matches; above 1 prefers the node.
-    pub factor: f64,
 }
 
 /// Test `suspect` and `witness` (only the suspect when there is none), then call `SmartState::arbitrated`
@@ -134,7 +136,7 @@ impl SmartState {
         &self,
         now: Stamp,
         site: Option<&str>,
-        candidates: &[Candidate<'_>],
+        candidates: &CandidateView<'_>,
         pin: Option<&str>,
         touch: bool,
     ) -> (usize, Actions) {
@@ -145,36 +147,73 @@ impl SmartState {
             book.sites.expire(now);
             actions.merge(book.judge_overdue(now, settings));
         }
-        let mut rows = select::rows(&book.nodes, now, candidates, settings.half_life);
-        if touch && !book.holds_exactly(&rows) {
-            book.sync_members(candidates, now);
-            rows = select::rows(&book.nodes, now, candidates, settings.half_life);
-        }
+        let aligned = if touch {
+            book.ensure_aligned(candidates, now)
+        } else {
+            book.is_synced(candidates)
+        };
         let tolerance = f64::from(settings.tolerance_ms);
-        let global = select::default_index(&rows, book.default.as_deref(), tolerance);
+        let summary = select::summarize(
+            &book.nodes,
+            aligned,
+            now,
+            candidates,
+            settings.half_life,
+            book.default.as_deref(),
+            tolerance,
+            touch,
+        );
         if touch {
-            book.track_default(&rows, global, &mut actions);
+            let default = candidates.name(summary.global);
+            let runner_up = summary.runner_up.and_then(|i| candidates.name(i));
+            book.track_default_names(default, runner_up, &mut actions);
         }
-        if let Some(index) = pin.and_then(|pin| rows.iter().position(|row| &**row.name == pin)) {
-            if rows.get(index).is_some_and(|row| !row.ejected) {
+        if let Some(index) = pin.and_then(|pin| candidates.index_of(pin)) {
+            if !select::is_ejected(&book.nodes, aligned, index, candidates.name(index), now) {
                 return (index, finish(&mut book, touch, actions));
             }
             actions.revoke_pin |= touch;
         }
         let index = match site {
-            None => global,
+            None => summary.global,
             Some(site) => {
                 let entry = book.sites.live(site, now);
                 let live = entry.is_some();
-                let index = entry.map_or(global, |entry| {
-                    select::site_choice(&rows, entry, book.default.as_deref(), tolerance)
-                });
-                if touch && let Some(row) = rows.get(index) {
+                let index = match entry {
+                    None => summary.global,
+                    Some(entry) => {
+                        let current = candidates.index_of(&entry.node).filter(|&index| {
+                            !select::is_ejected(
+                                &book.nodes,
+                                aligned,
+                                index,
+                                candidates.name(index),
+                                now,
+                            )
+                        });
+                        if let Some(index) = current
+                            && (entry.problem || !entry.is_demoted(&entry.node))
+                        {
+                            index
+                        } else {
+                            let rows =
+                                select::rows(&book.nodes, now, candidates, settings.half_life);
+                            select::site_choice(
+                                &rows,
+                                entry,
+                                book.default.as_deref(),
+                                tolerance,
+                                summary.global,
+                            )
+                        }
+                    }
+                };
+                if touch && let Some(name) = candidates.name(index) {
                     if live {
                         book.sites.renew(site, now);
-                        book.sites.set_node(site, row.name);
+                        book.sites.set_node(site, name);
                     } else {
-                        book.sites.insert(site, row.name, now);
+                        book.sites.insert(site, name, now);
                     }
                 }
                 index
@@ -184,14 +223,20 @@ impl SmartState {
     }
 
     #[cfg(test)]
-    pub fn default_index(&self, now: Stamp, candidates: &[Candidate<'_>]) -> usize {
+    pub fn default_index(&self, now: Stamp, candidates: &CandidateView<'_>) -> usize {
         let book = lock(&self.book);
-        let rows = select::rows(&book.nodes, now, candidates, self.settings.half_life);
-        select::default_index(
-            &rows,
+        let aligned = book.is_synced(candidates);
+        select::summarize(
+            &book.nodes,
+            aligned,
+            now,
+            candidates,
+            self.settings.half_life,
             book.default.as_deref(),
             f64::from(self.settings.tolerance_ms),
+            false,
         )
+        .global
     }
 
     pub fn dial_failed(
@@ -333,19 +378,18 @@ impl SmartState {
 
     /// Members not in `exclude` and not ejected, in member order: the same set `retry_order` puts before the
     /// ejected ones, without the scoring that orders it.
-    pub fn live_untried(
+    pub fn live_untried<'a>(
         &self,
         now: Stamp,
-        candidates: &[Candidate<'_>],
+        names: impl Iterator<Item = &'a Arc<str>>,
         exclude: &[Arc<str>],
     ) -> Vec<usize> {
         let book = lock(&self.book);
-        candidates
-            .iter()
+        names
             .enumerate()
-            .filter(|(index, candidate)| {
-                !exclude.contains(candidate.name)
-                    && !select::state_of(&book.nodes, *index, candidate.name)
+            .filter(|(index, name)| {
+                !exclude.contains(*name)
+                    && !select::state_of(&book.nodes, *index, name)
                         .0
                         .is_some_and(|state| state.ejected(now))
             })
@@ -358,17 +402,18 @@ impl SmartState {
     pub fn retry_order(
         &self,
         now: Stamp,
-        candidates: &[Candidate<'_>],
+        candidates: &CandidateView<'_>,
         exclude: &[Arc<str>],
     ) -> Vec<usize> {
         let book = lock(&self.book);
         let rows = select::rows(&book.nodes, now, candidates, self.settings.half_life);
         let open = |row: &Row<'_>| !exclude.contains(row.name);
         let tolerance = f64::from(self.settings.tolerance_ms);
-        let mut order: Vec<usize> =
-            select::default_of(&rows, book.default.as_deref(), tolerance, open)
-                .into_iter()
-                .collect();
+        let first = select::default_of(&rows, book.default.as_deref(), tolerance, open);
+        let mut order: Vec<usize> = Vec::with_capacity(rows.len());
+        if let Some(index) = first {
+            order.push(index);
+        }
         let mut scored: Vec<(usize, f64)> = rows
             .iter()
             .enumerate()
@@ -393,11 +438,7 @@ impl SmartState {
             .map(|(index, _)| index)
             .chain(unscored)
             .chain(ejected.into_iter().map(|(index, _)| index));
-        for index in rest {
-            if !order.contains(&index) {
-                order.push(index);
-            }
-        }
+        order.extend(rest.filter(|&index| Some(index) != first));
         order
     }
 

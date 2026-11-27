@@ -206,14 +206,16 @@ async fn a_tls_flow_without_a_download_for_three_seconds_is_judged_once() {
     let early = state.pick(
         at(t0, 0).after(Duration::from_millis(2900)),
         Some("y"),
-        &cands,
+        &cands.view(),
         None,
         true,
     );
     assert_eq!(early.1, Actions::default());
 
     advance(Duration::from_millis(200)).await;
-    let late = state.pick(at(t0, 3), Some("y"), &cands, None, true).1;
+    let late = state
+        .pick(at(t0, 3), Some("y"), &cands.view(), None, true)
+        .1;
     assert_eq!(
         pair(&late),
         Some((names[A].clone(), Some(names[B].clone())))
@@ -221,7 +223,9 @@ async fn a_tls_flow_without_a_download_for_three_seconds_is_judged_once() {
     state.arbitrated_now(at(t0, 3), true, true);
     assert_eq!(pick(&state, at(t0, 3), Some("x"), &cands), B);
 
-    let again = state.pick(at(t0, 4), Some("y"), &cands, None, true).1;
+    let again = state
+        .pick(at(t0, 4), Some("y"), &cands.view(), None, true)
+        .1;
     assert_eq!(again.arbitrate, None);
     advance(Duration::from_secs(2)).await;
     let ended = tap.finish(FlowEnd {
@@ -267,7 +271,7 @@ async fn a_download_books_a_success_and_answers_the_flow() {
     advance(Duration::from_secs(10)).await;
     assert_eq!(
         state
-            .pick(at(t0, 10), Some("y"), &cands, None, true)
+            .pick(at(t0, 10), Some("y"), &cands.view(), None, true)
             .1
             .arbitrate,
         None

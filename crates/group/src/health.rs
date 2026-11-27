@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
 use concord_common::sync::lock;
@@ -99,11 +99,32 @@ struct Inner {
     extra: HashMap<String, State>,
 }
 
+/// Per-group health generation bumped synchronously when any watched member records a test result.
+#[derive(Debug, Default)]
+pub(crate) struct HealthWatch {
+    epoch: AtomicU64,
+}
+
+impl HealthWatch {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    pub fn notify(&self) {
+        self.epoch.fetch_add(1, Ordering::Release);
+    }
+}
+
 /// Results hang on the node that was tested, so a provider replacing the node
 /// behind a name leaves the old result with the old node.
 #[derive(Debug)]
 pub struct NodeHealth {
     inner: Mutex<Inner>,
+    watchers: Mutex<Vec<(Weak<HealthWatch>, usize)>>,
 }
 
 impl Default for NodeHealth {
@@ -113,12 +134,25 @@ impl Default for NodeHealth {
                 global: State::new(),
                 extra: HashMap::new(),
             }),
+            watchers: Mutex::new(Vec::new()),
         }
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static LOCK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_lock_calls() -> usize {
+    LOCK_CALLS.with(|calls| calls.replace(0))
+}
+
 impl NodeHealth {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        #[cfg(test)]
+        LOCK_CALLS.with(|calls| calls.set(calls.get() + 1));
         lock(&self.inner)
     }
 
@@ -197,9 +231,42 @@ impl NodeHealth {
         }
     }
 
+    pub(crate) fn watch(&self, watcher: &Arc<HealthWatch>) {
+        let weak = Arc::downgrade(watcher);
+        let mut watchers = lock(&self.watchers);
+        for (existing, count) in watchers.iter_mut() {
+            if existing.ptr_eq(&weak) {
+                *count += 1;
+                return;
+            }
+        }
+        watchers.push((weak, 1));
+    }
+
+    pub(crate) fn unwatch(&self, watcher: &Arc<HealthWatch>) {
+        let weak = Arc::downgrade(watcher);
+        let mut watchers = lock(&self.watchers);
+        let mut index = 0;
+        while index < watchers.len() {
+            let remove = match watchers.get_mut(index) {
+                Some((existing, count)) if existing.ptr_eq(&weak) => {
+                    *count = count.saturating_sub(1);
+                    *count == 0
+                }
+                Some((existing, _)) => existing.strong_count() == 0,
+                None => break,
+            };
+            if remove {
+                watchers.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
     /// `failed` is a test that did not complete; `satisfied` is an expected status
     /// match, which only the per-URL state cares about.
-    pub fn record(&self, url: &str, delay: u16, failed: bool, satisfied: bool, epoch: &AtomicU64) {
+    pub fn record(&self, url: &str, delay: u16, failed: bool, satisfied: bool) {
         let mut record = DelayRecord {
             time: SystemTime::now(),
             delay: if failed { 0 } else { delay },
@@ -220,7 +287,20 @@ impl NodeHealth {
             state.alive = alive;
             state.put(record);
         }
-        epoch.fetch_add(1, Ordering::Release);
+        let mut watchers = lock(&self.watchers);
+        let mut index = 0;
+        while index < watchers.len() {
+            let live = watchers.get(index).and_then(|(weak, _)| weak.upgrade());
+            match live {
+                Some(watcher) => {
+                    watcher.notify();
+                    index += 1;
+                }
+                None => {
+                    watchers.swap_remove(index);
+                }
+            }
+        }
     }
 }
 
@@ -279,12 +359,13 @@ mod tests {
 
     #[test]
     fn a_node_is_alive_until_a_test_says_otherwise() {
-        let epoch = AtomicU64::new(0);
+        let watch = HealthWatch::new();
         let health = NodeHealth::default();
+        health.watch(&watch);
         assert!(health.alive_for("u"));
         assert_eq!(health.last_delay_for("u"), NOT_ALIVE);
 
-        health.record("u", 120, false, true, &epoch);
+        health.record("u", 120, false, true);
         assert!(health.alive_for("u"));
         assert_eq!(health.last_delay_for("u"), 120);
         assert!(
@@ -292,18 +373,17 @@ mod tests {
             "an untested URL follows the global state"
         );
 
-        health.record("u", 0, true, false, &epoch);
+        health.record("u", 0, true, false);
         assert!(!health.alive_for("u"));
         assert!(!health.alive_for("other"));
         assert_eq!(health.last_delay_for("u"), NOT_ALIVE);
-        assert_eq!(epoch.load(Ordering::Relaxed), 2);
+        assert_eq!(watch.epoch(), 2);
     }
 
     #[test]
     fn an_unexpected_status_kills_only_that_url() {
-        let epoch = AtomicU64::new(0);
         let health = NodeHealth::default();
-        health.record("u", 80, false, false, &epoch);
+        health.record("u", 80, false, false);
         assert!(!health.alive_for("u"));
         assert!(
             health.alive_for("v"),
@@ -315,10 +395,9 @@ mod tests {
 
     #[test]
     fn history_keeps_the_last_ten() {
-        let epoch = AtomicU64::new(0);
         let health = NodeHealth::default();
         for i in 1..=15 {
-            health.record("u", i, false, true, &epoch);
+            health.record("u", i, false, true);
         }
         let history = health.history();
         assert_eq!(history.len(), 10);

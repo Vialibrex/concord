@@ -1,6 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -13,9 +13,10 @@ use indexmap::IndexMap;
 use tokio::time::Instant;
 
 use crate::check::Check;
-use crate::health::{NodeHealth, StatusRanges};
-use crate::node::{Ghost, Item, Leaf, Node};
-use crate::priority::Priority;
+use crate::health::{HealthWatch, NodeHealth, StatusRanges};
+pub use crate::members::{Emptiness, Members};
+use crate::node::{Item, Leaf, Node};
+use crate::priority::{Priority, normalize_factor};
 use crate::provider::ProxyProvider;
 use crate::shared::Shared;
 use crate::smart::Owner;
@@ -36,40 +37,28 @@ pub enum Policy {
     Relay,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Emptiness {
-    NotEmpty,
-    /// Nothing to pick, and the empty fallback answers.
-    Fallback,
-    /// Every member that would match is a node the core dropped.
-    Quarantined,
+#[cfg(test)]
+std::thread_local! {
+    static URL_TEST_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FASTEST_MID_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-pub struct Members {
-    nodes: Vec<Node>,
-    ghosts: Vec<Arc<Ghost>>,
-    index: HashMap<Arc<str>, usize>,
-    versions: Vec<u32>,
-    emptiness: Emptiness,
+#[cfg(test)]
+pub(crate) fn take_url_test_scans() -> usize {
+    URL_TEST_SCANS.with(|scans| scans.replace(0))
 }
 
-impl Members {
-    pub fn nodes(&self) -> &[Node] {
-        &self.nodes
-    }
+#[cfg(test)]
+pub(crate) fn set_fastest_mid_scan(hook: impl FnOnce() + 'static) {
+    FASTEST_MID_SCAN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
 
-    pub fn ghosts(&self) -> &[Arc<Ghost>] {
-        &self.ghosts
-    }
-
-    pub fn emptiness(&self) -> Emptiness {
-        self.emptiness
-    }
-
-    pub fn find(&self, name: &str) -> Option<&Node> {
-        self.index
-            .get(name)
-            .and_then(|index| self.nodes.get(*index))
+#[cfg(test)]
+fn fire_fastest_mid_scan() {
+    let hook = FASTEST_MID_SCAN.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
     }
 }
 
@@ -121,7 +110,7 @@ struct FastState {
 
 struct Cached {
     epoch: u64,
-    members: usize,
+    members_id: u64,
     pin: Option<Arc<str>>,
     node: Node,
 }
@@ -136,6 +125,8 @@ struct FailState {
 pub struct Group {
     parts: GroupParts,
     members: ArcSwap<Members>,
+    next_members_id: AtomicU64,
+    health_watch: Arc<HealthWatch>,
     rebuild: Mutex<()>,
     health: NodeHealth,
     fast: Mutex<FastState>,
@@ -155,13 +146,9 @@ impl Group {
             _ => None,
         };
         let group = Group {
-            members: ArcSwap::from_pointee(Members {
-                nodes: Vec::new(),
-                ghosts: Vec::new(),
-                index: HashMap::new(),
-                versions: vec![u32::MAX; parts.uses.len()],
-                emptiness: Emptiness::Fallback,
-            }),
+            members: ArcSwap::from_pointee(Members::empty(parts.uses.len())),
+            next_members_id: AtomicU64::new(1),
+            health_watch: HealthWatch::new(),
             parts,
             rebuild: Mutex::new(()),
             health: NodeHealth::default(),
@@ -247,6 +234,17 @@ impl Group {
         &self.parts.shared
     }
 
+    pub(crate) fn health_watch(&self) -> &Arc<HealthWatch> {
+        &self.health_watch
+    }
+
+    fn watches_health(&self) -> bool {
+        matches!(
+            self.parts.policy,
+            Policy::UrlTest { .. } | Policy::Smart { .. } | Policy::Fallback
+        )
+    }
+
     pub(crate) fn test_timeout(&self) -> Duration {
         self.parts.test_timeout
     }
@@ -284,12 +282,13 @@ impl Group {
     }
 
     fn is_current(&self, members: &Members) -> bool {
-        self.parts.uses.len() == members.versions.len()
+        let versions = members.versions();
+        self.parts.uses.len() == versions.len()
             && self
                 .parts
                 .uses
                 .iter()
-                .zip(&members.versions)
+                .zip(versions)
                 .all(|(provider, version)| provider.version() == *version)
     }
 
@@ -368,10 +367,13 @@ impl Group {
                 Item::Ghost(ghost) => ghosts.push(ghost),
             }
         }
-        let mut index = HashMap::with_capacity(nodes.len());
-        for (position, node) in nodes.iter().enumerate() {
-            index.entry(node.name().clone()).or_insert(position);
-        }
+        let factors: Box<[f64]> = match &parts.policy {
+            Policy::Smart { priority, .. } if !priority.is_empty() => nodes
+                .iter()
+                .map(|node| normalize_factor(priority.factor(node.name())))
+                .collect(),
+            _ => Box::new([]),
+        };
         let emptiness = if !nodes.is_empty() {
             Emptiness::NotEmpty
         } else if (!ghosts.is_empty() || parts.refused) && !parts.explicit_fallback {
@@ -379,13 +381,16 @@ impl Group {
         } else {
             Emptiness::Fallback
         };
-        Members {
-            nodes,
-            ghosts,
-            index,
-            versions,
-            emptiness,
-        }
+        let id = self.next_members_id.fetch_add(1, Ordering::Relaxed);
+        let watch = if self.watches_health() {
+            for node in &nodes {
+                node.health().watch(&self.health_watch);
+            }
+            Some(Arc::clone(&self.health_watch))
+        } else {
+            None
+        };
+        Members::new(id, nodes, ghosts, factors, versions, emptiness, watch)
     }
 
     fn join(&self, sections: Vec<(Option<Arc<str>>, Vec<Item>)>, has_own: bool) -> Vec<Item> {
@@ -420,9 +425,9 @@ impl Group {
     /// The names the host lists: the members, or the empty fallback standing in
     /// for none, or nothing when the group refuses.
     pub fn listing(&self, members: &Members) -> Vec<Arc<str>> {
-        match members.emptiness {
+        match members.emptiness() {
             Emptiness::NotEmpty => members
-                .nodes
+                .nodes()
                 .iter()
                 .map(|node| node.name().clone())
                 .collect(),
@@ -436,13 +441,13 @@ impl Group {
             self.touch();
         }
         let members = self.members();
-        match members.emptiness {
+        match members.emptiness() {
             Emptiness::Fallback => {
                 return Pick::Node(Node::Leaf(self.parts.empty_fallback.clone()));
             }
             Emptiness::Quarantined => {
                 let shown = members
-                    .ghosts
+                    .ghosts()
                     .first()
                     .map(|ghost| ghost.name.clone())
                     .unwrap_or_default();
@@ -472,7 +477,7 @@ impl Group {
                     if let Some(node) = members.find(&chosen) {
                         return Pick::Node(node.clone());
                     }
-                    let ghost = members.ghosts.iter().find(|ghost| ghost.name == chosen);
+                    let ghost = members.ghosts().iter().find(|ghost| ghost.name == chosen);
                     if ghost.is_some() || self.parts.quarantined.contains(&*chosen) {
                         return Pick::Rejected {
                             reason: Arc::from(format!(
@@ -484,13 +489,12 @@ impl Group {
                 }
                 Pick::Node(first.clone())
             }
-            Policy::UrlTest { tolerance } => {
-                Pick::Node(self.url_test_pick(&members, *tolerance, &Priority::default()))
-            }
-            Policy::Smart { priority, .. } => {
-                let index = self.smart.as_ref().map_or(0, |owner| {
-                    owner.pick(self, &members, priority, flow, host, touch)
-                });
+            Policy::UrlTest { tolerance } => Pick::Node(self.url_test_pick(&members, *tolerance)),
+            Policy::Smart { .. } => {
+                let index = self
+                    .smart
+                    .as_ref()
+                    .map_or(0, |owner| owner.pick(self, &members, flow, host, touch));
                 Pick::Node(nodes.get(index).unwrap_or(first).clone())
             }
             Policy::Fallback => {
@@ -525,32 +529,51 @@ impl Group {
         }
     }
 
-    fn url_test_pick(&self, members: &Arc<Members>, tolerance: u16, priority: &Priority) -> Node {
+    #[cfg(test)]
+    pub(crate) fn url_test_pick_with(&self, members: &Arc<Members>, tolerance: u16) -> Node {
+        self.url_test_pick(members, tolerance)
+    }
+
+    fn url_test_pick(&self, members: &Arc<Members>, tolerance: u16) -> Node {
         let shared = &self.parts.shared;
         let url = self.parts.url.as_str();
-        let pin = shared.selections.get(&self.parts.name);
-        let epoch = shared.health_epoch.load(Ordering::Acquire);
-        let ptr = Arc::as_ptr(members) as usize;
+        let members_id = members.id();
         let mut state = lock(&self.fast);
+        let pin = shared.selections.get(&self.parts.name);
+        let epoch = self.health_watch.epoch();
         if let Some(cached) = &state.cached
             && cached.epoch == epoch
-            && cached.members == ptr
+            && cached.members_id == members_id
             && cached.pin == pin
         {
             return cached.node.clone();
         }
+        #[cfg(test)]
+        URL_TEST_SCANS.with(|scans| scans.set(scans.get() + 1));
         let nodes = members.nodes();
-        let chosen = self.fastest(&mut state, nodes, pin.as_deref(), url, tolerance, priority);
-        let changed = state
+        let stale_members = state
             .cached
             .as_ref()
-            .is_none_or(|cached| !cached.node.same(&chosen));
-        state.cached = Some(Cached {
-            epoch,
-            members: ptr,
-            pin,
-            node: chosen.clone(),
-        });
+            .is_some_and(|cached| cached.members_id > members_id);
+        let chosen = if stale_members {
+            let mut prev = state.node.clone();
+            self.fastest(&mut prev, nodes, pin.as_deref(), url, tolerance)
+        } else {
+            self.fastest(&mut state.node, nodes, pin.as_deref(), url, tolerance)
+        };
+        let changed = !stale_members
+            && state
+                .cached
+                .as_ref()
+                .is_none_or(|cached| !cached.node.same(&chosen));
+        if !stale_members {
+            state.cached = Some(Cached {
+                epoch,
+                members_id,
+                pin,
+                node: chosen.clone(),
+            });
+        }
         drop(state);
         if changed {
             shared.request_refresh();
@@ -560,34 +583,31 @@ impl Group {
 
     fn fastest(
         &self,
-        state: &mut FastState,
+        previous: &mut Option<Node>,
         nodes: &[Node],
         pin: Option<&str>,
         url: &str,
         tolerance: u16,
-        priority: &Priority,
     ) -> Node {
         if let Some(pin) = pin
             && let Some(node) = nodes
                 .iter()
-                .find(|node| node.health().alive_for(url) && node.name().as_ref() == pin)
+                .find(|node| node.name().as_ref() == pin && node.health().alive_for(url))
         {
-            state.node = Some(node.clone());
+            *previous = Some(node.clone());
             return node.clone();
         }
         let mut fast = nodes
             .first()
             .cloned()
             .unwrap_or_else(|| Node::Leaf(self.parts.empty_fallback.clone()));
-        let score = |node: &Node| priority.score(node.name(), node.health().last_delay_for(url));
+        let score = |node: &Node| f64::from(node.health().last_delay_for(url));
         let mut best = score(&fast);
+        #[cfg(test)]
+        fire_fastest_mid_scan();
         let mut previous_exists = false;
         for (index, node) in nodes.iter().enumerate() {
-            if state
-                .node
-                .as_ref()
-                .is_some_and(|previous| previous.same(node))
-            {
+            if previous.as_ref().is_some_and(|prev| prev.same(node)) {
                 previous_exists = true;
             }
             if index == 0 || !node.health().alive_for(url) {
@@ -599,13 +619,13 @@ impl Group {
                 best = delay;
             }
         }
-        let keep = state.node.as_ref().filter(|previous| {
+        let keep = previous.as_ref().filter(|prev| {
             previous_exists
-                && previous.health().alive_for(url)
-                && score(previous) <= score(&fast) + f64::from(tolerance)
+                && prev.health().alive_for(url)
+                && score(prev) <= score(&fast) + f64::from(tolerance)
         });
         let chosen = keep.cloned().unwrap_or(fast);
-        state.node = Some(chosen.clone());
+        *previous = Some(chosen.clone());
         chosen
     }
 

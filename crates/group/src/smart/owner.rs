@@ -1,6 +1,5 @@
 use std::future::Future;
 use std::pin::pin;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -8,14 +7,85 @@ use concord_common::FlowMeta;
 use concord_common::sync::lock;
 use futures_util::future::{Either, join_all, select};
 
-use super::{
-    Actions, Arbitrate, Candidate, DEFAULT_HALF_LIFE, FlowEnd, FlowTap, Settings, SmartState, Stamp,
-};
+use super::{Actions, Arbitrate, DEFAULT_HALF_LIFE, FlowEnd, FlowTap, Settings, SmartState, Stamp};
 use crate::group::{Group, Members, Touch};
 use crate::health::Outcome;
 use crate::node::Node;
 use crate::outbounds::Outbounds;
-use crate::priority::Priority;
+
+#[cfg(test)]
+std::thread_local! {
+    static TABLE_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CANDIDATES_MID_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_table_builds() -> usize {
+    TABLE_BUILDS.with(|builds| builds.replace(0))
+}
+
+#[cfg(test)]
+pub(crate) fn set_candidates_mid_scan(hook: impl FnOnce() + 'static) {
+    CANDIDATES_MID_SCAN.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn fire_candidates_mid_scan() {
+    let hook = CANDIDATES_MID_SCAN.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+fn divide_delay(delay: Option<u16>, factor: f64) -> Option<f64> {
+    delay.map(|delay| f64::from(delay) / factor)
+}
+
+/// Immutable, version-paired view of a smart group's members and pre-divided base scores.
+pub(crate) struct CandidateView<'a> {
+    members: &'a Members,
+    base_scores: Arc<[Option<f64>]>,
+}
+
+impl<'a> CandidateView<'a> {
+    #[cfg(test)]
+    pub(crate) fn from_delays(members: &'a Members, delays: &[Option<u16>]) -> CandidateView<'a> {
+        let base_scores: Arc<[Option<f64>]> = delays
+            .iter()
+            .enumerate()
+            .map(|(index, &delay)| divide_delay(delay, members.factor(index)))
+            .collect();
+        CandidateView {
+            members,
+            base_scores,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.nodes().len()
+    }
+
+    pub fn name(&self, index: usize) -> Option<&'a Arc<str>> {
+        self.members.nodes().get(index).map(Node::name)
+    }
+
+    pub fn base_score(&self, index: usize) -> Option<f64> {
+        self.base_scores.get(index).copied().flatten()
+    }
+
+    pub fn get(&self, index: usize) -> Option<(&'a Arc<str>, Option<f64>)> {
+        self.name(index).map(|name| (name, self.base_score(index)))
+    }
+
+    pub fn synced_id(&self) -> Option<u64> {
+        self.members.has_unique_names().then(|| self.members.id())
+    }
+
+    pub fn index_of(&self, name: &str) -> Option<usize> {
+        self.members.index_of(name)
+    }
+}
 
 /// What a smart group holds besides its policy: the state, and the way back to the `Outbounds` that probes run on.
 pub(crate) struct Owner {
@@ -24,12 +94,12 @@ pub(crate) struct Owner {
     table: Mutex<Option<Table>>,
 }
 
-/// Each member's median delay and policy-priority factor, valid while no test result landed
-/// (`Shared::health_epoch`) and the member list is the same one.
+/// Each member's pre-divided base score (`median_delay / factor`), valid while no watched member
+/// recorded a test result and the member snapshot is the same one.
 struct Table {
     epoch: u64,
-    members: usize,
-    values: Vec<(Option<u16>, f64)>,
+    members_id: u64,
+    base_scores: Arc<[Option<f64>]>,
 }
 
 impl Owner {
@@ -72,12 +142,11 @@ impl Owner {
         &self,
         group: &Arc<Group>,
         members: &Arc<Members>,
-        priority: &Priority,
         flow: &FlowMeta,
         host: Option<&str>,
         touch: Touch,
     ) -> usize {
-        let candidates = self.candidates(group, members, priority);
+        let candidates = self.candidates(group, members);
         let site = Outbounds::smart_site(flow, host);
         let pin = group.shared().selections.get(group.name());
         let touch = touch == Touch::Yes;
@@ -94,46 +163,52 @@ impl Owner {
         index
     }
 
-    /// Every member as the state reads it, recomputed only after a test result or a member change.
-    pub fn candidates<'a>(
-        &self,
-        group: &Group,
-        members: &'a Arc<Members>,
-        priority: &Priority,
-    ) -> Vec<Candidate<'a>> {
-        let epoch = group.shared().health_epoch.load(Ordering::Acquire);
-        let ptr = Arc::as_ptr(members) as usize;
+    /// Every member as the state reads it, recomputed only after a watched test result or a member change.
+    pub fn candidates<'a>(&self, group: &Group, members: &'a Arc<Members>) -> CandidateView<'a> {
+        let members_id = members.id();
         let mut slot = lock(&self.table);
-        if !slot
-            .as_ref()
-            .is_some_and(|table| table.epoch == epoch && table.members == ptr)
+        let epoch = group.health_watch().epoch();
+        if let Some(table) = slot.as_ref()
+            && table.epoch == epoch
+            && table.members_id == members_id
         {
-            *slot = None;
+            return CandidateView {
+                members,
+                base_scores: Arc::clone(&table.base_scores),
+            };
         }
-        let table = slot.get_or_insert_with(|| Table {
-            epoch,
-            members: ptr,
-            values: members
-                .nodes()
-                .iter()
-                .map(|node| {
-                    (
-                        node.health().median_delay_for(group.url()),
-                        priority.factor(node.name()),
-                    )
-                })
-                .collect(),
-        });
-        members
+        #[cfg(test)]
+        TABLE_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        let base_scores: Arc<[Option<f64>]> = members
             .nodes()
             .iter()
-            .zip(&table.values)
-            .map(|(node, &(delay_ms, factor))| Candidate {
-                name: node.name(),
-                delay_ms,
-                factor,
+            .enumerate()
+            .map(|(index, node)| {
+                let score = divide_delay(
+                    node.health().median_delay_for(group.url()),
+                    members.factor(index),
+                );
+                #[cfg(test)]
+                if index == 0 {
+                    fire_candidates_mid_scan();
+                }
+                score
             })
-            .collect()
+            .collect();
+        let stale_members = slot
+            .as_ref()
+            .is_some_and(|existing| existing.members_id > members_id);
+        if !stale_members {
+            *slot = Some(Table {
+                epoch,
+                members_id,
+                base_scores: Arc::clone(&base_scores),
+            });
+        }
+        CandidateView {
+            members,
+            base_scores,
+        }
     }
 }
 

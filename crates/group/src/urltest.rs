@@ -39,8 +39,7 @@ impl Outbounds {
             Ok(Ok((delay, satisfied))) => (delay, false, satisfied),
             _ => (0, true, false),
         };
-        node.health()
-            .record(url, delay, failed, satisfied, &self.shared.health_epoch);
+        node.health().record(url, delay, failed, satisfied);
         let outcome = Outcome::from_hook(delay, timed_out);
         self.shared.emit(|| {
             CoreEvent::Delay(DelayResult {

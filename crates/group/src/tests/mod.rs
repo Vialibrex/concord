@@ -4,6 +4,7 @@ mod dialing;
 mod groups;
 mod providers;
 mod public_suffix;
+mod selection_alg;
 mod smart;
 mod smart_wire;
 mod views;
