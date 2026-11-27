@@ -261,3 +261,64 @@ fn a_service_item_carries_the_address_only_when_its_check_read_one() {
     assert_eq!(without.ip, "");
     assert!(serde_json::to_value(&without).unwrap().get("ip").is_none());
 }
+
+#[test]
+fn general_state_omits_fell_back_when_false_and_round_trips_when_true() {
+    let base = json!({
+        "seq": 1,
+        "port": 0,
+        "socksPort": 0,
+        "redirPort": 0,
+        "tproxyPort": 0,
+        "mixedPort": 7890,
+        "allowLan": false,
+        "bindAddress": "*",
+        "lanAllowedIps": [],
+        "lanDisallowedIps": [],
+        "authentication": [],
+        "skipAuthPrefixes": [],
+        "mode": "rule",
+        "logLevel": "info",
+        "ipv6": false,
+        "tcpConcurrent": false,
+        "unifiedDelay": false,
+        "findProcessMode": "strict",
+        "interfaceName": "",
+        "routingMark": 0,
+        "sniffing": false,
+        "globalUa": "",
+        "keepAliveIdle": 0,
+        "keepAliveInterval": 0,
+        "disableKeepAlive": false,
+        "geoAutoUpdate": false,
+        "geoUpdateInterval": 24,
+        "geoxUrl": {},
+        "tun": {
+            "enable": false,
+            "device": "",
+            "autoRoute": false,
+            "autoDetectInterface": false,
+            "dnsHijack": [],
+            "mtu": 9000
+        },
+        "selections": {}
+    });
+    let normal: GeneralState = serde_json::from_value(base).unwrap();
+    assert!(!normal.fell_back);
+    assert!(
+        serde_json::to_value(&normal)
+            .unwrap()
+            .get("fellBack")
+            .is_none()
+    );
+
+    let mut fallback = normal;
+    fallback.fell_back = true;
+    let wire = serde_json::to_value(&fallback).unwrap();
+    assert_eq!(wire["fellBack"], true);
+    assert!(
+        serde_json::from_value::<GeneralState>(wire)
+            .unwrap()
+            .fell_back
+    );
+}

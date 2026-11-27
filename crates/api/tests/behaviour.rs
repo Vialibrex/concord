@@ -176,6 +176,56 @@ async fn a_rejected_profile_is_rejected_with_a_fallback_and_the_core_keeps_runni
         .await
         .unwrap();
     assert_eq!(status.snapshot.unwrap().state, EngineState::Running);
+    let general = rig.control.config_general(Empty::default()).await.unwrap();
+    assert!(general.fell_back);
+    assert_eq!(
+        serde_json::to_value(&general).unwrap()["fellBack"],
+        serde_json::json!(true)
+    );
+
+    rig.write_config("mixed-port: 7890\nrules:\n  - MATCH,DIRECT\n");
+    rig.apply().await.unwrap();
+    let recovered = rig.control.config_general(Empty::default()).await.unwrap();
+    assert!(!recovered.fell_back);
+    assert_eq!(recovered.mixed_port, 7890);
+    assert!(
+        serde_json::to_value(&recovered)
+            .unwrap()
+            .get("fellBack")
+            .is_none()
+    );
+    rig.finish().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn config_general_is_not_fell_back_before_first_apply_or_after_valid_apply() {
+    let rig = Rig::new().await;
+    rig.control.engine_start(Empty::default()).await.unwrap();
+
+    let before = rig
+        .control
+        .config_general(Empty::default())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        before.data,
+        ErrorData::Conflict {
+            state: Some("initialized".into())
+        }
+    );
+    assert!(rig.engine.general().await.is_none());
+
+    rig.write_config("mixed-port: 7890\nrules:\n  - MATCH,DIRECT\n");
+    rig.apply().await.unwrap();
+    let general = rig.control.config_general(Empty::default()).await.unwrap();
+    assert!(!general.fell_back);
+    assert_eq!(general.mixed_port, 7890);
+    assert!(
+        serde_json::to_value(&general)
+            .unwrap()
+            .get("fellBack")
+            .is_none()
+    );
     rig.finish().await;
 }
 

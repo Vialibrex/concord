@@ -93,6 +93,9 @@ dto! {
         pub tun: TunState,
         /// The pick of each group that has one.
         pub selections: BTreeMap<String, String>,
+        /// True while the built-in empty fallback is in force after a rejected apply.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pub fell_back: bool,
     }
 }
 

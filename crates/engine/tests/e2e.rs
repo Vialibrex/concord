@@ -545,6 +545,7 @@ async fn the_selected_map_is_honoured_when_a_config_applies() {
 async fn a_rejected_config_falls_back_to_direct_and_says_so() {
     let echo = tcp_echo().await;
     let rig = Rig::new();
+    assert!(rig.engine.general().await.is_none());
     let failure = rig
         .apply("rules:\n  - NOT-A-RULE,x,DIRECT\n")
         .await
@@ -553,6 +554,7 @@ async fn a_rejected_config_falls_back_to_direct_and_says_so() {
         panic!("{failure:?}");
     };
     assert!(message.contains("NOT-A-RULE"), "{message}");
+    assert!(rig.engine.general().await.unwrap().fell_back);
     rig.engine.start_listeners().await;
     assert!(
         socks_connect(rig.mixed, echo).await.is_err(),

@@ -375,6 +375,7 @@ pub fn general_state(view: GeneralView) -> GeneralState {
             mtu: view.tun.mtu,
         },
         selections: view.selections.into_iter().collect(),
+        fell_back: view.fell_back,
     }
 }
 

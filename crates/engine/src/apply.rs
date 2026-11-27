@@ -336,6 +336,7 @@ pub(crate) struct Applied {
     pub dns_listen_mark: u32,
     pub store_fake_ip: bool,
     pub sniffing: bool,
+    pub fell_back: bool,
     pub inbounds: Vec<concord_inbound::NamedListener>,
     pub stop: CancellationToken,
 }
@@ -631,6 +632,7 @@ pub(crate) async fn build(
         dns_listen_mark: profile.dns.listen_routing_mark,
         store_fake_ip: profile.store_fake_ip,
         sniffing: profile.sniffer.enable,
+        fell_back: false,
         tun: profile.tun,
         ntp: profile.ntp,
         general: profile.general,

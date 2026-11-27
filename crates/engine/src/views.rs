@@ -90,6 +90,7 @@ pub struct GeneralView {
     pub geox_url: Vec<(&'static str, String)>,
     pub tun: TunView,
     pub selections: Vec<(String, String)>,
+    pub fell_back: bool,
 }
 
 /// One rule of the route program in force, in match order.

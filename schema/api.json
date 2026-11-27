@@ -1829,6 +1829,10 @@
             "type": "string"
           },
           "description": "The pick of each group that has one."
+        },
+        "fellBack": {
+          "type": "boolean",
+          "description": "True while the built-in empty fallback is in force after a rejected apply."
         }
       },
       "required": [

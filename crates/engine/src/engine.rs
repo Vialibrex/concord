@@ -386,6 +386,7 @@ impl Engine {
             trust,
             globals,
         } = built;
+        applied.fell_back = rejected.is_some();
         if !self.profile_controller.load(Ordering::Relaxed) {
             host_owns_controller(&mut applied.general, &mut warnings);
         }

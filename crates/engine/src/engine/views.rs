@@ -118,6 +118,7 @@ impl Engine {
                 .outbounds()
                 .map(|outbounds| outbounds.selections())
                 .unwrap_or_default(),
+            fell_back: applied.fell_back,
         })
     }
 
