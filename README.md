@@ -28,7 +28,7 @@ it through an API.
 ## Build And Run
 
 ```sh
-git clone https://github.com/chen08209/concord
+git clone https://github.com/Vialibrex/concord
 cd concord
 cargo build --release -p concord-desktop
 target/release/concord run -c config.yaml
