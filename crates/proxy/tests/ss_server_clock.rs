@@ -58,7 +58,8 @@ fn server(offset: Duration) -> Protocol {
         udp: true,
     });
     let env = ServerEnv {
-        home: &HomeDir::new(std::env::temp_dir()),
+        home: &Arc::new(HomeDir::new(std::env::temp_dir())),
+        tasks: &Tasks::default(),
         keep: &Keep::Named("ss".into()),
         carried: &Carried::default(),
         clock: &clock,
@@ -133,7 +134,7 @@ async fn an_aead_2022_server_reads_timestamps_on_the_engines_clock() {
             "tcp, {offset:?} ahead"
         );
         let mut copy = PacketBuf::from_slice(&packet);
-        let datagrams = protocol.datagram.as_ref().unwrap();
+        let datagrams = protocol.datagram().unwrap();
         let opened = datagrams.open(&mut copy, "127.0.0.1:9".parse().unwrap());
         assert_eq!(opened.is_some(), accepted, "udp, {offset:?} ahead");
     }

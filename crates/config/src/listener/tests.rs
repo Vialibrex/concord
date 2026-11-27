@@ -108,7 +108,7 @@ fn listeners_this_core_does_not_serve_are_skipped_with_a_warning() {
             "not supported",
         ),
         (
-            json!({"name": "h", "type": "hysteria2", "certificate": "", "private-key": ""}),
+            json!({"name": "m", "type": "mieru", "users": {"u": "pw"}}),
             "not implemented yet",
         ),
         (
@@ -337,4 +337,177 @@ fn a_tunnel_line_ending_in_an_empty_proxy_has_none() {
     let mut report = LoadReport::default();
     let defs = read(&[], &[json!("tcp,:6553,1.1.1.1:53,")], "", "", &mut report).unwrap();
     assert_eq!(defs.tunnels[0].proxy, None);
+}
+
+#[test]
+fn a_tuic_listener_reads_tokens_users_and_its_own_certificate() {
+    let def = one(json!({
+        "name": "in", "type": "tuic", "port": 443,
+        "token": ["t"], "users": {"b831381d-6324-4d53-ad4f-8cda48b30811": "pw"},
+        "congestion-controller": "bbr", "bbr-profile": "aggressive", "max-idle-time": 20000,
+    }));
+    let ListenerKind::Tuic(server) = def.kind else {
+        panic!("tuic")
+    };
+    assert_eq!(server.tokens, ["t"]);
+    assert_eq!(server.users["b831381d-6324-4d53-ad4f-8cda48b30811"], "pw");
+    assert!(server.tls.certificate.is_empty() && server.tls.private_key.is_empty());
+    assert_eq!(
+        (server.congestion.as_str(), server.bbr_profile.as_str()),
+        ("bbr", "aggressive")
+    );
+    assert_eq!((server.max_idle_ms, server.auth_timeout_ms), (20000, 0));
+    assert!(
+        skipped(json!({"name": "in", "type": "tuic", "port": 443, "ech-key": "k"}))
+            .contains("ech-key")
+    );
+}
+
+#[test]
+fn a_hysteria2_listener_reads_users_rates_obfs_and_windows() {
+    let (defs, report) = load(json!([{
+        "name": "in", "type": "hysteria2", "port": 443,
+        "users": {"alice": "pw"}, "up": "30 Mbps", "down": "100",
+        "ignore-client-bandwidth": true, "obfs": "salamander", "obfs-password": "salt",
+        "udp-mtu": 1400, "cwnd": 16, "max-stream-receive-window": 1024,
+        "masquerade": "https://example.com",
+    }]));
+    let [def] = defs.listeners.as_slice() else {
+        panic!("one listener: {report:?}")
+    };
+    let ListenerKind::Hysteria2(server) = &def.kind else {
+        panic!("hysteria2")
+    };
+    assert_eq!(server.users["alice"], "pw");
+    assert_eq!(
+        (server.up.as_str(), server.down.as_str()),
+        ("30 Mbps", "100")
+    );
+    assert!(server.ignore_client_bandwidth);
+    assert_eq!(server.salamander.as_deref(), Some("salt"));
+    assert_eq!((server.udp_mtu, server.cwnd), (1400, 16));
+    assert_eq!(
+        (server.initial_stream_window, server.max_stream_window),
+        (0, 1024)
+    );
+    assert!(server.tls.certificate.is_empty() && server.tls.private_key.is_empty());
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.message.contains("masquerade")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn a_hysteria2_listener_this_batch_cannot_serve_is_skipped() {
+    for (listener, reason) in [
+        (json!({"obfs": "gecko", "obfs-password": "p"}), "gecko"),
+        (json!({"obfs": "salamander"}), "missing obfs password"),
+        (
+            json!({"obfs": "other", "obfs-password": "p"}),
+            "unknown obfs type",
+        ),
+        (json!({"realm-opts": {"enable": true}}), "realm-opts"),
+    ] {
+        let mut listener = listener;
+        let fields = listener.as_object_mut().unwrap();
+        fields.insert("name".into(), json!("in"));
+        fields.insert("type".into(), json!("hysteria2"));
+        fields.insert("port".into(), json!(443));
+        let message = skipped(listener);
+        assert!(message.contains(reason), "{message}");
+    }
+    let def = one(json!({
+        "name": "in", "type": "hysteria2", "port": 443, "realm-opts": {"enable": false},
+    }));
+    assert!(matches!(def.kind, ListenerKind::Hysteria2(_)));
+}
+
+fn general(tuic: Value) -> (InboundDefs, LoadReport) {
+    let mut report = LoadReport::default();
+    let general = json!({ "tuic-server": tuic });
+    let defs = from_general(general.as_object().unwrap(), &mut report).unwrap();
+    (defs, report)
+}
+
+#[test]
+fn tuic_server_becomes_a_default_listener_on_each_address() {
+    let (defs, _) = general(json!({
+        "enable": true, "listen": "127.0.0.1:10443,:10444",
+        "users": {"b831381d-6324-4d53-ad4f-8cda48b30811": "pw"},
+        "client-auth-type": "require-any", "bbr-profile": "aggressive",
+    }));
+    let [def] = defs.listeners.as_slice() else {
+        panic!("one listener: {:?}", defs.listeners)
+    };
+    assert_eq!(
+        (def.name.as_str(), def.default_of),
+        ("DEFAULT-TUIC", Some("tuic-server"))
+    );
+    assert_eq!(
+        def.binds.addrs(),
+        ["127.0.0.1:10443", "0.0.0.0:10444"]
+            .map(|a| a.parse().unwrap())
+            .to_vec()
+    );
+    let ListenerKind::Tuic(server) = &def.kind else {
+        panic!("tuic")
+    };
+    assert_eq!(server.tls.client_auth, ClientAuth::None);
+    assert!(server.bbr_profile.is_empty());
+
+    let (defs, _) = general(json!({"enable": false, "listen": ":10443"}));
+    assert!(defs.listeners.is_empty());
+    let (defs, report) = general(json!({"enable": true, "listen": "nowhere"}));
+    assert!(defs.listeners.is_empty());
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.code == "listener_skipped" && w.path == "tuic-server")
+    );
+}
+
+#[test]
+fn an_anytls_listener_reads_users_padding_and_tls() {
+    let (defs, report) = load(json!([{
+        "name": "in", "type": "anytls", "port": 443,
+        "users": {"alice": "pw"}, "padding-scheme": "stop=1\n0=10-20",
+        "certificate": "c.pem", "private-key": "k.pem",
+    }, {
+        "name": "plain", "type": "anytls", "port": 444,
+        "users": {"bob": "pw"}, "allow-insecure": true,
+    }]));
+    let [tls, plain] = defs.listeners.as_slice() else {
+        panic!("two listeners: {report:?}")
+    };
+    let ListenerKind::AnyTls(server) = &tls.kind else {
+        panic!("anytls")
+    };
+    assert_eq!(server.users["alice"], "pw");
+    assert_eq!(server.padding_scheme, "stop=1\n0=10-20");
+    assert!(server.tls.is_some());
+    let ListenerKind::AnyTls(server) = &plain.kind else {
+        panic!("anytls")
+    };
+    assert!(server.padding_scheme.is_empty() && server.tls.is_none());
+}
+
+#[test]
+fn an_anytls_listener_without_a_security_layer_is_skipped() {
+    for (listener, reason) in [
+        (json!({}), "disallow using AnyTLS"),
+        (json!({"shadow-tls": {"enable": true}}), "shadow-tls"),
+    ] {
+        let mut listener = listener;
+        let fields = listener.as_object_mut().unwrap();
+        fields.insert("name".into(), json!("in"));
+        fields.insert("type".into(), json!("anytls"));
+        fields.insert("port".into(), json!(443));
+        fields.insert("users".into(), json!({"u": "pw"}));
+        let message = skipped(listener);
+        assert!(message.contains(reason), "{message}");
+    }
 }

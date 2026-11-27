@@ -1239,6 +1239,7 @@ dependencies = [
  "concord-common",
  "concord-platform",
  "concord-test-support",
+ "futures-util",
  "httparse",
  "socket2",
  "thiserror 2.0.21",
@@ -1444,6 +1445,8 @@ dependencies = [
  "quinn",
  "quinn-proto",
  "rand 0.9.5",
+ "rcgen",
+ "rustls",
  "sha2 0.10.9",
  "thiserror 2.0.21",
  "tokio",
@@ -1501,6 +1504,7 @@ name = "concord-tls"
 version = "0.1.0"
 dependencies = [
  "aes-gcm 0.10.3",
+ "arc-swap",
  "async-trait",
  "aws-lc-rs",
  "base64 0.22.1",
@@ -2619,8 +2623,6 @@ dependencies = [
 [[package]]
 name = "h3-quinn"
 version = "0.0.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b2e732c8d91a74731663ac8479ab505042fbf547b9a207213ab7fbcbfc4f8b4"
 dependencies = [
  "bytes",
  "futures",
@@ -5103,6 +5105,7 @@ name = "shadowsocks"
 version = "1.25.0"
 dependencies = [
  "aes 0.9.3",
+ "arc-swap",
  "base64 0.23.1",
  "blake3",
  "byte_string",

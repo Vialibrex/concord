@@ -26,6 +26,8 @@ thiserror = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 hex = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
 
 [lints]
 workspace = true

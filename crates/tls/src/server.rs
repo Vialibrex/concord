@@ -1,16 +1,21 @@
-//! The TLS a profile's listeners serve: a certificate and key the profile gives, ALPN, and
-//! the client certificate modes of Go's `tls.ClientAuthType`.
+//! The TLS a profile's listeners serve: a certificate and key the profile gives, which a
+//! reload of their files replaces under live listeners, ALPN, and the client certificate
+//! modes of Go's `tls.ClientAuthType`.
 
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use arc_swap::ArcSwap;
 use concord_common::Stream;
 use rustls::client::danger::HandshakeSignatureValid;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::server::{ServerConfig, VerifierBuilderError, WebPkiClientVerifier};
+use rustls::server::{
+    ClientHello, ResolvesServerCert, ServerConfig, VerifierBuilderError, WebPkiClientVerifier,
+};
+use rustls::sign::CertifiedKey;
 use rustls::{DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme};
 use rustls_pki_types::pem::{self, PemObject};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -29,8 +34,7 @@ pub enum ClientAuth {
 }
 
 pub struct ServerOptions<'a> {
-    pub certificate_pem: &'a [u8],
-    pub private_key_pem: &'a [u8],
+    pub certs: Arc<Certs>,
     pub client_auth: ClientAuth,
     /// The CAs a client certificate is verified against, for the verifying modes.
     pub client_ca_pem: Option<&'a [u8]>,
@@ -64,6 +68,57 @@ fn rustls_error(field: &'static str) -> impl FnOnce(rustls::Error) -> ServerTlsE
     move |source| ServerTlsError::Rustls { field, source }
 }
 
+/// The certificate a listener presents, which every new handshake reads, so replacing it
+/// leaves established connections alone.
+#[derive(Debug)]
+pub struct Certs(ArcSwap<CertifiedKey>);
+
+impl Certs {
+    pub fn new(certificate_pem: &[u8], private_key_pem: &[u8]) -> Result<Self, ServerTlsError> {
+        Ok(Certs(ArcSwap::from_pointee(certified(
+            certificate_pem,
+            private_key_pem,
+        )?)))
+    }
+
+    /// Leaves the certificate as it was when the new one does not load.
+    pub fn replace(
+        &self,
+        certificate_pem: &[u8],
+        private_key_pem: &[u8],
+    ) -> Result<(), ServerTlsError> {
+        self.0
+            .store(Arc::new(certified(certificate_pem, private_key_pem)?));
+        Ok(())
+    }
+
+    pub fn current(&self) -> Arc<CertifiedKey> {
+        self.0.load_full()
+    }
+}
+
+impl ResolvesServerCert for Certs {
+    fn resolve(&self, _hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.current())
+    }
+}
+
+fn certified(
+    certificate_pem: &[u8],
+    private_key_pem: &[u8],
+) -> Result<CertifiedKey, ServerTlsError> {
+    let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(certificate_pem)
+        .collect::<Result<_, _>>()
+        .map_err(pem_error("certificate"))?;
+    if chain.is_empty() {
+        return Err(ServerTlsError::NoCertificate);
+    }
+    let key = PrivateKeyDer::from_pem_slice(private_key_pem).map_err(pem_error("private-key"))?;
+    let certified =
+        CertifiedKey::from_der(chain, key, &provider()).map_err(rustls_error("private-key"))?;
+    Ok(certified)
+}
+
 #[derive(Clone)]
 pub struct TlsServer {
     acceptor: TlsAcceptor,
@@ -71,31 +126,33 @@ pub struct TlsServer {
 
 impl TlsServer {
     pub fn new(options: &ServerOptions<'_>) -> Result<Self, ServerTlsError> {
-        let chain: Vec<CertificateDer<'static>> =
-            CertificateDer::pem_slice_iter(options.certificate_pem)
-                .collect::<Result<_, _>>()
-                .map_err(pem_error("certificate"))?;
-        if chain.is_empty() {
-            return Err(ServerTlsError::NoCertificate);
-        }
-        let key = PrivateKeyDer::from_pem_slice(options.private_key_pem)
-            .map_err(pem_error("private-key"))?;
-        let builder = ServerConfig::builder_with_provider(provider())
-            .with_safe_default_protocol_versions()
-            .map_err(rustls_error("tls"))?
-            .with_client_cert_verifier(client_verifier(options)?);
-        let mut config = builder
-            .with_single_cert(chain, key)
-            .map_err(rustls_error("certificate"))?;
-        config.alpn_protocols = options.alpn.clone();
+        let config = server_config(options, rustls::DEFAULT_VERSIONS)?;
         Ok(TlsServer {
             acceptor: TlsAcceptor::from(Arc::new(config)),
         })
     }
 
+    /// The TLS of a QUIC listener, which QUIC requires to be 1.3.
+    pub fn quic(options: &ServerOptions<'_>) -> Result<ServerConfig, ServerTlsError> {
+        server_config(options, &[&rustls::version::TLS13])
+    }
+
     pub async fn accept<S: Stream>(&self, stream: S) -> io::Result<ServerTls<S>> {
         Ok(ServerTls(self.acceptor.accept(stream).await?))
     }
+}
+
+fn server_config(
+    options: &ServerOptions<'_>,
+    versions: &[&'static rustls::SupportedProtocolVersion],
+) -> Result<ServerConfig, ServerTlsError> {
+    let mut config = ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(versions)
+        .map_err(rustls_error("tls"))?
+        .with_client_cert_verifier(client_verifier(options)?)
+        .with_cert_resolver(options.certs.clone());
+    config.alpn_protocols = options.alpn.clone();
+    Ok(config)
 }
 
 fn client_verifier(

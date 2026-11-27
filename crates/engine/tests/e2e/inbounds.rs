@@ -117,6 +117,41 @@ fn protocol_cases(port: u16) -> Vec<(String, String, Option<&'static str>)> {
         format!("{{name: out, type: vless, server: 127.0.0.1, port: {port}, uuid: {UUID}, udp: true, network: grpc, grpc-opts: {{grpc-service-name: gun}}}}"),
         None,
     ));
+    let tuic = format!(
+        "name: out, type: tuic, server: 127.0.0.1, port: {port}, skip-cert-verify: true, udp: true"
+    );
+    for mode in ["native", "quic"] {
+        cases.push((
+            format!("{{name: in, type: tuic, listen: 127.0.0.1, port: {port}, users: {{{UUID}: secret}}}}"),
+            format!("{{{tuic}, uuid: {UUID}, password: secret, udp-relay-mode: {mode}}}"),
+            Some(UUID),
+        ));
+    }
+    cases.push((
+        format!("{{name: in, type: tuic, listen: 127.0.0.1, port: {port}, token: [secret]}}"),
+        format!("{{{tuic}, token: secret}}"),
+        None,
+    ));
+    let hy2 = format!(
+        "name: out, type: hysteria2, server: 127.0.0.1, port: {port}, password: secret, skip-cert-verify: true"
+    );
+    for obfs in ["", ", obfs: salamander, obfs-password: salt"] {
+        cases.push((
+            format!("{{name: in, type: hysteria2, listen: 127.0.0.1, port: {port}, users: {{alice: secret}}{obfs}}}"),
+            format!("{{{hy2}{obfs}}}"),
+            Some("alice"),
+        ));
+    }
+    let made = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    cases.push((
+        format!(
+            "{{name: in, type: anytls, listen: 127.0.0.1, port: {port}, users: {{alice: secret}}, certificate: {:?}, private-key: {:?}}}",
+            made.cert.pem(),
+            made.signing_key.serialize_pem()
+        ),
+        format!("{{name: out, type: anytls, server: 127.0.0.1, port: {port}, password: secret, skip-cert-verify: true, udp: true}}"),
+        Some("alice"),
+    ));
     cases
 }
 
@@ -126,32 +161,75 @@ async fn protocol_listeners_serve_concord_clients_over_tcp_and_udp() {
     let tcp = tcp_echo().await;
     let udp = udp_echo().await;
     for (listener, client, user) in protocol_cases(port_to_bind_later()) {
-        let rig = Rig::new();
-        rig.apply(&format!(
-            "proxies:\n  - {client}\nlisteners:\n  - {listener}\nrules:\n  - IN-NAME,in,DIRECT\n  - MATCH,out\n"
-        ))
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            serves_a_concord_client(&listener, &client, user, tcp, udp),
+        )
         .await
-        .unwrap_or_else(|err| panic!("{listener}: {err:?}"));
-        rig.engine.start_listeners().await;
+        .unwrap_or_else(|_| panic!("{listener}: timed out"));
+    }
+}
 
+#[cfg(feature = "server")]
+async fn serves_a_concord_client(
+    listener: &str,
+    client: &str,
+    user: Option<&str>,
+    tcp: std::net::SocketAddr,
+    udp: std::net::SocketAddr,
+) {
+    let rig = Rig::new();
+    rig.apply(&format!(
+        "proxies:\n  - {client}\nlisteners:\n  - {listener}\nrules:\n  - IN-NAME,in,DIRECT\n  - MATCH,out\n"
+    ))
+    .await
+    .unwrap_or_else(|err| panic!("{listener}: {err:?}"));
+    rig.engine.start_listeners().await;
+
+    let mut stream = socks_connect(rig.mixed, tcp).await.unwrap();
+    round_trip(&mut stream).await;
+    let session = associate(rig.mixed).await;
+    assert!(session.echoes(udp).await, "{listener}: no UDP echo");
+
+    let served = rig
+        .engine
+        .connections()
+        .into_iter()
+        .filter(|record| &*record.meta.inbound.name == "in")
+        .collect::<Vec<_>>();
+    assert!(!served.is_empty(), "{listener}: nothing came in");
+    assert!(
+        served
+            .iter()
+            .all(|record| record.meta.inbound.user.as_deref() == user),
+        "{listener}: wrong user"
+    );
+    rig.engine.shutdown().await;
+}
+
+#[cfg(feature = "server")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quic_listener_whose_obfuscation_changes_serves_the_new_key_after_a_reload() {
+    let tcp = tcp_echo().await;
+    let port = port_to_bind_later();
+    let rig = Rig::new();
+    let profile = |salt: &str| {
+        format!(
+            "proxies:\n  - {{name: out, type: hysteria2, server: 127.0.0.1, port: {port}, password: secret, skip-cert-verify: true, obfs: salamander, obfs-password: {salt}}}\nlisteners:\n  - {{name: in, type: hysteria2, listen: 127.0.0.1, port: {port}, users: {{alice: secret}}, obfs: salamander, obfs-password: {salt}}}\nrules:\n  - IN-NAME,in,DIRECT\n  - MATCH,out\n"
+        )
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        rig.apply(&profile("first")).await.unwrap();
+        rig.engine.start_listeners().await;
+        let mut open = socks_connect(rig.mixed, tcp).await.unwrap();
+        round_trip(&mut open).await;
+
+        rig.apply(&profile("second")).await.unwrap();
         let mut stream = socks_connect(rig.mixed, tcp).await.unwrap();
         round_trip(&mut stream).await;
-        let session = associate(rig.mixed).await;
-        assert!(session.echoes(udp).await, "{listener}: no UDP echo");
-
-        let served = rig
-            .engine
-            .connections()
-            .into_iter()
-            .filter(|record| &*record.meta.inbound.name == "in")
-            .collect::<Vec<_>>();
-        assert!(!served.is_empty(), "{listener}: nothing came in");
-        assert!(
-            served
-                .iter()
-                .all(|record| record.meta.inbound.user.as_deref() == user),
-            "{listener}: wrong user"
-        );
-        rig.engine.shutdown().await;
-    }
+        drop(open);
+    })
+    .await
+    .expect("the reloaded listener serves the new key");
+    rig.engine.shutdown().await;
 }

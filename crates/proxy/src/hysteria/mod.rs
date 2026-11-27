@@ -17,7 +17,7 @@ use concord_common::{
 };
 use concord_config::proxy::{HysteriaOpts, ProxyDef};
 use concord_quic::{
-    Brutal, CONN_WINDOW, Hop, ObfsSpec, QuicConn, QuicStream, STREAM_WINDOW, SharedConn,
+    Brutal, CONN_WINDOW, Hop, MAX_IDLE, ObfsSpec, QuicConn, QuicStream, STREAM_WINDOW, SharedConn,
     SwitchFactory, Transport, io_error,
 };
 use quinn::congestion::ControllerFactory;
@@ -233,6 +233,7 @@ fn transport(opts: &HysteriaOpts, controllers: Arc<SwitchFactory>) -> Arc<Transp
         stream_window,
         conn_window,
         peer_bounded_send: true,
+        idle: MAX_IDLE,
         keep_alive: Some(KEEP_ALIVE),
         datagram_frame: DATAGRAM_FRAME,
         streams: None,

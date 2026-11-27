@@ -30,7 +30,9 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | boring | Read-only `SslRef` record-layer accessors | None | None planned: the change stays in the vendored copy |
 | h3 | Bound frame and DATA read-ahead | hyperium/h3#344, `c916ed5a` (frame headers); #328 and #386 are related | Backport #344; propose the DATA-body extension to hyperium/h3 |
 | h3 | Opt-in draft-00 datagram SETTINGS for WARP | None | Propose the default-off client builder switch to hyperium/h3 |
+| h3 | Discard unknown frames as they arrive; bound HEADERS and SETTINGS before buffering | None; quic-go bounds both (`http3/frames.go:134`, `:182`) | Propose to hyperium/h3 with the decoder tests |
 | h3 | Allow warnings in the manifest | None | None planned: it gives the path dependency a crates.io dependency's lint cap |
+| h3-quinn | Public `SendStream::new` and `RecvStream::new` | None | Propose to hyperium/h3 |
 | gotatun | Deliver already-ready encrypted IP packets to the bounded UDP queue together | None yet | Propose the batch handoff to mullvad/gotatun |
 | h2 | Ignore DATA and HEADERS on forgotten client streams | None as of 0.4.20 | Issue and PR to hyperium/h2 with the delayed-DATA-after-reset transport test |
 | h2 | Opt-in split-I/O client direct DATA writes | None as of 0.4.20 | Propose split-transport client API to hyperium/h2 once framing and multi-stream contracts settle |
@@ -39,6 +41,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | quinn | `MAX_TRANSMIT_DATAGRAMS` 80 (`MAX_TRANSMIT_SEGMENTS` back to upstream's 10) | n0-computer/noq#636 (noq) | The segment cap is upstream's again; propose only the datagram limit to quinn-rs/quinn |
 | quinn | Stamp each received batch with its own read time | None; quinn `main` `8fe66c3` passes one `now` | PR with `crates/proxy/tests/quinn_recv_time.rs` as the regression |
 | quinn | Lease receive scratch for a socket poll instead of an endpoint lifetime | None | Propose to quinn-rs/quinn with the endpoint sharing regression and receive-buffer lease contracts |
+| quinn | A connection whose driver has ended lets go of its socket | None | Propose to quinn-rs/quinn with the release contract of `crates/quic/src/release.rs` |
 | quinn | Hold one UDP_GRO socket for the process so per-connection sockets do not flip the kernel's encapsulation static keys | None | Propose to quinn-rs/quinn, or to quinn-udp where `UdpSocketState::new` sets UDP_GRO |
 | quinn-proto | `send_quantum`, `on_packet_lost`, `min_pacing_delay` and explicit-rate pacing | quinn-rs/quinn#2481; merged as noq#611 | Follow #2481. `min_pacing_delay` is Concord's own addition and needs its own proposal; the pacer changes cannot move into `quic/src/congestion.rs` while the controller API lacks these hooks |
 | quinn-proto | Requeue unacknowledged STREAM data on a PTO; withdraw acknowledged copies | None; quinn `main` `765abecf` requeues only control frames | PR with the recovery contracts of `crates/proxy/tests/quinn_pto.rs` |
@@ -161,6 +164,13 @@ The package archive checksum is `7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c
   GRO socket is open the count stays above zero and the per-connection change is an atomic increment. The keys gate
   a per-packet encapsulation check that any open QUIC socket already enables. Contract:
   `crates/proxy/tests/quinn_gro_key.rs`.
+- `src/connection.rs`: when a connection's driver ends, however it ends, its state puts a socket that never
+  sends or receives in place of the endpoint's. Upstream keeps the socket and its poller in the connection state
+  until the last `Connection`, stream or datagram handle goes, and a server hands such handles to work that outlives
+  the connection: a UDP session's reply sits in the tunnel's NAT for its idle time, and a TCP relay the client half
+  closed runs until the destination closes. Until then a listener stopped by a reload could not free its port for
+  the listener built in its place. The endpoint itself is released by `crates/quic/src/release.rs`; its contract
+  `a_drained_connection_kept_by_a_handle_frees_the_port` holds a server handle past the drain.
 - `Cargo.toml`, `benches/`, `examples/`, `tests/`: the `[[example]]`, `[[test]]` and `[[bench]]` targets are removed
   with their sources.
 - `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`: crates.io packaging metadata, omitted.
@@ -277,7 +287,9 @@ Upgrade `quinn`, `quinn-proto` and `quinn-udp` together; replay these changes an
   random packets grew a thread's heap by 15.5 MiB, of which 2.3 MiB is the cache's index allocated up front.
   `crypto_io::cipher_cache_len` reads the cache's size for tests.
 - `src/relay/udprelay/aead_2022.rs`, `src/relay/tcprelay/aead_2022.rs`, `src/relay/tcprelay/mod.rs`: UDP timestamps
-  read the clock `set_clock` installs, as the TCP relay's do.
+  read the clock `set_clock` installs, as the TCP relay's do. The clock sits in an `ArcSwapOption`, which UDP reads
+  for every packet without a lock; `Cargo.toml` makes `arc-swap` a plain dependency for it instead of one
+  `hickory-dns` turns on.
 - `Cargo.toml`, `tests/`: the `[[test]]` targets, their sources and the `env_logger` dev-dependency are removed.
 - `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`: crates.io packaging metadata, omitted.
 
@@ -363,7 +375,32 @@ The package archive checksum is `10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662
   setting as a receive-side alias.
 - `src/shared_state.rs`, `src/client/connection.rs`: a read-only poll for received peer datagram SETTINGS lets
   CONNECT-IP wait for and validate peer support without enabling h3's internal API feature.
+- `src/proto/frame.rs`, `src/frame.rs`, `src/error/internal_error.rs`: the frame decoder discards an unknown
+  frame's payload as it arrives instead of waiting to buffer it whole, and decides on the others from the frame
+  header: a SETTINGS frame over 8 KiB is `Settings(Exceeded)`, a CANCEL_PUSH, GOAWAY or MAX_PUSH_ID longer than one
+  varint is malformed, and a HEADERS or PUSH_PROMISE frame over the stream's limit is refused before its payload
+  is read, as `H3_EXCESSIVE_LOAD` unless it is a request's first HEADERS frame. A stream that ends inside a
+  discarded frame is an unexpected end, as one that ends inside any other frame is. quic-go does the same
+  (`http3/frames.go:134`, `:182`, `server_conn.go:123-129`). Before this an unauthenticated peer could make a
+  Hysteria 2 listener buffer a frame as long as a varint allows. The limit defaults to `u64::MAX`, so a client
+  that sets no `max_field_section_size` decodes as before apart from the streamed discard and the SETTINGS cap.
+  The decoder tests are `unknown_frame_is_discarded_as_it_arrives`,
+  `a_long_headers_or_settings_frame_is_refused_from_its_header`, `a_long_push_promise_is_refused_by_its_type` and
+  `poll_next_unknown_frame_cut_by_the_end`; `crates/proxy/src/server/hysteria2/tests.rs` holds the listener's.
+- `src/server/connection.rs`, `src/connection.rs`: request streams and the peer's control stream take the
+  connection's `max_field_section_size` as their HEADERS limit.
+- `src/server/request.rs`, `src/tests/request.rs`: a request whose first HEADERS frame is refused that way gets
+  upstream's 431 and `HeaderTooBig`, with its receive side stopped with `H3_EXCESSIVE_LOAD`, and the connection
+  stays, as with quic-go. `header_too_big_response_from_server` now reports the encoded length the decoder saw,
+  not the decoded size, so it no longer pins `actual_size`.
 - `Cargo.toml`: `[lints.rust] warnings = "allow"`. A path dependency is built without the `--cap-lints` a
   crates.io dependency gets, so 0.0.8's own warnings under the current toolchain (unused imports and variables
   without the `tracing` feature, elided lifetimes) reached every workspace build and the editor. This also hides
   warnings in the patches above: after changing one, run `cargo clippy` in `vendor/h3` with the line removed.
+
+## h3-quinn 0.0.10
+
+- `src/lib.rs`: `SendStream::new` and `RecvStream::new` are public. The hysteria2 server reads the frame type a
+  bidirectional stream opens with before h3 sees it, since sing-quic routes TCP requests (`0x401`) away from
+  HTTP/3 that way (`hysteria2/service.go:337-355`), and hands h3 the other streams with those bytes in front.
+  Nothing else changes; the clients build their streams as before.

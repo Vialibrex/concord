@@ -615,7 +615,13 @@ pub(crate) async fn build(
         shared.scripts.clone(),
     ));
     let applied = Applied {
-        inbounds: crate::inbounds::build(&profile.inbounds, home, &shared.carried, &shared.clock),
+        inbounds: crate::inbounds::build(
+            &profile.inbounds,
+            home,
+            &shared.carried,
+            &shared.clock,
+            &shared.proxy_tasks.tasks(),
+        ),
         tun_inet4: crate::tun::inet4_of(profile.dns.fake_ip_range),
         dns_listen: if profile.dns.enable {
             profile.dns.listen.clone()

@@ -3,6 +3,8 @@ use std::io;
 use bytes::Bytes;
 use concord_quic::Fragment;
 use rand::Rng;
+#[cfg(feature = "server")]
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::util::invalid_data;
 
@@ -61,6 +63,68 @@ pub(crate) fn tcp_request(addr: &str) -> Vec<u8> {
     put_varint(&mut out, FRAME_TCP_REQUEST);
     put_varint(&mut out, addr.len() as u64);
     out.extend_from_slice(addr.as_bytes());
+    put_varint(&mut out, pad.len() as u64);
+    out.extend_from_slice(pad.as_bytes());
+    out
+}
+
+/// One varint and the bytes it took, read no further than its end; `None` when the stream
+/// ends first.
+#[cfg(feature = "server")]
+pub(crate) async fn read_varint<R: AsyncRead + Unpin>(
+    recv: &mut R,
+) -> io::Result<Option<(u64, Vec<u8>)>> {
+    let mut first = [0u8; 1];
+    if recv.read(&mut first).await? == 0 {
+        return Ok(None);
+    }
+    let [byte] = first;
+    let mut raw = vec![byte];
+    raw.resize(1 << (byte >> 6), 0);
+    match recv.read_exact(raw.get_mut(1..).unwrap_or_default()).await {
+        Ok(_) => Ok(get_varint(&raw).map(|(value, _)| (value, raw))),
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+#[cfg(feature = "server")]
+async fn varint_value<R: AsyncRead + Unpin>(recv: &mut R) -> io::Result<u64> {
+    read_varint(recv)
+        .await?
+        .map(|(value, _)| value)
+        .ok_or_else(|| io::ErrorKind::UnexpectedEof.into())
+}
+
+/// The rest of a TCP request after its frame type: the address it names
+/// (sing-quic's `ReadTCPRequest`).
+#[cfg(feature = "server")]
+pub(crate) async fn read_tcp_request<R: AsyncRead + Unpin>(recv: &mut R) -> io::Result<String> {
+    let addr_len = varint_value(recv).await?;
+    if addr_len == 0 || addr_len > MAX_MESSAGE {
+        return Err(invalid_data("invalid address length"));
+    }
+    let mut addr = vec![0u8; addr_len as usize];
+    recv.read_exact(&mut addr).await?;
+    let padding = varint_value(recv).await?;
+    if padding > MAX_PADDING {
+        return Err(invalid_data("invalid padding length"));
+    }
+    let skipped = tokio::io::copy(&mut (&mut *recv).take(padding), &mut tokio::io::sink()).await?;
+    if skipped < padding {
+        return Err(io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok(String::from_utf8_lossy(&addr).into_owned())
+}
+
+/// The server's answer to a TCP request it took. mihomo never answers with a refusal: a
+/// target that cannot be reached closes the stream instead.
+#[cfg(feature = "server")]
+pub(crate) fn tcp_response() -> Vec<u8> {
+    let pad = padding(128, 1024);
+    let mut out = Vec::with_capacity(pad.len() + 4);
+    out.push(0);
+    put_varint(&mut out, 0);
     put_varint(&mut out, pad.len() as u64);
     out.extend_from_slice(pad.as_bytes());
     out
@@ -185,6 +249,51 @@ impl UdpMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn the_server_reads_the_request_and_answers_what_the_client_parses() {
+        let mut wire = tcp_request("example.com:443");
+        wire.extend_from_slice(b"data");
+        let mut recv = wire.as_slice();
+        assert_eq!(
+            read_varint(&mut recv)
+                .await
+                .unwrap()
+                .map(|(value, _)| value),
+            Some(FRAME_TCP_REQUEST)
+        );
+        assert_eq!(
+            read_tcp_request(&mut recv).await.unwrap(),
+            "example.com:443"
+        );
+        assert_eq!(recv, b"data");
+
+        let mut answer = tcp_response();
+        let head = answer.len();
+        answer.extend_from_slice(b"reply");
+        let Some((Response::Ok, used)) = parse_tcp_response(&answer).unwrap() else {
+            panic!("not a success");
+        };
+        assert_eq!(used, head);
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_varint_cut_short_reads_as_the_end() {
+        assert!(
+            read_varint(&mut [0x44u8].as_slice())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            read_varint(&mut [0u8; 0].as_slice())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn varints_round_trip_at_every_width() {

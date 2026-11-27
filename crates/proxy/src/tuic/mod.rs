@@ -1,7 +1,7 @@
-mod conn;
+pub(crate) mod conn;
 mod stream;
-mod udp;
-mod wire;
+pub(crate) mod udp;
+pub(crate) mod wire;
 
 use std::io;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use concord_common::{
 };
 use concord_config::proxy::{ProxyDef, TuicOpts};
 use concord_quic::{
-    BbrProfile, CONN_WINDOW, ObfsSpec, QuicStream, STREAM_WINDOW, Transport, bbr_factory,
+    BbrProfile, CONN_WINDOW, MAX_IDLE, ObfsSpec, QuicStream, STREAM_WINDOW, Transport, bbr_factory,
     bbr_window, io_error, or_default,
 };
 use quinn::TransportConfig;
@@ -32,7 +32,7 @@ use crate::uot;
 const MAX_FRAME: usize = 1400;
 const UDP_PACKET: usize = 1252;
 const MAX_OPEN_STREAMS: u32 = 100;
-const MAX_FRAG_V5: usize = 1200 - wire::V5_OVERHEAD - 3;
+pub(crate) const MAX_FRAG_V5: usize = 1200 - wire::V5_OVERHEAD - 3;
 
 pub(crate) struct Shared {
     pub(crate) link: QuicLink,
@@ -130,13 +130,19 @@ impl Outbound for Tuic {
     }
 }
 
-fn controller(opts: &TuicOpts) -> Option<Arc<dyn ControllerFactory + Send + Sync>> {
-    match opts.congestion_controller.as_str() {
+/// mihomo's `common.SetCongestionController`, the same for its client and its server; any
+/// other name keeps quic-go's Cubic.
+pub(crate) fn controller(
+    name: &str,
+    bbr_profile: &str,
+    cwnd: u32,
+) -> Option<Arc<dyn ControllerFactory + Send + Sync>> {
+    match name {
         "cubic" => Some(Arc::new(concord_quic::cubic())),
         "new_reno" => Some(Arc::new(concord_quic::new_reno())),
         "bbr" | "bbr_meta_v1" | "bbr_meta_v2" => Some(bbr_factory(
-            BbrProfile::parse(&opts.bbr_profile),
-            bbr_window(opts.cwnd),
+            BbrProfile::parse(bbr_profile),
+            bbr_window(cwnd),
         )),
         _ => None,
     }
@@ -152,11 +158,12 @@ fn transport(
         stream_window: or_default(opts.recv_window_conn, STREAM_WINDOW),
         conn_window: or_default(opts.recv_window, CONN_WINDOW),
         peer_bounded_send: false,
+        idle: MAX_IDLE,
         keep_alive: Some(heartbeat),
         datagram_frame: u64::try_from(frame).unwrap_or(u64::MAX),
         streams: Some(u64::from(max_open + max_open.div_ceil(10))),
         mtu_discovery: !opts.disable_mtu_discovery,
-        congestion: controller(opts),
+        congestion: controller(&opts.congestion_controller, &opts.bbr_profile, opts.cwnd),
     }
     .build()
 }

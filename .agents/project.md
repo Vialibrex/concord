@@ -33,8 +33,8 @@ silently:
 | Quarantine the node and warn | The node is valid but unsupported. A group left empty by quarantine, or whose selected node was quarantined, refuses connections rather than falling back |
 | Ignore and warn | The key does not change routing, or the app overrides it |
 
-A profile's `listeners`, `tunnels`, `ss-config` and `vmess-config` open with the global ports on `engine.start` and
-close on `engine.stop`; `tuic-server`, `external-controller-tls`, `-unix`, `-pipe` and the like are never opened. The exception is `external-controller`: `concord-controller` serves the Clash API at the
+A profile's `listeners`, `tunnels`, `ss-config`, `vmess-config` and `tuic-server` open with the global ports on
+`engine.start` and close on `engine.stop`; `external-controller-tls`, `-unix`, `-pipe` and the like are never opened. The exception is `external-controller`: `concord-controller` serves the Clash API at the
 profile's address when the core runs on its own, and at the address a host gives in `config.patch` when it is
 embedded; with neither, nothing opens.
 `GEOIP` reads only the mmdb; `GeoIP.dat` and `geodata-mode` are ignored with a warning. Do not add the dat path back.

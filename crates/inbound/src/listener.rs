@@ -1,8 +1,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use concord_common::serve::Protocol;
-use concord_common::{Address, Special};
+use concord_common::serve::{EndpointService, OnUdp, Protocol};
+use concord_common::{Address, InboundKind, Special};
 
 use crate::ListenerKind;
 
@@ -92,6 +92,8 @@ pub(crate) enum Udp {
     Plain,
     /// A transparent socket, whose failure only warns, as mihomo's redirect and TProxy do.
     Transparent,
+    /// Handed whole to a protocol of this kind and socket key; another binds the port anew.
+    Endpoint(InboundKind, u64),
 }
 
 impl Sockets {
@@ -110,10 +112,26 @@ impl Service {
             Service::Tunnel { tcp, udp, .. } => (stream(*tcp), plain(*udp)),
             Service::Protocol(protocol) => (
                 stream(protocol.stream.is_some()),
-                plain(protocol.datagram.is_some()),
+                match &protocol.udp {
+                    None => Udp::None,
+                    Some(OnUdp::Datagram(_)) => Udp::Plain,
+                    Some(OnUdp::Endpoint(service)) => {
+                        Udp::Endpoint(protocol.kind, service.socket_key())
+                    }
+                },
             ),
         };
         Sockets { tcp, udp }
+    }
+
+    pub(crate) fn endpoint(&self) -> Option<&Arc<dyn EndpointService>> {
+        match self {
+            Service::Protocol(Protocol {
+                udp: Some(OnUdp::Endpoint(service)),
+                ..
+            }) => Some(service),
+            _ => None,
+        }
     }
 
     pub(crate) fn auth(&self) -> Option<&ProxyAuth> {

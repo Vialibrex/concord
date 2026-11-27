@@ -623,12 +623,12 @@ mod tests {
     #[test]
     fn unknown_and_t2_keys_are_kept_and_reported() {
         let raw = parse_raw(
-            b"tuic-server:\n  enable: true\nfoo: bar\ntun:\n  enable: true\n  icmp-timeout: 4\n",
+            b"iptables:\n  enable: true\nfoo: bar\ntun:\n  enable: true\n  icmp-timeout: 4\n",
         )
         .unwrap();
         let json = raw.to_json();
         assert_eq!(json["foo"], "bar");
-        assert_eq!(json["tuic-server"]["enable"], true);
+        assert_eq!(json["iptables"]["enable"], true);
         assert_eq!(json["tun"]["icmp-timeout"], 4);
         let paths: Vec<&str> = raw
             .report
@@ -636,7 +636,7 @@ mod tests {
             .iter()
             .map(|w| w.path.as_str())
             .collect();
-        assert!(paths.contains(&"tuic-server"));
+        assert!(paths.contains(&"iptables"));
         assert!(paths.contains(&"foo"));
         assert!(paths.contains(&"tun.icmp-timeout"));
     }

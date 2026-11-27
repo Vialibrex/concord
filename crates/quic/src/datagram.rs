@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use quinn_proto::ConnectError;
+use quinn_proto::ConnectionId;
 use quinn_proto::Side;
-use quinn_proto::crypto::{ClientConfig, Session};
+use quinn_proto::crypto::{ClientConfig, Keys, ServerConfig, Session, UnsupportedVersion};
 use quinn_proto::transport_parameters::TransportParameters;
 
 const MAX_DATAGRAM_FRAME_SIZE: u64 = 0x20;
@@ -55,31 +56,61 @@ fn cap_frame(raw: &[u8], frame: u64) -> Option<Vec<u8>> {
 /// quinn derives the `max_datagram_frame_size` it advertises from the size of
 /// its datagram receive buffer, so the two cannot differ. This advertises
 /// `frame` while the buffer stays large.
-pub struct CappedFrame {
-    inner: Arc<dyn ClientConfig>,
+pub struct CappedFrame<C: ?Sized> {
+    inner: Arc<C>,
     frame: u64,
 }
 
-impl CappedFrame {
-    pub fn new(inner: Arc<dyn ClientConfig>, frame: u64) -> Self {
+impl<C: ?Sized> CappedFrame<C> {
+    pub fn new(inner: Arc<C>, frame: u64) -> Self {
         CappedFrame { inner, frame }
+    }
+
+    /// Read back as the client reads them, which admits the parameters only a server sends.
+    fn capped(&self, params: &TransportParameters) -> Option<TransportParameters> {
+        let mut raw = Vec::new();
+        params.write(&mut raw);
+        cap_frame(&raw, self.frame)
+            .and_then(|bytes| TransportParameters::read(Side::Client, &mut bytes.as_slice()).ok())
     }
 }
 
-impl ClientConfig for CappedFrame {
+impl<C: ClientConfig + ?Sized> ClientConfig for CappedFrame<C> {
     fn start_session(
         self: Arc<Self>,
         version: u32,
         server_name: &str,
         params: &TransportParameters,
     ) -> Result<Box<dyn Session>, ConnectError> {
-        let mut raw = Vec::new();
-        params.write(&mut raw);
-        let capped = cap_frame(&raw, self.frame)
-            .and_then(|bytes| TransportParameters::read(Side::Client, &mut bytes.as_slice()).ok());
+        let capped = self.capped(params);
         self.inner
             .clone()
             .start_session(version, server_name, capped.as_ref().unwrap_or(params))
+    }
+}
+
+impl<C: ServerConfig + ?Sized> ServerConfig for CappedFrame<C> {
+    fn initial_keys(
+        &self,
+        version: u32,
+        dst_cid: &ConnectionId,
+    ) -> Result<Keys, UnsupportedVersion> {
+        self.inner.initial_keys(version, dst_cid)
+    }
+
+    fn retry_tag(&self, version: u32, orig_dst_cid: &ConnectionId, packet: &[u8]) -> [u8; 16] {
+        self.inner.retry_tag(version, orig_dst_cid, packet)
+    }
+
+    fn start_session(
+        self: Arc<Self>,
+        version: u32,
+        params: &TransportParameters,
+    ) -> Box<dyn Session> {
+        let capped = self.capped(params);
+        self.inner
+            .clone()
+            .start_session(version, capped.as_ref().unwrap_or(params))
     }
 }
 

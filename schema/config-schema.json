@@ -51,10 +51,10 @@
       "listeners",
       "tunnels",
       "ss-config",
-      "vmess-config"
+      "vmess-config",
+      "tuic-server"
     ],
     "t2": [
-      "tuic-server",
       "iptables",
       "clash-for-android",
       "inbound-tfo",

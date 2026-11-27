@@ -13,7 +13,7 @@ use crate::stream::{BufRecvStream, WriteBuf};
 use crate::{
     buf::BufList,
     proto::{
-        frame::{self, Frame, PayloadLen},
+        frame::{self, Frame, FrameType, PayloadLen},
         stream::StreamId,
     },
     quic::{BidiStream, RecvStream, SendStream},
@@ -37,6 +37,12 @@ impl<S, B> FrameStream<S, B> {
             remaining_data: 0,
             unframed: false,
         }
+    }
+
+    // Concord: a HEADERS or PUSH_PROMISE frame longer than `limit` is refused before it is buffered.
+    pub(crate) fn header_limit(mut self, limit: u64) -> Self {
+        self.decoder.header_limit = limit;
+        self
     }
 
     /// Unwraps the Framed streamer and returns the underlying stream **without** data loss for
@@ -84,7 +90,8 @@ where
                 Poll::Ready(false) => continue,
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(true) => {
-                    if self.stream.buf_mut().has_remaining() {
+                    // Concord: ending inside a discarded unknown frame leaves a frame incomplete too.
+                    if self.stream.buf_mut().has_remaining() || self.decoder.skip > 0 {
                         // Reached the end of receive stream, but there is still some data:
                         // The frame is incomplete.
                         return Poll::Ready(Err(FrameStreamError::UnexpectedEnd));
@@ -219,9 +226,21 @@ where
     }
 }
 
-#[derive(Default)]
 pub struct FrameDecoder {
     expected: Option<usize>,
+    // Concord: what is left of an unknown frame's payload, and the largest HEADERS payload taken.
+    skip: usize,
+    header_limit: u64,
+}
+
+impl Default for FrameDecoder {
+    fn default() -> Self {
+        Self {
+            expected: None,
+            skip: 0,
+            header_limit: u64::MAX,
+        }
+    }
 }
 
 impl FrameDecoder {
@@ -232,7 +251,10 @@ impl FrameDecoder {
         // Decode in a loop since we ignore unknown frames, and there may be
         // other frames already in our BufList.
         loop {
-            if !src.has_remaining() {
+            let skipped = self.skip.min(src.remaining());
+            src.advance(skipped);
+            self.skip -= skipped;
+            if self.skip > 0 || !src.has_remaining() {
                 return Ok(None);
             }
 
@@ -244,12 +266,12 @@ impl FrameDecoder {
 
             let (pos, decoded) = {
                 let mut cur = src.cursor();
-                let decoded = Frame::decode(&mut cur);
+                let decoded = Frame::decode_bounded(&mut cur, self.header_limit);
                 (cur.position(), decoded)
             };
 
             match decoded {
-                Err(frame::FrameError::UnknownFrame(_ty)) => {
+                Err(frame::FrameError::UnknownFrame(_ty, rest)) => {
                     //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.8
                     //# Endpoints MUST
                     //# NOT consider these frames to have any meaning upon receipt.
@@ -258,7 +280,11 @@ impl FrameDecoder {
 
                     src.advance(pos);
                     self.expected = None;
+                    self.skip = rest;
                     continue;
+                }
+                Err(frame::FrameError::TooLarge(ty, len)) => {
+                    return Err(FrameStreamError::Proto(FrameProtocolError::TooLarge(ty, len)));
                 }
                 Err(frame::FrameError::Incomplete(min)) => {
                     self.expected = Some(min);
@@ -318,6 +344,7 @@ pub enum FrameProtocolError {
     Settings(SettingsError),
     InvalidStreamId(InvalidStreamId),
     InvalidPushId(InvalidPushId),
+    TooLarge(FrameType, u64),
 }
 
 #[cfg(test)]
@@ -329,7 +356,7 @@ mod tests {
     use futures_util::future::poll_fn;
     use std::collections::VecDeque;
 
-    use crate::proto::{coding::Encode, frame::FrameType, varint::VarInt};
+    use crate::proto::{coding::Encode, varint::VarInt};
 
     // Decoder
 
@@ -341,6 +368,54 @@ mod tests {
 
         let mut decoder = FrameDecoder::default();
         assert_matches!(decoder.decode(&mut buf), Ok(Some(Frame::Headers(_))));
+    }
+
+    // Concord: an unknown frame is discarded as it arrives, and a long HEADERS or SETTINGS
+    // frame is refused from its header alone.
+    #[test]
+    fn unknown_frame_is_discarded_as_it_arrives() {
+        let mut head = BytesMut::new();
+        VarInt::from_u32(0x21).encode(&mut head);
+        VarInt::from_u32(1 << 20).encode(&mut head);
+        let mut decoder = FrameDecoder::default();
+        let mut buf = BufList::from(head);
+        buf.push(BytesMut::zeroed(4096));
+        assert_matches!(decoder.decode(&mut buf), Ok(None));
+        assert!(!buf.has_remaining());
+        buf.push(BytesMut::zeroed((1 << 20) - 4096));
+        let mut next = BytesMut::new();
+        Frame::headers(&b"salut"[..]).encode_with_payload(&mut next);
+        buf.push(next);
+        assert_matches!(decoder.decode(&mut buf), Ok(Some(Frame::Headers(_))));
+    }
+
+    #[test]
+    fn a_long_headers_or_settings_frame_is_refused_from_its_header() {
+        for (ty, limit, refused) in [
+            (
+                FrameType::HEADERS,
+                1024,
+                FrameProtocolError::TooLarge(FrameType::HEADERS, 8 * 1024 + 1),
+            ),
+            (
+                FrameType::SETTINGS,
+                u64::MAX,
+                FrameProtocolError::Settings(SettingsError::Exceeded),
+            ),
+        ] {
+            let mut head = BytesMut::new();
+            ty.encode(&mut head);
+            VarInt::from_u32(8 * 1024 + 1).encode(&mut head);
+            let mut decoder = FrameDecoder {
+                header_limit: limit,
+                ..FrameDecoder::default()
+            };
+            let mut buf = BufList::from(head);
+            assert_matches!(
+                decoder.decode(&mut buf),
+                Err(FrameStreamError::Proto(e)) if e == refused
+            );
+        }
     }
 
     #[test]
@@ -441,6 +516,39 @@ mod tests {
             Ok(Some(b)) if b.remaining() == 4
         );
         assert_poll_matches!(|cx| stream.poll_next(cx), Ok(Some(Frame::Headers(_))));
+    }
+
+    // Concord: the stream-end and frame-type cases of the limits above.
+    #[tokio::test]
+    async fn poll_next_unknown_frame_cut_by_the_end() {
+        let mut recv = FakeRecv::default();
+        let mut buf = BytesMut::with_capacity(64);
+        VarInt::from_u32(0x21).encode(&mut buf);
+        VarInt::from_u32(8).encode(&mut buf);
+        buf.put_slice(&b"abc"[..]);
+        recv.chunk(buf.freeze());
+        let mut stream: FrameStream<_, ()> = FrameStream::new(BufRecvStream::new(recv));
+
+        assert_poll_matches!(
+            |cx| stream.poll_next(cx),
+            Err(FrameStreamError::UnexpectedEnd)
+        );
+    }
+
+    #[test]
+    fn a_long_push_promise_is_refused_by_its_type() {
+        let mut head = BytesMut::new();
+        FrameType::PUSH_PROMISE.encode(&mut head);
+        VarInt::from_u32(2048).encode(&mut head);
+        let mut decoder = FrameDecoder {
+            header_limit: 1024,
+            ..FrameDecoder::default()
+        };
+        let mut buf = BufList::from(head);
+        assert_matches!(
+            decoder.decode(&mut buf),
+            Err(FrameStreamError::Proto(FrameProtocolError::TooLarge(FrameType::PUSH_PROMISE, 2048)))
+        );
     }
 
     #[tokio::test]

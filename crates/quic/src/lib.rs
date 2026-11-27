@@ -4,6 +4,7 @@ mod bbr;
 mod congestion;
 mod datagram;
 mod obfs;
+mod release;
 mod session_socket;
 mod sessions;
 mod shared;
@@ -27,6 +28,7 @@ pub use self::congestion::{Brutal, Switch, SwitchFactory};
 pub use self::datagram::CappedFrame;
 pub use self::obfs::GeckoRange;
 use self::obfs::{Gecko, Salamander, WeChat, XPlus};
+pub use self::release::{Released, release_endpoint};
 pub use self::session_socket::SessionSocket;
 pub use self::sessions::{Fragment, Inbox, Sessions};
 pub use self::shared::{DatagramHub, SharedConn};
@@ -34,7 +36,8 @@ pub use self::socket::Hop;
 use self::socket::{Obfs, WrappedSocket};
 pub use self::tasks::{TrackedRuntime, close_on_stop};
 pub use self::transport::{
-    CONN_WINDOW, DEFAULT_CWND, MAX_IDLE, STREAM_WINDOW, Transport, bbr_window, or_default,
+    CONN_WINDOW, DEFAULT_CWND, MAX_IDLE, SERVER_STREAMS, STREAM_WINDOW, Transport, bbr_window,
+    or_default,
 };
 
 /// quic-go's starting point, which mihomo's QUIC clients share: a 100 ms initial RTT
@@ -149,6 +152,26 @@ pub fn wrap_socket(
         (ObfsSpec::None, None) => raw,
         (obfs, hop) => WrappedSocket::new(raw, obfs.build(), hop, tasks),
     }
+}
+
+/// A QUIC server on a listener's socket, its datagrams through `obfs`, and what tells
+/// [`release_endpoint`] the socket is gone.
+pub fn server_endpoint(
+    socket: std::net::UdpSocket,
+    config: quinn::ServerConfig,
+    obfs: &ObfsSpec,
+    tasks: &Tasks,
+) -> io::Result<(Endpoint, Released)> {
+    use quinn::Runtime;
+    let (raw, gone) = release::hold(quinn::TokioRuntime.wrap_udp_socket(socket)?);
+    let wrapped = wrap_socket(raw, obfs, None, tasks);
+    let endpoint = Endpoint::new_with_abstract_socket(
+        quinn::EndpointConfig::default(),
+        Some(config),
+        wrapped.clone(),
+        Arc::new(TrackedRuntime(tasks.clone())),
+    )?;
+    Ok((endpoint, Released::new(wrapped, gone)))
 }
 
 /// A bidirectional QUIC stream as a byte stream.

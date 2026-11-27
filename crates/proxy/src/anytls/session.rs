@@ -14,6 +14,8 @@ use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(feature = "server")]
+use super::frame::CMD_SYN;
 use super::frame::{
     CMD_ALERT, CMD_FIN, CMD_HEART_REQUEST, CMD_HEART_RESPONSE, CMD_SERVER_SETTINGS, CMD_SETTINGS,
     CMD_SYNACK, CMD_UPDATE_PADDING, Framer, frame,
@@ -21,6 +23,8 @@ use super::frame::{
 use super::padding::{Padding, parse_map};
 use super::pool::Pool;
 use super::reader::{Frame, FrameReader};
+#[cfg(feature = "server")]
+use super::stream::AnyTlsStream;
 use super::writer::FrameWriter;
 use crate::util::lock;
 
@@ -41,6 +45,8 @@ pub(super) enum Out {
     // These follow the data batch, retaining its extra frame slots until
     // the writer drains it without enlarging every channel item.
     FrameSlot,
+    /// The last frame of the session, which ends once it is written.
+    Last(Vec<u8>),
 }
 
 pub(super) enum Chunk {
@@ -101,6 +107,21 @@ pub(super) struct Session {
     pool: Weak<Pool>,
     padding: Arc<ArcSwap<Padding>>,
     tasks: Tasks,
+    role: Role,
+}
+
+pub(super) enum Role {
+    Client,
+    #[cfg(feature = "server")]
+    Server(ServerSide),
+}
+
+enum Step {
+    Next,
+    End,
+    /// Ends the session once this frame is written.
+    #[cfg(feature = "server")]
+    EndWith(Vec<u8>),
 }
 
 impl Session {
@@ -111,8 +132,6 @@ impl Session {
         padding: Arc<ArcSwap<Padding>>,
         client_metadata: &str,
     ) -> Arc<Session> {
-        let (out, queue) = mpsc::channel(OUT_QUEUE);
-        let (source, sink) = conn.into_split();
         let framer = Framer {
             buffering: true,
             buffer: Vec::new(),
@@ -120,6 +139,32 @@ impl Session {
             counter: 0,
             padding: padding.clone(),
         };
+        let settings = format!(
+            "v=2\nclient={client_metadata}\npadding-md5={}",
+            padding.load().md5
+        );
+        let session = Session::launch(
+            conn,
+            framer,
+            Role::Client,
+            (seq, Arc::downgrade(pool)),
+            padding,
+            &pool.tasks,
+        );
+        session.queue(Out::Data(frame(CMD_SETTINGS, 0, settings.as_bytes())));
+        session
+    }
+
+    fn launch(
+        conn: BoxStream,
+        framer: Framer,
+        role: Role,
+        (seq, pool): (u64, Weak<Pool>),
+        padding: Arc<ArcSwap<Padding>>,
+        tasks: &Tasks,
+    ) -> Arc<Session> {
+        let (out, queue) = mpsc::channel(OUT_QUEUE);
+        let (source, sink) = conn.into_split();
         let session = Arc::new(Session {
             seq,
             out,
@@ -128,25 +173,21 @@ impl Session {
             returned: Notify::new(),
             streams: Mutex::new(HashMap::new()),
             next_sid: AtomicU32::new(0),
-            die: pool.tasks.child_token(),
+            die: tasks.child_token(),
             peer_version: AtomicU8::new(0),
             idle_since: Mutex::new(Instant::now()),
             synack_watch: Mutex::new(None),
-            pool: Arc::downgrade(pool),
+            pool,
             padding,
-            tasks: pool.tasks.clone(),
+            tasks: tasks.clone(),
+            role,
         });
-        let settings = format!(
-            "v=2\nclient={client_metadata}\npadding-md5={}",
-            session.padding.load().md5
-        );
-        session.queue(Out::Data(frame(CMD_SETTINGS, 0, settings.as_bytes())));
-        pool.tasks.spawn(write_loop(
+        tasks.spawn(write_loop(
             session.clone(),
             queue,
             FrameWriter { sink, framer },
         ));
-        pool.tasks.spawn(read_loop(session.clone(), source));
+        tasks.spawn(read_loop(session.clone(), source));
         session
     }
 
@@ -264,6 +305,11 @@ impl Session {
         self.out.clone()
     }
 
+    #[cfg(feature = "server")]
+    pub(super) fn peer_version(&self) -> u8 {
+        self.peer_version.load(Ordering::Acquire)
+    }
+
     pub(super) async fn open_stream(
         self: &Arc<Self>,
         head: Vec<u8>,
@@ -378,7 +424,11 @@ impl Session {
         }
     }
 
-    async fn receive(self: &Arc<Self>, mut reader: Box<FrameReader>) -> io::Result<()> {
+    /// Reads frames until the session ends; `Some` names a frame to write before it does.
+    async fn receive(
+        self: &Arc<Self>,
+        mut reader: Box<FrameReader>,
+    ) -> io::Result<Option<Vec<u8>>> {
         loop {
             let frame = poll_fn(|cx| reader.poll_frame(cx, |sid| self.read_options(sid))).await?;
             let (cmd, sid, payload) = match frame {
@@ -412,57 +462,168 @@ impl Session {
                 }
                 Frame::Control { cmd, sid, payload } => (cmd, sid, payload),
             };
-            if !self.control(cmd, sid, payload) {
-                return Ok(());
+            match self.control(cmd, sid, payload) {
+                Step::Next => {}
+                Step::End => return Ok(None),
+                #[cfg(feature = "server")]
+                Step::EndWith(last) => return Ok(Some(last)),
             }
         }
     }
 
-    /// Handles a control frame; false when the server ends the session.
-    fn control(self: &Arc<Self>, cmd: u8, sid: u32, payload: Vec<u8>) -> bool {
+    fn control(self: &Arc<Self>, cmd: u8, sid: u32, payload: Vec<u8>) -> Step {
+        match &self.role {
+            Role::Client => self.client_control(cmd, sid, &payload),
+            #[cfg(feature = "server")]
+            Role::Server(server) => self.serve_control(server, cmd, sid, &payload),
+        }
+    }
+
+    fn client_control(self: &Arc<Self>, cmd: u8, sid: u32, payload: &[u8]) -> Step {
+        match cmd {
+            CMD_ALERT if !payload.is_empty() => {
+                tracing::debug!(
+                    alert = %String::from_utf8_lossy(payload),
+                    "anytls: alert from server"
+                );
+                return Step::End;
+            }
+            CMD_UPDATE_PADDING if !payload.is_empty() => {
+                if let Some(scheme) = Padding::parse(payload) {
+                    self.padding.store(Arc::new(scheme));
+                }
+            }
+            CMD_SERVER_SETTINGS if !payload.is_empty() => {
+                let settings = parse_map(&String::from_utf8_lossy(payload));
+                if let Some(version) = settings.get("v").and_then(|v| v.parse::<u8>().ok()) {
+                    self.peer_version.store(version, Ordering::Release);
+                }
+            }
+            _ => return self.common_control(cmd, sid, payload),
+        }
+        Step::Next
+    }
+
+    fn common_control(self: &Arc<Self>, cmd: u8, sid: u32, payload: &[u8]) -> Step {
         match cmd {
             CMD_SYNACK => {
                 if let Some(watch) = lock(&self.synack_watch).take() {
                     watch.abort();
                 }
                 if !payload.is_empty() {
-                    let message = String::from_utf8_lossy(&payload).into_owned();
+                    let message = String::from_utf8_lossy(payload).into_owned();
                     self.finish_remote(sid, Some(format!("remote: {message}")));
                     self.queue(Out::Data(frame(CMD_FIN, sid, &[])));
                 }
             }
             CMD_FIN => self.finish_remote(sid, None),
-            CMD_ALERT => {
-                if !payload.is_empty() {
-                    tracing::debug!(
-                        alert = %String::from_utf8_lossy(&payload),
-                        "anytls: alert from server"
-                    );
-                    return false;
-                }
-            }
-            CMD_UPDATE_PADDING if !payload.is_empty() => {
-                if let Some(scheme) = Padding::parse(&payload) {
-                    self.padding.store(Arc::new(scheme));
-                }
-            }
+            CMD_ALERT if !payload.is_empty() => return Step::End,
             CMD_HEART_REQUEST => self.queue(Out::Data(frame(CMD_HEART_RESPONSE, sid, &[]))),
-            CMD_SERVER_SETTINGS if !payload.is_empty() => {
-                let settings = parse_map(&String::from_utf8_lossy(&payload));
-                if let Some(version) = settings.get("v").and_then(|v| v.parse::<u8>().ok()) {
-                    self.peer_version.store(version, Ordering::Release);
-                }
-            }
             _ => {}
         }
-        true
+        Step::Next
+    }
+}
+
+#[cfg(feature = "server")]
+pub(super) struct ServerSide {
+    accept: Box<dyn Fn(AnyTlsStream) + Send + Sync>,
+    settled: AtomicBool,
+}
+
+/// mihomo's `NewServerSession` (`session/session.go:76-85`): no padding, no idle timer,
+/// and a stream for each SYN once the client has sent its settings.
+#[cfg(feature = "server")]
+impl Session {
+    pub(super) fn serve(
+        conn: BoxStream,
+        padding: Arc<ArcSwap<Padding>>,
+        tasks: &Tasks,
+        accept: Box<dyn Fn(AnyTlsStream) + Send + Sync>,
+    ) {
+        let framer = Framer {
+            buffering: false,
+            buffer: Vec::new(),
+            padding_on: false,
+            counter: 0,
+            padding: padding.clone(),
+        };
+        let server = ServerSide {
+            accept,
+            settled: AtomicBool::new(false),
+        };
+        Session::launch(
+            conn,
+            framer,
+            Role::Server(server),
+            (0, Weak::new()),
+            padding,
+            tasks,
+        );
+    }
+
+    /// `recvLoop` for a server (`session.go:206-226`, `:261-301`).
+    fn serve_control(
+        self: &Arc<Self>,
+        server: &ServerSide,
+        cmd: u8,
+        sid: u32,
+        payload: &[u8],
+    ) -> Step {
+        match cmd {
+            CMD_SYN if !server.settled.load(Ordering::Acquire) => {
+                return Step::EndWith(frame(CMD_ALERT, 0, b"client did not send its settings"));
+            }
+            CMD_SYN => {
+                let mut streams = lock(&self.streams);
+                if streams.contains_key(&sid) {
+                    return Step::Next;
+                }
+                let (tx, rx) = mpsc::channel(CHUNK_QUEUE);
+                let flow = Arc::new(Flow::default());
+                streams.insert(
+                    sid,
+                    Entry {
+                        tx,
+                        flow: flow.clone(),
+                    },
+                );
+                drop(streams);
+                (server.accept)(AnyTlsStream::new(sid, self.clone(), rx, flow));
+            }
+            CMD_SETTINGS if !payload.is_empty() => {
+                server.settled.store(true, Ordering::Release);
+                let settings = parse_map(&String::from_utf8_lossy(payload));
+                let padding = self.padding.load();
+                let mut answer = Vec::new();
+                if settings.get("padding-md5") != Some(&padding.md5) {
+                    answer.extend_from_slice(&frame(CMD_UPDATE_PADDING, 0, &padding.raw));
+                }
+                let version = settings.get("v").and_then(|v| v.parse::<i64>().ok());
+                if let Some(version) = version.filter(|v| *v >= 2) {
+                    self.peer_version
+                        .store(u8::try_from(version).unwrap_or(u8::MAX), Ordering::Release);
+                    answer.extend_from_slice(&frame(CMD_SERVER_SETTINGS, 0, b"v=2"));
+                }
+                if !answer.is_empty() {
+                    self.queue(Out::Data(answer));
+                }
+            }
+            CMD_UPDATE_PADDING | CMD_SERVER_SETTINGS => {}
+            _ => return self.common_control(cmd, sid, payload),
+        }
+        Step::Next
     }
 }
 
 async fn read_loop(session: Arc<Session>, source: BoxRead) {
-    tokio::select! {
-        _ = session.die.cancelled() => {}
-        _ = session.receive(Box::new(FrameReader::new(source))) => {}
+    let last = tokio::select! {
+        _ = session.die.cancelled() => None,
+        ended = session.receive(Box::new(FrameReader::new(source))) => ended.ok().flatten(),
+    };
+    if let Some(last) = last {
+        session.queue(Out::Last(last));
+        return;
     }
     session.close();
 }
@@ -502,7 +663,8 @@ async fn write_loop(session: Arc<Session>, mut queue: mpsc::Receiver<Out>, write
                 ..
             }
         );
-        if writer.send(out).await.is_err() {
+        let last = matches!(out, Out::Last(_));
+        if writer.send(out).await.is_err() || last {
             break Some(writer);
         }
         if continued && writer.framer.passes_through() {
@@ -555,6 +717,7 @@ mod tests {
             pool: Weak::new(),
             padding: Arc::new(ArcSwap::from_pointee(Padding::default_scheme())),
             tasks: Tasks::default(),
+            role: Role::Client,
         });
         let (_, chunks) = mpsc::channel(1);
         (
@@ -927,6 +1090,88 @@ mod tests {
         assert_eq!(stream.read(&mut got).await.unwrap(), 0);
         drop(stream);
         assert_eq!(pool.take_idle().map(|idle| idle.seq), Some(1));
+    }
+
+    #[cfg(feature = "server")]
+    fn served() -> (
+        tokio::io::DuplexStream,
+        mpsc::UnboundedReceiver<AnyTlsStream>,
+    ) {
+        let (near, far) = tokio::io::duplex(1 << 16);
+        let padding = Arc::new(ArcSwap::from_pointee(Padding::parse(b"stop=1").unwrap()));
+        let (accepted, streams) = mpsc::unbounded_channel();
+        Session::serve(
+            Box::new(near),
+            padding,
+            &Tasks::default(),
+            Box::new(move |stream| {
+                let _ = accepted.send(stream);
+            }),
+        );
+        (far, streams)
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_server_alerts_and_ends_on_a_syn_before_the_settings() {
+        let (mut far, mut streams) = served();
+        far.write_all(&frame(CMD_SYN, 1, &[])).await.unwrap();
+        let (cmd, sid, body) = read_frame(&mut far).await;
+        assert_eq!((cmd, sid), (CMD_ALERT, 0));
+        assert_eq!(body, b"client did not send its settings");
+        let mut rest = Vec::new();
+        far.read_to_end(&mut rest).await.unwrap();
+        assert!(rest.is_empty());
+        assert!(streams.recv().await.is_none());
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_server_sends_its_scheme_and_version_then_acks_each_stream() {
+        let (mut far, mut streams) = served();
+        far.write_all(&frame(CMD_SETTINGS, 0, b"v=2\nclient=t\npadding-md5=other"))
+            .await
+            .unwrap();
+        assert_eq!(
+            read_frame(&mut far).await,
+            (CMD_UPDATE_PADDING, 0, b"stop=1".to_vec())
+        );
+        assert_eq!(
+            read_frame(&mut far).await,
+            (CMD_SERVER_SETTINGS, 0, b"v=2".to_vec())
+        );
+
+        far.write_all(&frame(CMD_SYN, 7, &[])).await.unwrap();
+        far.write_all(&frame(CMD_PSH, 7, b"hello")).await.unwrap();
+        let mut stream = streams.recv().await.unwrap();
+        stream.handshake_success().await.unwrap();
+        stream.write_all(b"back").await.unwrap();
+        assert_eq!(read_frame(&mut far).await, (CMD_SYNACK, 7, Vec::new()));
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 7, b"back".to_vec()));
+        let mut got = [0u8; 5];
+        stream.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"hello");
+
+        far.write_all(&frame(CMD_SYN, 7, &[])).await.unwrap();
+        far.write_all(&frame(CMD_FIN, 7, &[])).await.unwrap();
+        assert_eq!(stream.read(&mut got).await.unwrap(), 0);
+        assert!(streams.try_recv().is_err());
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_server_skips_the_ack_for_a_version_1_client_with_its_scheme() {
+        let (mut far, mut streams) = served();
+        let md5 = Padding::parse(b"stop=1").unwrap().md5;
+        let settings = format!("v=1\npadding-md5={md5}");
+        far.write_all(&frame(CMD_SETTINGS, 0, settings.as_bytes()))
+            .await
+            .unwrap();
+        far.write_all(&frame(CMD_SYN, 1, &[])).await.unwrap();
+        let mut stream = streams.recv().await.unwrap();
+        stream.handshake_success().await.unwrap();
+        stream.write_all(b"x").await.unwrap();
+        assert_eq!(read_frame(&mut far).await, (CMD_PSH, 1, b"x".to_vec()));
     }
 
     async fn read_buffer(

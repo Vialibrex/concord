@@ -1,7 +1,7 @@
 //! mihomo's shadowsocks listener (`listener/sing_shadowsocks/server.go`), on the vendored
 //! crate's server halves.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -37,6 +37,11 @@ use crate::util::lock;
 const UDP_SESSION_IDLE: Duration = Duration::from_secs(5 * 60);
 /// The AEAD-2022 sessions a listener holds; sing-shadowsocks bounds its table by age only.
 const MAX_SESSIONS: usize = 16_384;
+/// A session unseen this long has sent no packet that would still pass the timestamp
+/// check, which takes a stamp up to 30 whole seconds either side of the clock's whole
+/// seconds (sing-shadowsocks `shadowaead_2022/service.go:481-482`): a packet that arrived
+/// at `t` was stamped by `floor(t) + 30` and passes until just before `floor(t) + 61`.
+const REPLAY_WINDOW: Duration = Duration::from_secs(61);
 
 enum Keys {
     One(Bytes),
@@ -75,7 +80,8 @@ impl Default for Kept {
 
 /// An AEAD-2022 server installs `clock` for the vendored crate's timestamps, which is
 /// process-wide and the same one its clients install, as mihomo hands `ntp.Now` to its
-/// 2022 services (`listener/sing_shadowsocks/server.go:79`).
+/// 2022 services (`v1.19.33` `listener/sing_shadowsocks/server.go:79`; `:89` and `:264`,
+/// for users, at `fea29264`).
 pub(super) fn build(
     server: &SsServer,
     kept: &Arc<Kept>,
@@ -293,36 +299,62 @@ impl Session {
 /// by id (`shadowaead_2022/service.go:57`, `:429`).
 type SessionKey = (u64, CipherKind, Bytes);
 
+/// When a session was last seen, made unique by a count.
+type Seen = (Instant, u64);
+
 #[derive(Default)]
 struct Sessions {
-    by_id: HashMap<SessionKey, (Arc<Session>, Instant)>,
-    swept: Option<Instant>,
+    by_id: HashMap<SessionKey, (Arc<Session>, Seen)>,
+    by_seen: BTreeMap<Seen, SessionKey>,
+    count: u64,
 }
 
 impl Sessions {
-    fn sweep(&mut self, now: Instant) {
-        if self
-            .swept
-            .is_some_and(|at| now.duration_since(at) < UDP_SESSION_IDLE)
-        {
-            return;
+    /// The session `id` names, seen at `now`. A new one takes a full table's place only
+    /// from a session past the replay window; with none, it is refused, so no session's
+    /// packets can be replayed into a new session under its id.
+    fn touch(
+        &mut self,
+        id: SessionKey,
+        now: Instant,
+        make: impl FnOnce() -> Arc<Session>,
+    ) -> Option<Arc<Session>> {
+        self.forget_unseen_for(UDP_SESSION_IDLE, now);
+        self.count += 1;
+        let seen = (now, self.count);
+        if let Some((session, at)) = self.by_id.get_mut(&id) {
+            self.by_seen.remove(at);
+            *at = seen;
+            let session = session.clone();
+            self.by_seen.insert(seen, id);
+            return Some(session);
         }
-        self.by_id
-            .retain(|_, (_, seen)| now.duration_since(*seen) < UDP_SESSION_IDLE);
-        self.swept = Some(now);
+        if self.by_id.len() >= MAX_SESSIONS {
+            let (&(oldest, _), _) = self.by_seen.first_key_value()?;
+            if now.duration_since(oldest) < REPLAY_WINDOW {
+                return None;
+            }
+            self.forget_oldest();
+        }
+        let session = make();
+        self.by_id.insert(id.clone(), (session.clone(), seen));
+        self.by_seen.insert(seen, id);
+        Some(session)
     }
 
-    fn make_room(&mut self) {
-        if self.by_id.len() < MAX_SESSIONS {
-            return;
+    fn forget_unseen_for(&mut self, idle: Duration, now: Instant) {
+        while self
+            .by_seen
+            .first_key_value()
+            .is_some_and(|(&(seen, _), _)| now.duration_since(seen) >= idle)
+        {
+            self.forget_oldest();
         }
-        let oldest = self
-            .by_id
-            .iter()
-            .min_by_key(|(_, (_, seen))| *seen)
-            .map(|(key, _)| key.clone());
-        if let Some(oldest) = oldest {
-            self.by_id.remove(&oldest);
+    }
+
+    fn forget_oldest(&mut self) {
+        if let Some((_, id)) = self.by_seen.pop_first() {
+            self.by_id.remove(&id);
         }
     }
 }
@@ -414,7 +446,10 @@ impl DatagramService for SsDatagrams {
         };
         let (seal, conn): (Arc<dyn DatagramSeal>, u64) = match control {
             Some(control) => {
-                let session = self.session(&control, key);
+                let Some(session) = self.session(&control, key) else {
+                    tracing::debug!("shadowsocks: no room for a new UDP session");
+                    return None;
+                };
                 if !session.receive(control.packet_id) {
                     return None;
                 }
@@ -439,31 +474,20 @@ impl DatagramService for SsDatagrams {
 }
 
 impl SsDatagrams {
-    fn session(&self, control: &UdpSocketControlData, key: Bytes) -> Arc<Session> {
-        let now = Instant::now();
-        let mut sessions = lock(&self.0.kept.sessions);
-        sessions.sweep(now);
+    fn session(&self, control: &UdpSocketControlData, key: Bytes) -> Option<Arc<Session>> {
         let id = (control.client_session_id, self.0.kind, key.clone());
-        if !sessions.by_id.contains_key(&id) {
-            sessions.make_room();
-        }
-        let entry = sessions.by_id.entry(id).or_insert_with(|| {
-            (
-                Arc::new(Session {
-                    conn: concord_common::next_conn(),
-                    client_session_id: control.client_session_id,
-                    server_session_id: rand::random(),
-                    packet_id: AtomicU64::new(0),
-                    user: control.user.clone(),
-                    key,
-                    sealer: self.0.sealer.clone(),
-                    received: Mutex::default(),
-                }),
-                now,
-            )
-        });
-        entry.1 = now;
-        entry.0.clone()
+        lock(&self.0.kept.sessions).touch(id, Instant::now(), || {
+            Arc::new(Session {
+                conn: concord_common::next_conn(),
+                client_session_id: control.client_session_id,
+                server_session_id: rand::random(),
+                packet_id: AtomicU64::new(0),
+                user: control.user.clone(),
+                key,
+                sealer: self.0.sealer.clone(),
+                received: Mutex::default(),
+            })
+        })
     }
 }
 
@@ -627,13 +651,16 @@ mod tests {
 
     #[test]
     fn datagrams_that_do_not_open_leave_no_cipher_and_a_session_keeps_its_one() {
-        let ss = server(&[], &Arc::default());
         let before = cipher_cache_len();
-        for _ in 0..1000 {
-            let mut junk = PacketBuf::from_slice(&rand::random::<[u8; 96]>());
-            assert!(ss.open(&mut junk, client()).is_none());
+        for (cipher, password) in [(CIPHER, IPSK), ("2022-blake3-chacha20-poly1305", WIDE)] {
+            let ss = server_of(cipher, password, &[], &Arc::default());
+            for _ in 0..1000 {
+                let mut junk = PacketBuf::from_slice(&rand::random::<[u8; 96]>());
+                assert!(ss.open(&mut junk, client()).is_none());
+            }
+            assert_eq!(cipher_cache_len(), before, "{cipher}");
         }
-        assert_eq!(cipher_cache_len(), before);
+        let ss = server(&[], &Arc::default());
         // Sealed on a thread of its own, so this thread's cache holds only what opening adds.
         let sealed = std::thread::spawn(|| {
             (1..=3)
@@ -650,29 +677,48 @@ mod tests {
     }
 
     #[test]
-    fn a_full_table_lets_the_least_recently_seen_session_go() {
+    fn a_full_table_takes_a_new_session_only_in_place_of_one_past_the_replay_window() {
         let mut sessions = Sessions::default();
-        let now = Instant::now();
+        let start = Instant::now();
         let sealer = server(&[], &Arc::default()).0.sealer.clone();
-        for id in 0..MAX_SESSIONS as u64 {
-            let session = Arc::new(Session {
-                conn: id,
-                client_session_id: id,
-                server_session_id: 0,
-                packet_id: AtomicU64::new(0),
-                user: None,
-                key: Bytes::new(),
-                sealer: sealer.clone(),
-                received: Mutex::default(),
-            });
-            let seen = now + Duration::from_millis(id);
-            sessions.by_id.insert(
-                (id, parse_method(CIPHER).unwrap(), Bytes::new()),
-                (session, seen),
-            );
+        let make = |id: u64| {
+            let sealer = sealer.clone();
+            move || {
+                Arc::new(Session {
+                    conn: id,
+                    client_session_id: id,
+                    server_session_id: 0,
+                    packet_id: AtomicU64::new(0),
+                    user: None,
+                    key: Bytes::new(),
+                    sealer,
+                    received: Mutex::default(),
+                })
+            }
+        };
+        let key = |id: u64| (id, parse_method(CIPHER).unwrap(), Bytes::new());
+        let full = MAX_SESSIONS as u64;
+        for id in 0..full {
+            assert!(sessions.touch(key(id), start, make(id)).is_some());
         }
-        sessions.make_room();
-        assert_eq!(sessions.by_id.len(), MAX_SESSIONS - 1);
-        assert!(!sessions.by_id.keys().any(|(id, _, _)| *id == 0));
+        let busy = start + REPLAY_WINDOW - Duration::from_secs(1);
+        assert!(sessions.touch(key(full), busy, make(full)).is_none());
+        assert_eq!(sessions.touch(key(0), busy, make(0)).unwrap().conn, 0);
+
+        let later = start + REPLAY_WINDOW;
+        assert!(sessions.touch(key(full), later, make(full)).is_some());
+        assert_eq!(sessions.by_id.len(), MAX_SESSIONS);
+        assert!(
+            sessions.by_id.contains_key(&key(0)),
+            "the one seen since stays"
+        );
+        assert!(
+            !sessions.by_id.contains_key(&key(1)),
+            "the oldest unseen one goes"
+        );
+
+        sessions.touch(key(0), start + UDP_SESSION_IDLE + REPLAY_WINDOW, make(0));
+        assert_eq!(sessions.by_id.len(), 1);
+        assert_eq!(sessions.by_seen.len(), 1);
     }
 }

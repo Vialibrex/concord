@@ -1,7 +1,7 @@
 mod realm;
 mod stream;
-mod udp;
-mod wire;
+pub(crate) mod udp;
+pub(crate) mod wire;
 
 use std::io;
 use std::sync::{Arc, Weak};
@@ -14,7 +14,7 @@ use concord_common::{
 };
 use concord_config::proxy::{Hysteria2Opts, ProxyDef};
 use concord_quic::{
-    BbrProfile, Brutal, Hop, ObfsSpec, QuicStream, SharedConn, SwitchFactory, Transport,
+    BbrProfile, Brutal, Hop, MAX_IDLE, ObfsSpec, QuicStream, SharedConn, SwitchFactory, Transport,
     bbr_factory, bbr_window, io_error, or_default,
 };
 use quinn::TransportConfig;
@@ -32,14 +32,14 @@ use crate::util::{parse_bps, parse_ports};
 
 /// quic-go's MaxDatagramSize, the `max_datagram_frame_size` a Hysteria2 server sees from
 /// sing-box and mihomo; quinn would advertise its receive buffer instead.
-const DATAGRAM_FRAME: u64 = 16_383;
-const DEFAULT_STREAM_WINDOW: u64 = 8 * 1024 * 1024;
-const DEFAULT_CONN_WINDOW: u64 = DEFAULT_STREAM_WINDOW * 5 / 2;
+pub(crate) const DATAGRAM_FRAME: u64 = 16_383;
+pub(crate) const DEFAULT_STREAM_WINDOW: u64 = 8 * 1024 * 1024;
+pub(crate) const DEFAULT_CONN_WINDOW: u64 = DEFAULT_STREAM_WINDOW * 5 / 2;
 const KEEP_ALIVE: Duration = Duration::from_secs(10);
-const DEFAULT_UDP_MTU: usize = 1200 - 3;
+pub(crate) const DEFAULT_UDP_MTU: usize = 1200 - 3;
 const MIN_HOP: u64 = 5;
 const DEFAULT_HOP: u64 = 30;
-const AUTH_OK: u16 = 233;
+pub(crate) const AUTH_OK: u16 = 233;
 
 struct Hy2Conn {
     shared: SharedConn<Hub>,
@@ -261,26 +261,38 @@ fn hop_interval(text: &str) -> Result<(Duration, Duration), BuildError> {
 
 /// quinn holds one receive window where quic-go starts at the initial one and grows it up to the
 /// maximum, never below where it started: the window it ends up with is the larger of the two.
-fn window(initial: u64, max: u64, fallback: u64) -> u64 {
+pub(crate) fn window(initial: u64, max: u64, fallback: u64) -> u64 {
     or_default(initial, fallback).max(or_default(max, fallback))
 }
 
-fn transport(opts: &Hysteria2Opts, controllers: Arc<SwitchFactory>) -> Arc<TransportConfig> {
+pub(crate) enum Side {
+    Client,
+    /// Sends stay within quinn's own window: bounded by the peer's credit alone, a client that
+    /// advertises a large window and reads slowly would have the server buffer up to it.
+    #[cfg(feature = "server")]
+    Server,
+}
+
+/// sing-quic's QUIC settings, which its client and server share.
+pub(crate) fn transport(
+    stream_window: u64,
+    conn_window: u64,
+    side: Side,
+    controllers: Arc<SwitchFactory>,
+) -> Arc<TransportConfig> {
+    let (peer_bounded_send, streams) = match side {
+        Side::Client => (true, None),
+        #[cfg(feature = "server")]
+        Side::Server => (false, Some(concord_quic::SERVER_STREAMS)),
+    };
     Transport {
-        stream_window: window(
-            opts.initial_stream_receive_window,
-            opts.max_stream_receive_window,
-            DEFAULT_STREAM_WINDOW,
-        ),
-        conn_window: window(
-            opts.initial_connection_receive_window,
-            opts.max_connection_receive_window,
-            DEFAULT_CONN_WINDOW,
-        ),
-        peer_bounded_send: true,
+        stream_window,
+        conn_window,
+        peer_bounded_send,
+        idle: MAX_IDLE,
         keep_alive: Some(KEEP_ALIVE),
         datagram_frame: DATAGRAM_FRAME,
-        streams: None,
+        streams,
         mtu_discovery: true,
         congestion: Some(controllers),
     }
@@ -364,7 +376,20 @@ fn build_hy2(
         server: Address::new(&opts.server, port),
         server_name: Some(server_name),
         crypto: tls,
-        transport: transport(opts, controllers.clone()),
+        transport: transport(
+            window(
+                opts.initial_stream_receive_window,
+                opts.max_stream_receive_window,
+                DEFAULT_STREAM_WINDOW,
+            ),
+            window(
+                opts.initial_connection_receive_window,
+                opts.max_connection_receive_window,
+                DEFAULT_CONN_WINDOW,
+            ),
+            Side::Client,
+            controllers.clone(),
+        ),
         obfs: obfs_spec(opts)?,
         hop,
         datagram_frame: Some(DATAGRAM_FRAME),

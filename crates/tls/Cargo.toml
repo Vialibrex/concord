@@ -22,6 +22,7 @@ async-trait = { workspace = true }
 tokio = { workspace = true, features = ["net", "time", "io-util", "macros", "rt", "sync"] }
 tokio-util = { workspace = true }
 rustls = { workspace = true }
+arc-swap = { workspace = true }
 tokio-rustls = { workspace = true }
 aws-lc-rs = { workspace = true }
 rustls-pki-types = { workspace = true }

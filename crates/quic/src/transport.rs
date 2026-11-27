@@ -10,6 +10,10 @@ pub const MAX_IDLE: Duration = Duration::from_secs(30);
 pub const STREAM_WINDOW: u64 = 15_728_640;
 pub const CONN_WINDOW: u64 = 67_108_864;
 pub const DEFAULT_CWND: u64 = 32;
+/// The streams of each direction a client may hold open on a server at once. quinn
+/// preallocates an entry for every one it allows, so the unbounded count Go servers give
+/// quic-go is not available here.
+pub const SERVER_STREAMS: u64 = 1024;
 
 pub fn or_default(value: impl Into<u64>, fallback: u64) -> u64 {
     match value.into() {
@@ -29,6 +33,7 @@ pub struct Transport {
     /// Bounds unacknowledged writes by the peer's flow-control credit alone, as quic-go does,
     /// instead of quinn's own send window.
     pub peer_bounded_send: bool,
+    pub idle: Duration,
     pub keep_alive: Option<Duration>,
     /// The `max_datagram_frame_size` the connection advertises, which sizes its receive buffer.
     pub datagram_frame: u64,
@@ -44,7 +49,7 @@ impl Transport {
         let conn_window = varint(self.conn_window);
         let mut config = transport_config();
         config
-            .max_idle_timeout(IdleTimeout::try_from(MAX_IDLE).ok())
+            .max_idle_timeout(IdleTimeout::try_from(self.idle).ok())
             .keep_alive_interval(self.keep_alive)
             .stream_receive_window(varint(self.stream_window))
             .receive_window(conn_window)

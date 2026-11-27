@@ -70,18 +70,21 @@ use crate::{
     crypto::{CipherKind, v2::tcp::TcpCipher},
 };
 
+type Clock = Box<dyn Fn() -> SystemTime + Send + Sync>;
+
 /// Concord: the clock request and response timestamps are read from, so an
-/// NTP-corrected clock can stand in for the system one as mihomo's `ntp.Now` does.
-static CLOCK: std::sync::RwLock<Option<Box<dyn Fn() -> SystemTime + Send + Sync>>> = std::sync::RwLock::new(None);
+/// NTP-corrected clock can stand in for the system one as mihomo's `ntp.Now` does. UDP reads
+/// it for every packet, so reading takes no lock.
+static CLOCK: arc_swap::ArcSwapOption<Clock> = arc_swap::ArcSwapOption::const_empty();
 
 /// Concord: replaces the system clock for AEAD-2022 timestamps.
-pub fn set_clock(clock: Box<dyn Fn() -> SystemTime + Send + Sync>) {
-    *CLOCK.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(clock);
+pub fn set_clock(clock: Clock) {
+    CLOCK.store(Some(std::sync::Arc::new(clock)));
 }
 
 #[inline]
 pub(crate) fn get_now_timestamp() -> u64 {
-    let clock = CLOCK.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let clock = CLOCK.load();
     let now = clock.as_ref().map_or_else(SystemTime::now, |clock| clock());
     match now.duration_since(SystemTime::UNIX_EPOCH) {
         Ok(n) => n.as_secs(),

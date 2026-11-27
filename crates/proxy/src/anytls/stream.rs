@@ -205,10 +205,31 @@ impl Outbox {
     }
 }
 
-pub(super) struct AnyTlsStream {
+pub(crate) struct AnyTlsStream {
     inbox: Inbox,
     outbox: Outbox,
     closer: Arc<Closer>,
+}
+
+#[cfg(feature = "server")]
+impl AnyTlsStream {
+    /// `HandshakeSuccess` (`session/stream.go:153-165`): a client from version 2 on waits
+    /// for a SYNACK, sent here ahead of the stream's own data.
+    pub(crate) async fn handshake_success(&self) -> io::Result<()> {
+        let session = &self.closer.session;
+        if session.peer_version() < 2 {
+            return Ok(());
+        }
+        session
+            .sender()
+            .send(Out::Data(frame(
+                super::frame::CMD_SYNACK,
+                self.closer.sid,
+                &[],
+            )))
+            .await
+            .map_err(|_| io::ErrorKind::BrokenPipe.into())
+    }
 }
 
 impl AnyTlsStream {

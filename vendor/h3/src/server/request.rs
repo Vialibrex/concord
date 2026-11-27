@@ -14,9 +14,9 @@ use crate::{
         internal_error::InternalConnectionError,
         Code, StreamError,
     },
-    frame::{FrameStream, FrameStreamError},
+    frame::{FrameProtocolError, FrameStream, FrameStreamError},
     proto::{
-        frame::{Frame, PayloadLen},
+        frame::{Frame, FrameType, PayloadLen},
         headers::Header,
     },
     qpack,
@@ -120,6 +120,12 @@ where
                     )),
                 );
             }
+            // Concord: as quic-go refuses a HEADERS frame over the limit from its length, stopping
+            // the request with H3_EXCESSIVE_LOAD and answering 431 (`http3/server_conn.go:123-129`).
+            Err(FrameStreamError::Proto(FrameProtocolError::TooLarge(FrameType::HEADERS, len))) => {
+                self.frame_stream.stop_sending(Code::H3_EXCESSIVE_LOAD);
+                return Ok(self.resolved(Err(len)));
+            }
             Err(e) => {
                 return Err(self.handle_frame_stream_error_on_request_stream(e));
             }
@@ -141,6 +147,11 @@ where
             }
         };
 
+        Ok(self.resolved(decoded))
+    }
+
+    fn resolved(self, decoded: Result<qpack::Decoded, u64>) -> ResolvedRequest<C, B> {
+        let max_field_section_size = self.max_field_section_size;
         let request_stream = RequestStream {
             request_end: Arc::new(RequestEnd {
                 request_end: self.request_end_send.clone(),
@@ -153,12 +164,7 @@ where
                 self.send_grease_frame,
             ),
         };
-
-        Ok(ResolvedRequest::new(
-            request_stream,
-            decoded,
-            self.max_field_section_size,
-        ))
+        ResolvedRequest::new(request_stream, decoded, max_field_section_size)
     }
 }
 

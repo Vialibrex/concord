@@ -31,7 +31,7 @@ members = [
     "tools/bench",
     "xtask",
 ]
-exclude = ["vendor/boring", "vendor/gotatun", "vendor/h3", "vendor/h2", "vendor/mio", "vendor/quinn", "vendor/quinn-proto", "vendor/rustls", "vendor/shadowsocks", "vendor/tokio", "vendor/tun-rs"]
+exclude = ["vendor/boring", "vendor/gotatun", "vendor/h3", "vendor/h3-quinn", "vendor/h2", "vendor/mio", "vendor/quinn", "vendor/quinn-proto", "vendor/rustls", "vendor/shadowsocks", "vendor/tokio", "vendor/tun-rs"]
 
 [workspace.package]
 version = "0.1.0"
@@ -301,6 +301,7 @@ opt-level = 3
 [patch.crates-io]
 gotatun = { path = "vendor/gotatun" }
 h3 = { path = "vendor/h3" }
+h3-quinn = { path = "vendor/h3-quinn" }
 boring = { path = "vendor/boring" }
 h2 = { path = "vendor/h2" }
 tun-rs = { path = "vendor/tun-rs" }

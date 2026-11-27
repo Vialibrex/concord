@@ -280,7 +280,7 @@ fn dispatch(
             deliver(ctx, &inbound, from, 0, dst, packet, &reply);
         }
         Service::Protocol(protocol) => {
-            if let Some(service) = &protocol.datagram {
+            if let Some(service) = protocol.datagram() {
                 opened(
                     ctx,
                     protocol.kind,

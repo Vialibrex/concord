@@ -32,6 +32,10 @@ const SAMPLES: &[(&str, &str)] = &[
         "vmess-config",
         "vmess-config: \"vmess://1:9d0cb9d0-964f-4ef6-897d-6c6b3ccf9e68@127.0.0.1:7899\"",
     ),
+    (
+        "tuic-server",
+        "tuic-server: {enable: true, listen: \"127.0.0.1:7900\", users: {9d0cb9d0-964f-4ef6-897d-6c6b3ccf9e68: pw}}",
+    ),
     ("mode", "mode: global"),
     ("log-level", "log-level: debug"),
     ("ipv6", "ipv6: false"),

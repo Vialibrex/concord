@@ -262,9 +262,16 @@ impl Future for ConnectionDriver {
 
         if let Err(e) = conn.process_conn_events(&self.conn.shared, cx) {
             conn.terminate(e, &self.conn.shared);
+            conn.let_go_of_socket();
             return Poll::Ready(Ok(()));
         }
-        let mut keep_going = conn.drive_transmit(cx)?;
+        let mut keep_going = match conn.drive_transmit(cx) {
+            Ok(keep_going) => keep_going,
+            Err(err) => {
+                conn.let_go_of_socket();
+                return Poll::Ready(Err(err));
+            }
+        };
         // If a timer expires, there might be more to transmit. When we transmit something, we
         // might need to reset a timer. Hence, we must loop until neither happens.
         keep_going |= conn.drive_timer(cx);
@@ -283,6 +290,7 @@ impl Future for ConnectionDriver {
         if conn.error.is_none() {
             unreachable!("drained connections always have an error");
         }
+        conn.let_go_of_socket();
         Poll::Ready(Ok(()))
     }
 }
@@ -1013,6 +1021,14 @@ pub(crate) struct State {
 }
 
 impl State {
+    // Concord: once the driver ends nothing sends or receives for the connection, yet a handle
+    // kept past it would hold the socket, and with it a server's port, until the handle goes.
+    fn let_go_of_socket(&mut self) {
+        let gone: Arc<dyn AsyncUdpSocket> = Arc::new(Gone(self.socket.local_addr().ok()));
+        self.io_poller = gone.clone().create_io_poller();
+        self.socket = gone;
+    }
+
     fn drive_transmit(&mut self, cx: &mut Context) -> io::Result<bool> {
         let now = self.runtime.now();
         let mut transmits = 0;
@@ -1341,3 +1357,39 @@ const MAX_TRANSMIT_DATAGRAMS: usize = 80;
 /// memory allocations when calling `poll_transmit()`. Benchmarks have shown
 /// that numbers around 10 are a good compromise.
 const MAX_TRANSMIT_SEGMENTS: usize = 10;
+
+// Concord: what a connection whose driver has ended holds in place of its socket.
+#[derive(Debug)]
+struct Gone(Option<SocketAddr>);
+
+impl AsyncUdpSocket for Gone {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        Box::pin(GonePoller)
+    }
+
+    fn try_send(&self, _transmit: &udp::Transmit) -> io::Result<()> {
+        Err(io::ErrorKind::NotConnected.into())
+    }
+
+    fn poll_recv(
+        &self,
+        _cx: &mut Context,
+        _bufs: &mut [io::IoSliceMut<'_>],
+        _meta: &mut [udp::RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        Poll::Pending
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.0.ok_or_else(|| io::ErrorKind::NotConnected.into())
+    }
+}
+
+#[derive(Debug)]
+struct GonePoller;
+
+impl UdpPoller for GonePoller {
+    fn poll_writable(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<io::Result<()>> {
+        Poll::Ready(Err(io::ErrorKind::NotConnected.into()))
+    }
+}

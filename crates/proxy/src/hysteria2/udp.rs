@@ -11,7 +11,7 @@ use super::wire::{MAX_UDP, UdpHeader, parse_udp, put_udp_header, udp_header_len}
 use crate::util::lock;
 
 /// A domain of 255 bytes with `:65535`, a two-byte length and the fixed header.
-const HEADROOM: usize = 8 + 2 + 255 + 6;
+pub(crate) const HEADROOM: usize = 8 + 2 + 255 + 6;
 
 /// Hands the datagrams of one connection to the session they belong to.
 #[derive(Default)]
@@ -47,38 +47,62 @@ impl DatagramHub for Hub {
     }
 }
 
-/// The datagrams of one `associate`, which the server relays to any destination.
-pub(crate) struct Hy2Packets {
+/// Sends the datagrams of one session, in pieces when one does not fit.
+pub(crate) struct Sender {
     id: u32,
     conn: quinn::Connection,
-    hub: Arc<Hub>,
-    incoming: Mutex<Inbox>,
     packet_id: AtomicU16,
     udp_mtu: usize,
-    closed: AtomicBool,
-    _hold: Arc<dyn Send + Sync>,
 }
 
-impl Hy2Packets {
-    pub(crate) fn new(
-        conn: quinn::Connection,
-        hub: Arc<Hub>,
-        udp_mtu: usize,
-        hold: Arc<dyn Send + Sync>,
-    ) -> io::Result<Self> {
-        let (id, incoming) = hub
-            .register()
-            .ok_or_else(|| io::Error::other("hysteria2: no free session id"))?;
-        Ok(Hy2Packets {
+impl Sender {
+    pub(crate) fn new(id: u32, conn: quinn::Connection, udp_mtu: usize) -> Self {
+        Sender {
             id,
             conn,
-            hub,
-            incoming: Mutex::new(incoming),
             packet_id: AtomicU16::new(0),
             udp_mtu,
-            closed: AtomicBool::new(false),
-            _hold: hold,
-        })
+        }
+    }
+
+    pub(crate) fn send(&self, pkt: &mut PacketBuf, dst: &Address) -> io::Result<()> {
+        if pkt.len() > MAX_UDP {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "datagram too large",
+            ));
+        }
+        let addr = dst.to_string();
+        let header = udp_header_len(&addr);
+        if pkt.len() + header <= self.udp_mtu {
+            let packet = self.packet_id.fetch_add(1, Ordering::Relaxed);
+            let mut head = Vec::with_capacity(header);
+            put_udp_header(
+                &mut head,
+                &UdpHeader {
+                    session: self.id,
+                    packet,
+                    fragment: 0,
+                    fragments: 1,
+                    addr: &addr,
+                },
+            );
+            pkt.prepend(head.len()).copy_from_slice(&head);
+            let sent = self
+                .conn
+                .send_datagram(Bytes::copy_from_slice(pkt.as_slice()));
+            pkt.consume(head.len());
+            match sent {
+                Ok(()) => return Ok(()),
+                Err(quinn::SendDatagramError::TooLarge) => {}
+                Err(err) => return Err(send_error(err)),
+            }
+        }
+        let limit = self
+            .conn
+            .max_datagram_size()
+            .map_or(self.udp_mtu, |size| size.min(self.udp_mtu));
+        self.send_pieces(pkt.as_slice(), &addr, limit)
     }
 
     fn send_pieces(&self, payload: &[u8], addr: &str, limit: usize) -> io::Result<()> {
@@ -108,6 +132,35 @@ impl Hy2Packets {
     }
 }
 
+/// The datagrams of one `associate`, which the server relays to any destination.
+pub(crate) struct Hy2Packets {
+    sender: Sender,
+    hub: Arc<Hub>,
+    incoming: Mutex<Inbox>,
+    closed: AtomicBool,
+    _hold: Arc<dyn Send + Sync>,
+}
+
+impl Hy2Packets {
+    pub(crate) fn new(
+        conn: quinn::Connection,
+        hub: Arc<Hub>,
+        udp_mtu: usize,
+        hold: Arc<dyn Send + Sync>,
+    ) -> io::Result<Self> {
+        let (id, incoming) = hub
+            .register()
+            .ok_or_else(|| io::Error::other("hysteria2: no free session id"))?;
+        Ok(Hy2Packets {
+            sender: Sender::new(id, conn, udp_mtu),
+            hub,
+            incoming: Mutex::new(incoming),
+            closed: AtomicBool::new(false),
+            _hold: hold,
+        })
+    }
+}
+
 fn send_error(err: quinn::SendDatagramError) -> io::Error {
     match err {
         quinn::SendDatagramError::TooLarge => {
@@ -127,43 +180,7 @@ impl PacketSession for Hy2Packets {
         if self.closed.load(Ordering::Relaxed) {
             return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
         }
-        if pkt.len() > MAX_UDP {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "datagram too large",
-            )));
-        }
-        let addr = dst.to_string();
-        let header = udp_header_len(&addr);
-        if pkt.len() + header <= self.udp_mtu {
-            let packet = self.packet_id.fetch_add(1, Ordering::Relaxed);
-            let mut head = Vec::with_capacity(header);
-            put_udp_header(
-                &mut head,
-                &UdpHeader {
-                    session: self.id,
-                    packet,
-                    fragment: 0,
-                    fragments: 1,
-                    addr: &addr,
-                },
-            );
-            pkt.prepend(head.len()).copy_from_slice(&head);
-            let sent = self
-                .conn
-                .send_datagram(Bytes::copy_from_slice(pkt.as_slice()));
-            pkt.consume(head.len());
-            match sent {
-                Ok(()) => return Poll::Ready(Ok(())),
-                Err(quinn::SendDatagramError::TooLarge) => {}
-                Err(err) => return Poll::Ready(Err(send_error(err))),
-            }
-        }
-        let limit = self
-            .conn
-            .max_datagram_size()
-            .map_or(self.udp_mtu, |size| size.min(self.udp_mtu));
-        Poll::Ready(self.send_pieces(pkt.as_slice(), &addr, limit))
+        Poll::Ready(self.sender.send(pkt, dst))
     }
 
     fn poll_recv(&self, cx: &mut Context<'_>, buf: &mut PacketBuf) -> Poll<io::Result<Address>> {
@@ -186,12 +203,12 @@ impl PacketSession for Hy2Packets {
 
     fn close(&self) {
         self.closed.store(true, Ordering::Relaxed);
-        self.hub.remove(self.id);
+        self.hub.remove(self.sender.id);
     }
 }
 
 impl Drop for Hy2Packets {
     fn drop(&mut self) {
-        self.hub.remove(self.id);
+        self.hub.remove(self.sender.id);
     }
 }

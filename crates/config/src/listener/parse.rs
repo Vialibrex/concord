@@ -48,6 +48,9 @@ const SECURITY_KEYS: &[&str] = &[
     "tlsmirror-config",
 ];
 
+/// `listener/anytls/server.go:86-97`.
+const ANYTLS_SECURITY_KEYS: &[&str] = &["shadow-tls", "res-tls", "jls-config"];
+
 const UNSUPPORTED_KEYS: &[&str] = &[
     "res-tls",
     "tlsmirror-config",
@@ -107,13 +110,53 @@ pub fn from_general(general: &Map, report: &mut LoadReport) -> Result<InboundDef
         }
     };
     let text = |key: &str| general.get(key).and_then(Value::as_str).unwrap_or_default();
-    read(
+    let mut defs = read(
         &listeners,
         tunnels,
         text("ss-config"),
         text("vmess-config"),
         report,
-    )
+    )?;
+    if let Some(Value::Object(tuic)) = general.get("tuic-server") {
+        let mut f = Fields::new(tuic, "tuic-server", true);
+        match default_tuic(&mut f) {
+            Ok(def) => defs.listeners.extend(def),
+            Err(err) => report.warn("listener_skipped", "tuic-server", err.to_string()),
+        }
+        report.warn_ignored("", &f.take_ignored());
+    }
+    Ok(defs)
+}
+
+/// The top-level `tuic-server` (`config/config.go:334-347`), which has no client-auth,
+/// `bbr-profile` or `mux-option`, and which mihomo opens as
+/// `DEFAULT-TUIC` on every address of its comma-separated `listen`; one that fails is
+/// logged and left closed (`listener/listener.go:352-394`).
+fn default_tuic(f: &mut Fields<'_>) -> Result<Option<ListenerDef>> {
+    if !f.boolean("enable")? {
+        return Ok(None);
+    }
+    let listen = f.string("listen")?;
+    let addrs = listen
+        .split(',')
+        .map(bind_addr)
+        .collect::<Result<Vec<SocketAddr>>>()?;
+    let tls = ServerTls {
+        certificate: f.string("certificate")?,
+        private_key: f.string("private-key")?,
+        client_auth: ClientAuth::None,
+        client_auth_cert: String::new(),
+    };
+    let server = tuic_server(f, tls, String::new())?;
+    Ok(Some(ListenerDef {
+        name: "DEFAULT-TUIC".to_owned(),
+        binds: Binds::Addrs(addrs),
+        rule: None,
+        proxy: None,
+        routing_mark: 0,
+        kind: ListenerKind::Tuic(server),
+        default_of: Some("tuic-server"),
+    }))
 }
 
 pub fn read(
@@ -277,6 +320,14 @@ fn parse_listener(map: &Map) -> R<(ListenerDef, Vec<String>)> {
         "vmess" => ListenerKind::Vmess(vmess_server(&mut f)?),
         "vless" => ListenerKind::Vless(vless_server(&mut f)?),
         "trojan" => ListenerKind::Trojan(trojan_server(&mut f)?),
+        "hysteria2" => ListenerKind::Hysteria2(hysteria2_server(&mut f)?),
+        "anytls" => ListenerKind::AnyTls(anytls_server(&mut f)?),
+        "tuic" => {
+            let tls = quic_tls(&mut f)?;
+            let bbr_profile = f.string("bbr-profile")?;
+            mux_later(&mut f);
+            ListenerKind::Tuic(tuic_server(&mut f, tls, bbr_profile)?)
+        }
         other => return skip(format!("listener type '{other}' is not implemented yet")),
     };
     let ignored = f.take_ignored().iter().map(ToString::to_string).collect();
@@ -325,7 +376,11 @@ fn asks_for(f: &Fields<'_>, key: &str) -> bool {
 /// `securityModes`: at most one layer besides plain TLS, and the one this core serves today
 /// is plain TLS (`sing_vmess/server.go:138-163`).
 fn security(f: &mut Fields<'_>, tls: &Option<ServerTls>) -> R<()> {
-    let mut chosen: Vec<&str> = SECURITY_KEYS
+    security_among(f, tls, SECURITY_KEYS)
+}
+
+fn security_among(f: &mut Fields<'_>, tls: &Option<ServerTls>, keys: &[&str]) -> R<()> {
+    let mut chosen: Vec<&str> = keys
         .iter()
         .copied()
         .filter(|key| asks_for(f, key))
@@ -349,18 +404,7 @@ fn security(f: &mut Fields<'_>, tls: &Option<ServerTls>) -> R<()> {
 fn server_tls(f: &mut Fields<'_>) -> R<Option<ServerTls>> {
     let certificate = f.string("certificate")?;
     let private_key = f.string("private-key")?;
-    let kind = f.string("client-auth-type")?;
-    let client_auth_cert = f.string("client-auth-cert")?;
-    let mut client_auth = match kind.as_str() {
-        "request" => ClientAuth::Request,
-        "require-any" => ClientAuth::RequireAny,
-        "verify-if-given" => ClientAuth::VerifyIfGiven,
-        "require-and-verify" => ClientAuth::RequireAndVerify,
-        _ => ClientAuth::None,
-    };
-    if kind.is_empty() && !client_auth_cert.is_empty() {
-        client_auth = ClientAuth::RequireAndVerify;
-    }
+    let (client_auth, client_auth_cert) = client_auth(f)?;
     if certificate.is_empty() || private_key.is_empty() {
         if client_auth != ClientAuth::None {
             return skip("client-auth requires certificate");
@@ -379,6 +423,36 @@ fn server_tls(f: &mut Fields<'_>) -> R<Option<ServerTls>> {
         client_auth,
         client_auth_cert,
     }))
+}
+
+/// A QUIC listener always serves TLS; with neither part named it signs its own
+/// (`component/ca/keypair.go:25-33`).
+fn quic_tls(f: &mut Fields<'_>) -> Result<ServerTls> {
+    let certificate = f.string("certificate")?;
+    let private_key = f.string("private-key")?;
+    let (client_auth, client_auth_cert) = client_auth(f)?;
+    Ok(ServerTls {
+        certificate,
+        private_key,
+        client_auth,
+        client_auth_cert,
+    })
+}
+
+fn client_auth(f: &mut Fields<'_>) -> Result<(ClientAuth, String)> {
+    let kind = f.string("client-auth-type")?;
+    let client_auth_cert = f.string("client-auth-cert")?;
+    let mut client_auth = match kind.as_str() {
+        "request" => ClientAuth::Request,
+        "require-any" => ClientAuth::RequireAny,
+        "verify-if-given" => ClientAuth::VerifyIfGiven,
+        "require-and-verify" => ClientAuth::RequireAndVerify,
+        _ => ClientAuth::None,
+    };
+    if kind.is_empty() && !client_auth_cert.is_empty() {
+        client_auth = ClientAuth::RequireAndVerify;
+    }
+    Ok((client_auth, client_auth_cert))
 }
 
 fn carriers(f: &mut Fields<'_>) -> Result<HttpCarriers> {
@@ -583,5 +657,79 @@ fn trojan_server(f: &mut Fields<'_>) -> R<TrojanServer> {
         users,
         tls,
         carriers: carriers(f)?,
+    })
+}
+
+/// anytls has no `reality-config`, `tlsmirror-config` or `mux-option`
+/// (`listener/inbound/anytls.go:12-25`), so they are not read.
+fn anytls_server(f: &mut Fields<'_>) -> R<AnyTlsServer> {
+    let users = f.string_map("users")?;
+    let padding_scheme = f.string("padding-scheme")?;
+    let tls = server_tls(f)?;
+    security_among(f, &tls, ANYTLS_SECURITY_KEYS)?;
+    if tls.is_none() && !f.boolean("allow-insecure")? {
+        return skip(
+            "disallow using AnyTLS without certificates/shadow-tls/res-tls/jls/allow-insecure config",
+        );
+    }
+    Ok(AnyTlsServer {
+        users,
+        padding_scheme,
+        tls,
+    })
+}
+
+fn tuic_server(f: &mut Fields<'_>, tls: ServerTls, bbr_profile: String) -> Result<TuicServer> {
+    Ok(TuicServer {
+        tokens: f.strings("token")?,
+        users: f.string_map("users")?,
+        tls,
+        alpn: f.strings("alpn")?,
+        congestion: f.string("congestion-controller")?,
+        cwnd: f.loose("cwnd", 0)?,
+        bbr_profile,
+        max_idle_ms: f.loose("max-idle-time", 0)?,
+        auth_timeout_ms: f.loose("authentication-timeout", 0)?,
+        max_udp_relay_packet: f.loose("max-udp-relay-packet-size", 0)?,
+    })
+}
+
+/// `realm-opts` and the Gecko obfuscation wait for a later batch; `masquerade` is answered
+/// with 404 as when it is unset, and `max-idle-time`, which mihomo reads but never applies,
+/// is not read.
+fn hysteria2_server(f: &mut Fields<'_>) -> R<Hysteria2Server> {
+    if asks_for(f, "realm-opts") {
+        return skip("option 'realm-opts' is not served yet");
+    }
+    let salamander = match f.string("obfs")?.as_str() {
+        "" => None,
+        "salamander" => {
+            let password = f.string("obfs-password")?;
+            if password.is_empty() {
+                return skip("missing obfs password");
+            }
+            Some(password)
+        }
+        "gecko" => return skip("obfs 'gecko' is not served yet"),
+        other => return skip(format!("unknown obfs type: {other}")),
+    };
+    f.ignore("masquerade", "answered with 404 until masquerade is served");
+    let tls = quic_tls(f)?;
+    mux_later(f);
+    Ok(Hysteria2Server {
+        users: f.string_map("users")?,
+        salamander,
+        up: f.string("up")?,
+        down: f.string("down")?,
+        ignore_client_bandwidth: f.boolean("ignore-client-bandwidth")?,
+        tls,
+        alpn: f.strings("alpn")?,
+        udp_mtu: f.loose("udp-mtu", 0)?,
+        cwnd: f.loose("cwnd", 0)?,
+        bbr_profile: f.string("bbr-profile")?,
+        initial_stream_window: f.u64("initial-stream-receive-window")?,
+        max_stream_window: f.u64("max-stream-receive-window")?,
+        initial_conn_window: f.u64("initial-connection-receive-window")?,
+        max_conn_window: f.u64("max-connection-receive-window")?,
     })
 }

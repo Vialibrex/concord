@@ -32,12 +32,14 @@ mihomo; a key that only uses one, such as `copy: *domain`, is still unknown.
 | Behaviour | mihomo | Concord |
 |---|---|---|
 | A node of an unsupported type, or one whose options cannot be built | The whole profile fails, or, for options checked when connecting, the node's connections fail | The node is set aside with a warning |
-| `listeners`, `tunnels`, `ss-config` and `vmess-config` | Opened when the profile loads | Opened when the host starts the listeners, as with the ports, and closed when it stops them; `concord run` starts them at once. See Partial Support for what they serve |
-| `tuic-server`, `external-controller-tls`, `-unix`, `-pipe`, `external-ui` and `external-doh-server` | Opened | Never opened; the host opens listeners through the API |
+| `listeners`, `tunnels`, `ss-config`, `vmess-config` and `tuic-server` | Opened when the profile loads | Opened when the host starts the listeners, as with the ports, and closed when it stops them; `concord run` starts them at once. See Partial Support for what they serve |
+| `external-controller-tls`, `-unix`, `-pipe`, `external-ui` and `external-doh-server` | Opened | Never opened; the host opens listeners through the API |
 | `external-controller`, `secret` and `external-controller-cors` | Read from the profile | Read from the profile when Concord runs on its own (`concord run`). An app that embeds Concord sets them itself, and the profile's values are ignored with a warning |
 | Dashboard changes in an app that embeds Concord | mihomo's embedded builds refuse `PUT`/`PATCH /configs` and the geo update | Allowed, except `PUT /configs` and `tun` in `PATCH /configs`, which belong to the app; the app is told of every change so it stays in step |
 | Dial retries | Up to 10 per connection within 5 s | None: one dial per connection, as sing-box does; a failed dial fails the connection. A smart group is the exception: after a node-level failure it redials up to two more of its members within the same 5 s, unless a selection holds it on one member |
 | UDP routing | The first packet from a source decides the route for all its destinations | Each destination is routed by the rules; flows that reach one outbound share its session, so the external mapping stays endpoint-independent. Single-destination protocols such as plain VMess are the exception |
+| Streams a client holds open on a `tuic` or `hysteria2` listener | No limit | 1024 in each direction at once; only streams open at the same time count, so a client that closes its streams opens any number over time |
+| The certificate a `tuic` or `hysteria2` listener with neither `certificate` nor `private-key` signs for itself | A new one each time the listener is built, so a reload changes it | Kept across reloads under the listener's name, so a client that pinned it still connects |
 | `GEOIP` | Reads the mmdb or `GeoIP.dat` | Reads the mmdb only; `geodata-mode` and `geox-url.geoip` are ignored, and a code that only a custom `GeoIP.dat` held does not match. `GEOIP,!cn` negates against the mmdb |
 | `IP-ASN` and `SRC-IP-ASN` without `ASN.mmdb` | The apply downloads the file and fails if the download does | The apply goes ahead; the rules match nothing until the file, fetched in the background and retried, loads, and a `NOT` around one does not turn that into a match |
 | `dns.fake-ip-filter` left out | `dns.msftnsci.com`, `www.msftnsci.com` and `www.msftconnecttest.com`; the first two misspell the domain of Windows' connectivity check, so they never match it | `dns.msftncsi.com`, `www.msftncsi.com` and `www.msftconnecttest.com`, so the check gets a real address |
@@ -184,8 +186,8 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
 
 ## Partial Support
 
-- **Inbound servers** (`listeners`, `tunnels`, `ss-config`, `vmess-config`): the `http`, `socks`, `mixed`, `redir`,
-  `tproxy`, `tunnel`, `shadowsocks`, `vmess`, `vless` and `trojan` types are served, with `users`, `rule`, `proxy`,
+- **Inbound servers** (`listeners`, `tunnels`, `ss-config`, `vmess-config`, `tuic-server`): the `http`, `socks`,
+  `mixed`, `redir`, `tproxy`, `tunnel`, `shadowsocks`, `vmess`, `vless`, `trojan`, `tuic` and `hysteria2` types are served, with `users`, `rule`, `proxy`,
   `routing-mark` and, on the stream protocols, TLS with `client-auth-type`, `ws-path` and `grpc-service-name`.
   `IN-NAME`, `IN-TYPE`, `IN-USER` and `IN-PORT` match their flows as in mihomo. A listener of another type, or one
   that asks for something not served (`reality-config`, `shadow-tls`, `res-tls`, `jls`, `tlsmirror-config`,
@@ -196,7 +198,9 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   session closes the connection, where mihomo serves them. VMess takes AEAD requests only, so a client with `alterId`
   above 0 cannot connect; mihomo also takes the legacy header. A Trojan request with an unknown key is closed, with no
   fallback, and one with the trojan-go mux command (`0x7f`) is closed too. A Shadowsocks server takes the ciphers its
-  node does: `aes-192-gcm`, which mihomo's server also takes, is not served. A
+  node does: `aes-192-gcm`, which mihomo's server also takes, is not served. A `hysteria2` listener serves
+  Salamander but not Gecko obfuscation nor `realm-opts`, which skip it, and answers every request other than a
+  client's authentication with a 404, so `masquerade` is ignored with a warning. A
   certificate, key or client CA is the PEM text itself or a file inside the home directory. A listener that cannot
   bind is logged and retried on the next reload; unlike the ports, it is not reported to the host.
 - **MASQUE:** Cloudflare WARP CONNECT-IP over H3 and H2 capsules, and TCP-only `h3-l4proxy`, with

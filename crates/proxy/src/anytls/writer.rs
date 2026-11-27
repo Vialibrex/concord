@@ -129,7 +129,7 @@ impl FrameWriter {
                 return self.sink.flush().await;
             }
             Out::Owned { frame, .. } => self.framer.push(frame.as_slice().to_vec()),
-            Out::Data(bytes) => self.framer.push(bytes),
+            Out::Data(bytes) | Out::Last(bytes) => self.framer.push(bytes),
             Out::FrameSlot => return Ok(()),
         };
         for write in writes {

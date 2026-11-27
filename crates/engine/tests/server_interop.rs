@@ -174,6 +174,60 @@ fn cases() -> Vec<Case> {
             "type: trojan, password: pw, udp: true, sni: localhost, skip-cert-verify: true, network: grpc, grpc-opts: {grpc-service-name: tg}",
             None,
         ),
+        case(
+            "tuic-v5",
+            &format!("type: tuic, users: {{{UUID}: pw}}"),
+            &format!(
+                "type: tuic, uuid: {UUID}, password: pw, sni: localhost, skip-cert-verify: true, udp: true"
+            ),
+            Some(UUID),
+        ),
+        case(
+            "tuic-v5-quic",
+            &format!("type: tuic, users: {{{UUID}: pw}}, congestion-controller: bbr"),
+            &format!(
+                "type: tuic, uuid: {UUID}, password: pw, sni: localhost, skip-cert-verify: true, udp: true, udp-relay-mode: quic"
+            ),
+            Some(UUID),
+        ),
+        case(
+            "tuic-v4",
+            &format!("type: tuic, {tls}, token: [tk]"),
+            "type: tuic, token: tk, sni: localhost, skip-cert-verify: true, udp: true",
+            None,
+        ),
+        case(
+            "hysteria2",
+            "type: hysteria2, users: {alice: pw}",
+            "type: hysteria2, password: pw, sni: localhost, skip-cert-verify: true",
+            Some("alice"),
+        ),
+        case(
+            "hysteria2-brutal",
+            "type: hysteria2, users: {alice: pw}, up: 200, down: 200",
+            "type: hysteria2, password: pw, sni: localhost, skip-cert-verify: true, up: 100, down: 100",
+            Some("alice"),
+        ),
+        case(
+            "anytls",
+            &format!("type: anytls, {tls}, users: {{alice: pw}}"),
+            "type: anytls, password: pw, sni: localhost, skip-cert-verify: true, udp: true",
+            Some("alice"),
+        ),
+        case(
+            "anytls-scheme",
+            &format!(
+                "type: anytls, {tls}, users: {{alice: pw}}, padding-scheme: \"stop=3\\n0=40-40\\n1=200-300\\n2=100-200\""
+            ),
+            "type: anytls, password: pw, sni: localhost, skip-cert-verify: true, udp: true",
+            Some("alice"),
+        ),
+        case(
+            "hysteria2-salamander",
+            "type: hysteria2, users: {alice: pw}, obfs: salamander, obfs-password: salt",
+            "type: hysteria2, password: pw, sni: localhost, skip-cert-verify: true, obfs: salamander, obfs-password: salt",
+            Some("alice"),
+        ),
     ];
     all.push(Case {
         udp: false,
@@ -489,6 +543,7 @@ async fn socks_udp_pair(port: u16, targets: [SocketAddr; 2]) -> std::io::Result<
 async fn mihomo_clients_reach_every_concord_server() {
     let binary = concord_test_support::peer("CONCORD_MIHOMO");
     let cases = cases();
+    assert!(!cases.is_empty(), "CONCORD_CASE names no case");
     let len = std::env::var("CONCORD_BYTES")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -502,6 +557,7 @@ async fn mihomo_clients_reach_every_concord_server() {
     write_certificate(home.path());
     let logged = Logged::install();
     let engine = start_concord(home.path(), &cases, &ports).await;
+    assert_eq!(engine.faults(), []);
     let started = logged.text();
     assert!(
         !started.contains("ERROR") && !started.contains("is not started"),

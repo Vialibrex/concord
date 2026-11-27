@@ -15,7 +15,7 @@ use concord_common::{
 };
 use concord_config::proxy::{ProxyDef, ShadowQuicOpts};
 use concord_quic::{
-    BbrProfile, Brutal, CONN_WINDOW, ObfsSpec, QuicStream, STREAM_WINDOW, SharedConn,
+    BbrProfile, Brutal, CONN_WINDOW, MAX_IDLE, ObfsSpec, QuicStream, STREAM_WINDOW, SharedConn,
     SwitchFactory, Transport, bbr_factory, bbr_window, io_error, or_default,
 };
 use quinn::congestion::ControllerFactory;
@@ -259,6 +259,7 @@ fn transport(opts: &ShadowQuicOpts, controllers: Arc<SwitchFactory>) -> Arc<Tran
         stream_window: or_default(opts.recv_window_conn, STREAM_WINDOW),
         conn_window: or_default(opts.recv_window, CONN_WINDOW),
         peer_bounded_send: true,
+        idle: MAX_IDLE,
         keep_alive: (opts.keep_alive_interval > 0)
             .then(|| Duration::from_millis(u64::from(opts.keep_alive_interval))),
         datagram_frame: datagram_frame(opts),

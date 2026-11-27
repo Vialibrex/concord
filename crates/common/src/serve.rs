@@ -2,6 +2,7 @@
 //! receives its datagrams. The listener owns the sockets, the ports and the reloads; the
 //! server owns the protocol and hands each flow it opens to [`InboundCx::handler`].
 
+use std::any::Any;
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::TcpStream;
+use tokio::sync::watch;
 
 use crate::addr::Address;
 use crate::flow::FlowHandler;
@@ -28,7 +30,24 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct Protocol {
     pub kind: InboundKind,
     pub stream: Option<Arc<dyn StreamService>>,
-    pub datagram: Option<Arc<dyn DatagramService>>,
+    pub udp: Option<OnUdp>,
+}
+
+#[derive(Clone)]
+pub enum OnUdp {
+    /// Each datagram on its own, through the listener's socket.
+    Datagram(Arc<dyn DatagramService>),
+    /// The socket whole.
+    Endpoint(Arc<dyn EndpointService>),
+}
+
+impl Protocol {
+    pub fn datagram(&self) -> Option<&Arc<dyn DatagramService>> {
+        match &self.udp {
+            Some(OnUdp::Datagram(service)) => Some(service),
+            _ => None,
+        }
+    }
 }
 
 /// The listener a connection or datagram arrived at.
@@ -78,6 +97,34 @@ pub trait DatagramService: Send + Sync + 'static {
     /// Unframes one datagram from `client` in place, leaving the payload in `packet`.
     /// `None` drops it: it did not authenticate or did not parse.
     fn open(&self, packet: &mut PacketBuf, client: SocketAddr) -> Option<Opened>;
+}
+
+/// A protocol that takes the listener's UDP socket whole, as a QUIC server does: it reads
+/// and writes the socket itself and keeps the connections on it.
+pub trait EndpointService: Any + Send + Sync {
+    /// Opens the endpoint on `socket` and returns what serves it. A reload that keeps the
+    /// port leaves it running and sends the service built in this one's place through
+    /// `current`, which is of the same type: connections opened from then on take it, open
+    /// ones keep theirs. Once the sender of `current` is dropped the endpoint closes, and
+    /// the future ends when it has let go of the port.
+    fn run(
+        self: Arc<Self>,
+        socket: std::net::UdpSocket,
+        current: watch::Receiver<Current>,
+    ) -> std::io::Result<ServeFuture>;
+
+    /// What the socket itself carries, such as an obfuscation key, which a running endpoint
+    /// cannot change: a reload that changes it binds the port anew.
+    fn socket_key(&self) -> u64 {
+        0
+    }
+}
+
+/// What a running endpoint serves now.
+#[derive(Clone)]
+pub struct Current {
+    pub service: Arc<dyn EndpointService>,
+    pub cx: Arc<InboundCx>,
 }
 
 pub struct Opened {

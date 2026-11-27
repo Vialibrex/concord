@@ -19,7 +19,11 @@ use super::{
 pub enum FrameError {
     Malformed,
     UnsupportedFrame(u64), // Known frames that should generate an error
-    UnknownFrame(u64),     // Unknown frames that should be ignored
+    // Concord: the payload bytes still to skip, which are discarded as they arrive rather than buffered.
+    UnknownFrame(u64, usize), // Unknown frames that should be ignored
+    // Concord: a HEADERS or PUSH_PROMISE frame, by type and payload length, over the decoder's
+    // limit, which is refused before it is buffered.
+    TooLarge(FrameType, u64),
     InvalidFrameValue,
     Incomplete(usize),
     Settings(SettingsError),
@@ -34,7 +38,10 @@ impl fmt::Display for FrameError {
         match self {
             FrameError::Malformed => write!(f, "frame is malformed"),
             FrameError::UnsupportedFrame(c) => write!(f, "frame 0x{:x} is not allowed h3", c),
-            FrameError::UnknownFrame(c) => write!(f, "frame 0x{:x} ignored", c),
+            FrameError::UnknownFrame(c, _) => write!(f, "frame 0x{:x} ignored", c),
+            FrameError::TooLarge(ty, len) => {
+                write!(f, "frame 0x{:x} payload of {} bytes is too large", ty.0, len)
+            }
             FrameError::InvalidFrameValue => write!(f, "frame value is invalid"),
             FrameError::Incomplete(x) => write!(f, "internal error: frame incomplete {}", x),
             FrameError::Settings(x) => write!(f, "invalid settings: {}", x),
@@ -80,6 +87,12 @@ impl Frame<PayloadLen> {
 
     /// Decodes a Frame from the stream according to <https://www.rfc-editor.org/rfc/rfc9114#section-7.1>
     pub fn decode<T: Buf>(buf: &mut T) -> Result<Self, FrameError> {
+        Self::decode_bounded(buf, u64::MAX)
+    }
+
+    // Concord: bounds what is buffered before a frame is decoded, as quic-go does
+    // (`http3/frames.go:134`, `:182`, `server_conn.go:123`).
+    pub(crate) fn decode_bounded<T: Buf>(buf: &mut T, header_limit: u64) -> Result<Self, FrameError> {
         let remaining = buf.remaining();
         let ty = FrameType::decode(buf).map_err(|_| FrameError::Incomplete(remaining + 1))?;
 
@@ -101,6 +114,35 @@ impl Frame<PayloadLen> {
             return Ok(Frame::Data((len as usize).into()));
         }
 
+        let limit = match ty {
+            FrameType::HEADERS | FrameType::PUSH_PROMISE => header_limit,
+            FrameType::SETTINGS => MAX_SETTINGS,
+            FrameType::CANCEL_PUSH | FrameType::GOAWAY | FrameType::MAX_PUSH_ID => {
+                VarInt::MAX_SIZE as u64
+            }
+            //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.8
+            //# These frame
+            //# types MUST NOT be sent, and their receipt MUST be treated as a
+            //# connection error of type H3_FRAME_UNEXPECTED.
+            FrameType::H2_PRIORITY
+            | FrameType::H2_PING
+            | FrameType::H2_WINDOW_UPDATE
+            | FrameType::H2_CONTINUATION => return Err(FrameError::UnsupportedFrame(ty.0)),
+            _ => {
+                let len = usize::try_from(len).unwrap_or(usize::MAX);
+                let skipped = buf.remaining().min(len);
+                buf.advance(skipped);
+                return Err(FrameError::UnknownFrame(ty.0, len - skipped));
+            }
+        };
+        if len > limit {
+            return Err(match ty {
+                FrameType::SETTINGS => FrameError::Settings(SettingsError::Exceeded),
+                FrameType::HEADERS | FrameType::PUSH_PROMISE => FrameError::TooLarge(ty, len),
+                _ => FrameError::Malformed,
+            });
+        }
+
         if buf.remaining() < len as usize {
             return Err(FrameError::Incomplete(2 + len as usize));
         }
@@ -117,22 +159,8 @@ impl Frame<PayloadLen> {
             FrameType::PUSH_PROMISE => Ok(Frame::PushPromise(PushPromise::decode(&mut payload)?)),
             FrameType::GOAWAY => Ok(Frame::Goaway(VarInt::decode(&mut payload)?)),
             FrameType::MAX_PUSH_ID => Ok(Frame::MaxPushId(payload.get_var()?.try_into()?)),
-            //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.8
-            //# These frame
-            //# types MUST NOT be sent, and their receipt MUST be treated as a
-            //# connection error of type H3_FRAME_UNEXPECTED.
-            FrameType::H2_PRIORITY
-            | FrameType::H2_PING
-            | FrameType::H2_WINDOW_UPDATE
-            | FrameType::H2_CONTINUATION => Err(FrameError::UnsupportedFrame(ty.0)),
-            FrameType::WEBTRANSPORT_BI_STREAM | FrameType::DATA => unreachable!(),
-            _ => {
-                buf.advance(len as usize);
-                //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.8
-                //# Endpoints MUST
-                //# NOT consider these frames to have any meaning upon receipt.
-                Err(FrameError::UnknownFrame(ty.0))
-            }
+            // Concord: every other type returned before its payload was read.
+            _ => unreachable!(),
         };
 
         if let Ok(_frame) = &frame {
@@ -462,6 +490,9 @@ setting_identifiers! {
 
 const SETTINGS_LEN: usize = 8;
 
+// Concord: quic-go refuses a larger SETTINGS frame (`http3/frames.go:182`).
+const MAX_SETTINGS: u64 = 8 * 1024;
+
 #[derive(Debug, PartialEq)]
 pub struct Settings {
     entries: [(SettingId, u64); SETTINGS_LEN],
@@ -625,7 +656,7 @@ mod tests {
     #[test]
     fn unknown_frame_type() {
         let mut buf = Cursor::new(&[22, 4, 0, 255, 128, 0, 3, 1, 2]);
-        assert_matches!(Frame::decode(&mut buf), Err(FrameError::UnknownFrame(22)));
+        assert_matches!(Frame::decode(&mut buf), Err(FrameError::UnknownFrame(22, 0)));
         assert_matches!(Frame::decode(&mut buf), Ok(Frame::CancelPush(PushId(2))));
     }
 
@@ -760,6 +791,6 @@ mod tests {
         raw.extend(&[6, 0, 255, 128, 0, 250, 218]);
         let mut buf = Cursor::new(&raw);
         let decoded = Frame::decode(&mut buf);
-        assert_matches!(decoded, Err(FrameError::UnknownFrame(95)));
+        assert_matches!(decoded, Err(FrameError::UnknownFrame(95, 0)));
     }
 }

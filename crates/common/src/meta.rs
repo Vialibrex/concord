@@ -18,11 +18,14 @@ pub enum InboundKind {
     Vmess,
     Vless,
     Trojan,
+    Tuic,
+    Hysteria2,
+    AnyTls,
     Tunnel,
 }
 
 impl InboundKind {
-    pub const ALL: [InboundKind; 13] = [
+    pub const ALL: [InboundKind; 16] = [
         InboundKind::Http,
         InboundKind::Https,
         InboundKind::Socks4,
@@ -35,6 +38,9 @@ impl InboundKind {
         InboundKind::Vmess,
         InboundKind::Vless,
         InboundKind::Trojan,
+        InboundKind::Tuic,
+        InboundKind::Hysteria2,
+        InboundKind::AnyTls,
         InboundKind::Tunnel,
     ];
 
@@ -53,6 +59,9 @@ impl InboundKind {
             InboundKind::Vmess => "Vmess",
             InboundKind::Vless => "Vless",
             InboundKind::Trojan => "Trojan",
+            InboundKind::Tuic => "Tuic",
+            InboundKind::Hysteria2 => "Hysteria2",
+            InboundKind::AnyTls => "AnyTLS",
             InboundKind::Tunnel => "Tunnel",
         }
     }
@@ -72,6 +81,9 @@ impl InboundKind {
             InboundKind::Vmess => "VMESS",
             InboundKind::Vless => "VLESS",
             InboundKind::Trojan => "TROJAN",
+            InboundKind::Tuic => "TUIC",
+            InboundKind::Hysteria2 => "HYSTERIA2",
+            InboundKind::AnyTls => "ANYTLS",
             InboundKind::Tunnel => "TUNNEL",
         }
     }
@@ -171,6 +183,9 @@ impl FlowMeta {
             | InboundKind::Vmess
             | InboundKind::Vless
             | InboundKind::Trojan
+            | InboundKind::Tuic
+            | InboundKind::Hysteria2
+            | InboundKind::AnyTls
             | InboundKind::Tunnel => self.inbound.addr,
             InboundKind::Tun | InboundKind::Redir | InboundKind::TProxy => match &self.dst {
                 Address::Socket(addr) => Some(*addr),

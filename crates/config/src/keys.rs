@@ -187,10 +187,10 @@ pub const TOP_T1: &[&str] = &[
     "tunnels",
     "ss-config",
     "vmess-config",
+    "tuic-server",
 ];
 
 pub const TOP_T2: &[&str] = &[
-    "tuic-server",
     "iptables",
     "clash-for-android",
     "inbound-tfo",

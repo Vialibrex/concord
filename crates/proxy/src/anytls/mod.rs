@@ -8,6 +8,9 @@ mod stream;
 mod tests;
 mod writer;
 
+#[cfg(feature = "server")]
+pub(crate) use self::stream::AnyTlsStream;
+
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -117,6 +120,34 @@ impl Outbound for AnyTls {
 
     fn reset_sessions(&self) {
         self.pool.close_all();
+    }
+}
+
+/// The padding scheme an anytls server's sessions send clients whose own differs.
+#[cfg(feature = "server")]
+pub(crate) struct ServerPadding(Arc<ArcSwap<Padding>>);
+
+#[cfg(feature = "server")]
+impl ServerPadding {
+    /// `None` for a scheme that does not parse; empty is the default scheme.
+    pub(crate) fn new(scheme: &str) -> Option<Self> {
+        let padding = if scheme.is_empty() {
+            Padding::default_scheme()
+        } else {
+            Padding::parse(scheme.as_bytes())?
+        };
+        Some(ServerPadding(Arc::new(ArcSwap::from_pointee(padding))))
+    }
+
+    /// Serves the session on `conn`, past its authentication, on `tasks`; each stream the
+    /// client opens goes to `accept`.
+    pub(crate) fn serve(
+        &self,
+        conn: BoxStream,
+        tasks: &concord_common::Tasks,
+        accept: impl Fn(AnyTlsStream) + Send + Sync + 'static,
+    ) {
+        Session::serve(conn, self.0.clone(), tasks, Box::new(accept));
     }
 }
 

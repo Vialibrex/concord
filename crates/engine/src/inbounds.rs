@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use concord_common::{Address, ClockOffset, Special};
+use concord_common::{Address, ClockOffset, Special, Tasks};
 use concord_config::listener::{
     InboundDefs, ListenerDef, ListenerKind as Def, ProxyServer, ProxyUsers, TunnelDef,
 };
@@ -21,9 +21,10 @@ pub(crate) struct Carried;
 /// fails to start.
 pub(crate) fn build(
     defs: &InboundDefs,
-    home: &HomeDir,
+    home: &Arc<HomeDir>,
     carried: &Carried,
     clock: &Arc<ClockOffset>,
+    tasks: &Tasks,
 ) -> Vec<NamedListener> {
     let mut built = Vec::new();
     for def in &defs.listeners {
@@ -31,7 +32,7 @@ pub(crate) fn build(
             Some(key) => ListenerId::Default(key),
             None => ListenerId::Named(Arc::from(def.name.as_str())),
         };
-        match service(def, &id, home, carried, clock) {
+        match service(def, &id, home, carried, clock, tasks) {
             Ok(service) => built.push(NamedListener {
                 id,
                 name: Arc::from(def.name.as_str()),
@@ -100,9 +101,10 @@ enum ListenerBuildError {
 fn service(
     def: &ListenerDef,
     id: &ListenerId,
-    home: &HomeDir,
+    home: &Arc<HomeDir>,
     carried: &Carried,
     clock: &Arc<ClockOffset>,
+    tasks: &Tasks,
 ) -> Result<Service, ListenerBuildError> {
     Ok(match &def.kind {
         Def::Http(server) => Service::Http(plain(server)),
@@ -122,7 +124,7 @@ fn service(
             target: Address::parse(target)
                 .ok_or_else(|| ListenerBuildError::Target(target.clone()))?,
         },
-        other => match protocol(other, id, home, carried, clock)? {
+        other => match protocol(other, id, home, carried, clock, tasks)? {
             Some(protocol) => Service::Protocol(protocol),
             None => return Err(ListenerBuildError::NotServed(other.type_name())),
         },
@@ -145,15 +147,17 @@ pub(crate) fn keep_of(id: &ListenerId) -> Option<concord_proxy::server::Keep> {
 fn protocol(
     def: &Def,
     id: &ListenerId,
-    home: &HomeDir,
+    home: &Arc<HomeDir>,
     carried: &Carried,
     clock: &Arc<ClockOffset>,
+    tasks: &Tasks,
 ) -> Result<Option<Protocol>, ListenerBuildError> {
     let Some(keep) = keep_of(id) else {
         return Ok(None);
     };
     let env = concord_proxy::server::ServerEnv {
         home,
+        tasks,
         keep: &keep,
         carried,
         clock,
@@ -165,9 +169,10 @@ fn protocol(
 fn protocol(
     _: &Def,
     _: &ListenerId,
-    _: &HomeDir,
+    _: &Arc<HomeDir>,
     _: &Carried,
     _: &Arc<ClockOffset>,
+    _: &Tasks,
 ) -> Result<Option<Protocol>, ListenerBuildError> {
     Ok(None)
 }

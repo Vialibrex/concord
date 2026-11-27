@@ -1,21 +1,30 @@
 //! The protocol servers behind a profile's `listeners`, `ss-config` and `vmess-config`.
 
+mod anytls;
+mod certs;
 mod flows;
 mod front;
+mod hysteria2;
 mod packets;
+mod quic;
+#[cfg(test)]
+mod quic_testing;
 mod ss;
 mod trojan;
+mod tuic;
 mod vless;
 mod vmess;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use concord_common::serve::{DatagramService, HANDSHAKE_TIMEOUT, Protocol, StreamService};
-use concord_common::{BoxStream, ClockOffset, InboundKind};
+use concord_common::serve::{HANDSHAKE_TIMEOUT, OnUdp, Protocol, StreamService};
+use concord_common::{BoxStream, ClockOffset, InboundKind, Tasks};
 use concord_config::listener::{ClientAuth, ListenerKind, ServerTls};
 use concord_platform::HomeDir;
 use concord_tls::server::{ClientAuth as TlsClientAuth, ServerOptions, ServerTlsError, TlsServer};
+
+use self::certs::ServerCerts;
 use concord_transport::server::HttpCarriers;
 use tokio::io::BufReader;
 
@@ -39,10 +48,12 @@ pub enum ServerError {
     Tls(#[from] ServerTlsError),
 }
 
-/// What a server needs beyond its definition: where relative certificate paths start, and
-/// what the listener of this name kept from the servers it ran before.
+/// What a server needs beyond its definition: where relative certificate paths start, where
+/// the watch on its certificate files runs, and what the listener of this name kept from
+/// the servers it ran before.
 pub struct ServerEnv<'a> {
-    pub home: &'a HomeDir,
+    pub home: &'a Arc<HomeDir>,
+    pub tasks: &'a Tasks,
     pub keep: &'a Keep,
     pub carried: &'a Carried,
     /// The engine's clock, NTP corrected, as mihomo hands `ntp.Now` to its services.
@@ -66,6 +77,7 @@ pub struct Carried(Mutex<HashMap<Keep, Arc<Kept>>>);
 struct Kept {
     vmess: Arc<vmess::AuthIds>,
     ss: Arc<ss::Kept>,
+    self_signed: certs::SelfSigned,
 }
 
 impl Carried {
@@ -91,6 +103,13 @@ pub fn build(kind: &ListenerKind, env: &ServerEnv<'_>) -> Result<Option<Protocol
             let conn = vless::Vless::new(&server.users);
             (InboundKind::Vless, Fronted::service(front, conn))
         }
+        ListenerKind::AnyTls(server) => {
+            let front = front(server.tls.as_ref(), &Default::default(), env)?;
+            (
+                InboundKind::AnyTls,
+                Fronted::service(front, anytls::AnyTls::new(server)?),
+            )
+        }
         ListenerKind::Vmess(server) => {
             let front = front(server.tls.as_ref(), &server.carriers, env)?;
             let conn = vmess::Vmess::new(
@@ -102,13 +121,33 @@ pub fn build(kind: &ListenerKind, env: &ServerEnv<'_>) -> Result<Option<Protocol
         }
         ListenerKind::Shadowsocks(server) => {
             let service = ss::build(server, &env.carried.of(env.keep).ss, env.clock)?;
-            let datagram: Option<Arc<dyn DatagramService>> = server
+            let udp = server
                 .udp
-                .then(|| Arc::new(ss::SsDatagrams(service.clone())) as Arc<dyn DatagramService>);
+                .then(|| OnUdp::Datagram(Arc::new(ss::SsDatagrams(service.clone()))));
             return Ok(Some(Protocol {
                 kind: InboundKind::Shadowsocks,
                 stream: Some(service as Arc<dyn StreamService>),
-                datagram,
+                udp,
+            }));
+        }
+        ListenerKind::Tuic(server) => {
+            let kept = env.carried.of(env.keep);
+            let tls = TlsSetup::new(&server.tls, Some(&kept.self_signed), env)?;
+            let service = tuic::Tuic::new(server, tls)?;
+            return Ok(Some(Protocol {
+                kind: InboundKind::Tuic,
+                stream: None,
+                udp: Some(OnUdp::Endpoint(Arc::new(service))),
+            }));
+        }
+        ListenerKind::Hysteria2(server) => {
+            let kept = env.carried.of(env.keep);
+            let tls = TlsSetup::new(&server.tls, Some(&kept.self_signed), env)?;
+            let service = hysteria2::Hysteria2::new(server, tls)?;
+            return Ok(Some(Protocol {
+                kind: InboundKind::Hysteria2,
+                stream: None,
+                udp: Some(OnUdp::Endpoint(Arc::new(service))),
             }));
         }
         _ => return Ok(None),
@@ -116,7 +155,7 @@ pub fn build(kind: &ListenerKind, env: &ServerEnv<'_>) -> Result<Option<Protocol
     Ok(Some(Protocol {
         kind,
         stream: Some(stream),
-        datagram: None,
+        udp: None,
     }))
 }
 
@@ -129,51 +168,58 @@ fn front(
         ws_path: carriers.ws_path.clone(),
         grpc_service_name: carriers.grpc_service_name.clone(),
     };
-    let tls = tls
-        .map(|tls| tls_server(tls, carriers.alpn(), env))
-        .transpose()?;
-    Ok(Front { tls, carriers })
-}
-
-fn tls_server(
-    tls: &ServerTls,
-    alpn: Vec<Vec<u8>>,
-    env: &ServerEnv<'_>,
-) -> Result<TlsServer, ServerError> {
-    let certificate = pem_or_file(&tls.certificate, env)?;
-    let private_key = pem_or_file(&tls.private_key, env)?;
-    let client_ca = (!tls.client_auth_cert.is_empty())
-        .then(|| pem_or_file(&tls.client_auth_cert, env))
-        .transpose()?;
-    TlsServer::new(&ServerOptions {
-        certificate_pem: &certificate,
-        private_key_pem: &private_key,
-        client_auth: match tls.client_auth {
-            ClientAuth::None => TlsClientAuth::None,
-            ClientAuth::Request => TlsClientAuth::Request,
-            ClientAuth::RequireAny => TlsClientAuth::RequireAny,
-            ClientAuth::VerifyIfGiven => TlsClientAuth::VerifyIfGiven,
-            ClientAuth::RequireAndVerify => TlsClientAuth::RequireAndVerify,
-        },
-        client_ca_pem: client_ca.as_deref(),
-        alpn,
+    let Some(tls) = tls else {
+        return Ok(Front {
+            tls: None,
+            carriers,
+        });
+    };
+    let setup = TlsSetup::new(tls, None, env)?;
+    let server = TlsServer::new(&setup.options(carriers.alpn()))?;
+    Ok(Front {
+        tls: Some((server, setup.certs)),
+        carriers,
     })
-    .map_err(ServerError::from)
 }
 
-/// mihomo's `ca.NewTLSKeyPairLoader`: the text itself when it is PEM, otherwise a path
-/// that must stay inside the home directory.
-fn pem_or_file(text: &str, env: &ServerEnv<'_>) -> Result<Vec<u8>, ServerError> {
-    if text.contains("-----BEGIN") {
-        return Ok(text.as_bytes().to_vec());
-    }
-    env.home
-        .confine_profile_file(text)
-        .and_then(|path| env.home.read(path))
-        .map_err(|source| ServerError::File {
-            path: text.to_owned(),
-            source,
+/// A listener's certificate and how it asks clients for theirs.
+struct TlsSetup {
+    certs: ServerCerts,
+    client_auth: TlsClientAuth,
+    client_ca: Option<Vec<u8>>,
+}
+
+impl TlsSetup {
+    fn new(
+        tls: &ServerTls,
+        self_signed: Option<&certs::SelfSigned>,
+        env: &ServerEnv<'_>,
+    ) -> Result<Self, ServerError> {
+        let certs = certs::load(&tls.certificate, &tls.private_key, self_signed, env)?;
+        let client_ca = (!tls.client_auth_cert.is_empty())
+            .then(|| certs::read_pem(&tls.client_auth_cert, env.home))
+            .transpose()?;
+        Ok(TlsSetup {
+            certs,
+            client_auth: match tls.client_auth {
+                ClientAuth::None => TlsClientAuth::None,
+                ClientAuth::Request => TlsClientAuth::Request,
+                ClientAuth::RequireAny => TlsClientAuth::RequireAny,
+                ClientAuth::VerifyIfGiven => TlsClientAuth::VerifyIfGiven,
+                ClientAuth::RequireAndVerify => TlsClientAuth::RequireAndVerify,
+            },
+            client_ca,
         })
+    }
+
+    fn options(&self, alpn: Vec<Vec<u8>>) -> ServerOptions<'_> {
+        ServerOptions {
+            certs: self.certs.certs.clone(),
+            client_auth: self.client_auth,
+            client_ca_pem: self.client_ca.as_deref(),
+            alpn,
+        }
+    }
 }
 
 /// What a request header read through a buffer left unread, put back in front of the

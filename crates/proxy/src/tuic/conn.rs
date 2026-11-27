@@ -15,7 +15,7 @@ use crate::util::lock;
 const IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
 /// One Packet command: version, type, the 8-byte packet header, the longest address and a
 /// payload of the largest size its 16-bit field holds.
-const MAX_STREAM_PACKET: usize = 2 + 8 + 259 + u16::MAX as usize;
+pub(crate) const MAX_STREAM_PACKET: usize = 2 + 8 + 259 + u16::MAX as usize;
 
 /// Hands the relayed datagrams of one connection to the association they name.
 #[derive(Default)]

@@ -4,6 +4,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use bytes::Bytes;
 use concord_common::Address;
 use concord_quic::Fragment as Part;
+#[cfg(feature = "server")]
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::util::invalid_data;
 
@@ -26,6 +28,15 @@ pub(crate) enum Version {
 }
 
 impl Version {
+    #[cfg(feature = "server")]
+    pub(crate) fn of(byte: u8) -> Option<Version> {
+        match byte {
+            4 => Some(Version::V4),
+            5 => Some(Version::V5),
+            _ => None,
+        }
+    }
+
     pub(crate) fn byte(self) -> u8 {
         match self {
             Version::V4 => 4,
@@ -94,6 +105,29 @@ pub(crate) fn get_addr(input: &[u8]) -> io::Result<Option<(Option<Address>, usiz
     Ok(Some((Some(addr), end)))
 }
 
+/// The address of a Connect, read to its end and no further: its type and first byte say
+/// how long it is.
+#[cfg(feature = "server")]
+pub(crate) async fn read_addr<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Address> {
+    let mut buf = [0u8; 1 + 1 + 255 + 2];
+    let head = buf.get_mut(..2).unwrap_or_default();
+    reader.read_exact(head).await?;
+    let len = match head {
+        [ATYP_V4, _] => 1 + 4 + 2,
+        [ATYP_V6, _] => 1 + 16 + 2,
+        [ATYP_DOMAIN, host] => 2 + usize::from(*host) + 2,
+        [ATYP_NONE, _] => return Err(invalid_data("connect without an address")),
+        _ => return Err(invalid_data("unknown address type")),
+    };
+    reader
+        .read_exact(buf.get_mut(2..len).unwrap_or_default())
+        .await?;
+    match get_addr(buf.get(..len).unwrap_or_default())? {
+        Some((Some(addr), _)) => Ok(addr),
+        _ => Err(invalid_data("address")),
+    }
+}
+
 /// One relayed datagram or fragment of it, whichever version carried it.
 pub(crate) struct Incoming {
     pub(crate) assoc: u32,
@@ -101,9 +135,19 @@ pub(crate) struct Incoming {
 }
 
 pub(crate) enum Command {
+    #[cfg(feature = "server")]
+    Auth(Credential),
     Packet(Incoming),
+    #[cfg(feature = "server")]
+    Dissociate(u32),
     Heartbeat,
     Other,
+}
+
+#[cfg(feature = "server")]
+pub(crate) enum Credential {
+    V4 { token: [u8; 32] },
+    V5 { uuid: [u8; 16], token: [u8; 32] },
 }
 
 /// Parses one command from a datagram or a unidirectional stream. A version
@@ -118,8 +162,43 @@ pub(crate) fn parse_command(version: Version, input: &Bytes) -> io::Result<Comma
     match *kind {
         CMD_HEARTBEAT => Ok(Command::Heartbeat),
         CMD_PACKET => parse_packet(version, input).map(Command::Packet),
+        #[cfg(feature = "server")]
+        CMD_AUTH => parse_auth(version, input.get(2..).unwrap_or_default()).map(Command::Auth),
+        #[cfg(feature = "server")]
+        CMD_DISSOCIATE => {
+            let assoc = match (version, input.get(2..).unwrap_or_default()) {
+                (Version::V5, [a, b, ..]) => u32::from(u16::from_be_bytes([*a, *b])),
+                (Version::V4, [a, b, c, d, ..]) => u32::from_be_bytes([*a, *b, *c, *d]),
+                _ => return Err(invalid_data("short tuic command")),
+            };
+            Ok(Command::Dissociate(assoc))
+        }
         _ => Ok(Command::Other),
     }
+}
+
+#[cfg(feature = "server")]
+fn parse_auth(version: Version, body: &[u8]) -> io::Result<Credential> {
+    let short = || invalid_data("short tuic command");
+    let token = |bytes: &[u8]| -> io::Result<[u8; 32]> {
+        bytes
+            .get(..32)
+            .ok_or_else(short)?
+            .try_into()
+            .map_err(|_| short())
+    };
+    Ok(match version {
+        Version::V5 => {
+            let (uuid, rest) = body.split_at_checked(16).ok_or_else(short)?;
+            Credential::V5 {
+                uuid: uuid.try_into().map_err(|_| short())?,
+                token: token(rest)?,
+            }
+        }
+        Version::V4 => Credential::V4 {
+            token: token(body)?,
+        },
+    })
 }
 
 fn parse_packet(version: Version, input: &Bytes) -> io::Result<Incoming> {
@@ -313,6 +392,58 @@ mod tests {
         assert!(parse_command(Version::V5, &Bytes::from_static(&[4, 2])).is_err());
         assert!(parse_command(Version::V5, &Bytes::from_static(&[5])).is_err());
         assert!(parse_command(Version::V5, &Bytes::from_static(&[5, 2, 0, 1])).is_err());
+    }
+
+    #[cfg(feature = "server")]
+    #[test]
+    fn the_server_reads_what_the_client_writes() {
+        let parse = |version, frame: Vec<u8>| parse_command(version, &Bytes::from(frame)).unwrap();
+        let Command::Auth(Credential::V5 { uuid, token }) =
+            parse(Version::V5, auth_v5(&[1; 16], &[2; 32]))
+        else {
+            panic!("expected a v5 auth");
+        };
+        assert_eq!((uuid, token), ([1; 16], [2; 32]));
+        let Command::Auth(Credential::V4 { token }) = parse(Version::V4, auth_v4(&[3; 32])) else {
+            panic!("expected a v4 auth");
+        };
+        assert_eq!(token, [3; 32]);
+        assert!(matches!(
+            parse(Version::V5, dissociate(Version::V5, 0x0102)),
+            Command::Dissociate(0x0102)
+        ));
+        assert!(matches!(
+            parse(Version::V4, dissociate(Version::V4, 7)),
+            Command::Dissociate(7)
+        ));
+        assert!(
+            parse_command(
+                Version::V5,
+                &Bytes::from(auth_v5(&[1; 16], &[2; 32])[..40].to_vec())
+            )
+            .is_err()
+        );
+    }
+
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn a_connect_address_is_read_without_the_data_after_it() {
+        for dst in [
+            dst(),
+            Address::new("1.2.3.4", 80),
+            Address::new("2001:db8::1", 443),
+        ] {
+            let frame = connect(Version::V5, &dst).unwrap();
+            let mut input = frame.get(2..).unwrap().to_vec();
+            input.extend_from_slice(b"data");
+            let mut reader = input.as_slice();
+            assert_eq!(read_addr(&mut reader).await.unwrap(), dst);
+            assert_eq!(reader, b"data");
+        }
+        let mut cut: &[u8] = &[ATYP_DOMAIN, 3, b'a'];
+        assert!(read_addr(&mut cut).await.is_err());
+        let mut none: &[u8] = &[ATYP_NONE];
+        assert!(read_addr(&mut none).await.is_err());
     }
 
     #[test]

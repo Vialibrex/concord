@@ -52,6 +52,12 @@ impl InternalConnectionError {
                     code: Code::H3_FRAME_UNEXPECTED,
                     message: format!("received a forbidden frame with number {}", number),
             },
+            // Concord: a request's first HEADERS frame over the limit is answered with 431
+            // (`server/request.rs`); one anywhere else closes the connection.
+            FrameProtocolError::TooLarge(ty, len) => InternalConnectionError {
+                code: Code::H3_EXCESSIVE_LOAD,
+                message: format!("frame {:?} payload of {} bytes is too large", ty, len),
+            },
             //= https://www.rfc-editor.org/rfc/rfc9114#section-7.1
             //# A frame payload that contains additional bytes
             //# after the identified fields or a frame payload that terminates before

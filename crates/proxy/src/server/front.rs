@@ -4,12 +4,14 @@ use concord_common::BoxStream;
 use concord_common::serve::{InboundCx, Peer, ServeFuture, StreamService};
 use concord_tls::server::TlsServer;
 use concord_transport::server::{self, HttpCarriers, OnStream};
+
+use super::certs::ServerCerts;
 use tokio::net::TcpStream;
 
 /// What lies between an accepted connection and the protocol: TLS, then a websocket or
 /// gun streams, as the listener's options ask.
 pub(super) struct Front {
-    pub(super) tls: Option<TlsServer>,
+    pub(super) tls: Option<(TlsServer, ServerCerts)>,
     pub(super) carriers: HttpCarriers,
 }
 
@@ -37,7 +39,7 @@ impl<C: Conn> StreamService for Fronted<C> {
     fn serve(self: Arc<Self>, stream: TcpStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture {
         Box::pin(async move {
             let stream: BoxStream = match &self.front.tls {
-                Some(tls) => match tls.accept(stream).await {
+                Some((tls, _)) => match tls.accept(stream).await {
                     Ok(tls) => Box::new(tls),
                     Err(_) => return,
                 },

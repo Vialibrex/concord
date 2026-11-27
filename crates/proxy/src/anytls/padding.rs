@@ -13,6 +13,9 @@ pub(super) enum Size {
 }
 
 pub(super) struct Padding {
+    /// The scheme as written, which a server sends a client whose scheme differs.
+    #[cfg(feature = "server")]
+    pub(super) raw: Vec<u8>,
     pub(super) md5: String,
     pub(super) stop: u32,
     rules: HashMap<String, String>,
@@ -33,6 +36,8 @@ impl Padding {
         }
         let stop = rules.get("stop")?.parse::<i64>().ok()?;
         Some(Padding {
+            #[cfg(feature = "server")]
+            raw: raw.to_vec(),
             md5: hex::encode(Md5::digest(raw)),
             stop: stop as u32,
             rules,
@@ -41,6 +46,8 @@ impl Padding {
 
     pub(super) fn default_scheme() -> Padding {
         Padding::parse(DEFAULT_SCHEME.as_bytes()).unwrap_or_else(|| Padding {
+            #[cfg(feature = "server")]
+            raw: Vec::new(),
             md5: String::new(),
             stop: 0,
             rules: HashMap::new(),

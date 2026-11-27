@@ -446,7 +446,8 @@ where
                             "got two control streams".to_string(),
                         )));
                     }
-                    self.control_recv = Some(s);
+                    self.control_recv =
+                        Some(s.header_limit(self.config.settings.max_field_section_size));
                 }
                 enc @ AcceptedRecvStream::Encoder(_) => {
                     if let Some(_prev) = self.qpack_streams.encoder_recv.replace(enc) {

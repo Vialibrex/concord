@@ -262,6 +262,12 @@ impl Switch {
         lock(&self.0).controller = controller;
     }
 
+    /// Puts in what `factory` builds for the path as it stands.
+    pub fn rebuild(&self, factory: Arc<dyn ControllerFactory + Send + Sync>) {
+        let mut state = lock(&self.0);
+        state.controller = factory.build(Instant::now(), state.mtu);
+    }
+
     pub fn replace_brutal(&self, mut controller: Brutal) {
         let mut state = lock(&self.0);
         controller.on_mtu_update(state.mtu);

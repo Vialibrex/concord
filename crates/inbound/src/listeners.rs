@@ -3,11 +3,11 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use concord_common::serve::InboundCx;
+use concord_common::serve::{Current, InboundCx};
 use concord_common::{Address, FlowHandler, InboundKind, Special, Tasks};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -45,10 +45,15 @@ struct Port {
     tasks: Tasks,
     cancel: CancellationToken,
     handles: Vec<JoinHandle<()>>,
+    /// What the protocol that took the UDP socket whole serves.
+    endpoint: Option<watch::Sender<Current>>,
 }
 
 impl Port {
+    /// Returns once the port's sockets are closed, so it can be bound again; an endpoint
+    /// ends when the sender of what it serves is dropped.
     async fn stop(self) {
+        drop(self.endpoint);
         self.cancel.cancel();
         for handle in self.handles {
             let _ = handle.await;
@@ -57,9 +62,7 @@ impl Port {
 }
 
 async fn stop_ports(ports: Vec<Port>) {
-    for port in ports {
-        port.stop().await;
-    }
+    futures_util::future::join_all(ports.into_iter().map(Port::stop)).await;
 }
 
 /// One listener as this reload asks for it.
@@ -147,6 +150,7 @@ impl Listeners {
 
         let mut old = std::mem::take(&mut *running);
         let mut pending = Vec::new();
+        let mut dropped = Vec::new();
         for (index, want) in wants.iter().enumerate() {
             let mut previous = old.remove(&want.id).unwrap_or_default();
             let sockets = want.service.sockets();
@@ -159,18 +163,26 @@ impl Listeners {
                 match previous.iter().position(|port| port.key == key) {
                     Some(at) => {
                         let port = previous.swap_remove(at);
-                        port.slot.store(self.live(want, &port.assoc, &port.tasks));
+                        let live = self.live(want, &port.assoc, &port.tasks);
+                        if let (Some(current), Some(service)) =
+                            (&port.endpoint, want.service.endpoint())
+                        {
+                            current.send_replace(Current {
+                                service: service.clone(),
+                                cx: live.cx.clone(),
+                            });
+                        }
+                        port.slot.store(live);
                         kept.push(port);
                     }
                     None => pending.push((index, key)),
                 }
             }
-            stop_ports(previous).await;
+            dropped.extend(previous);
             running.insert(want.id.clone(), kept);
         }
-        for (_, ports) in old {
-            stop_ports(ports).await;
-        }
+        dropped.extend(old.into_values().flatten());
+        stop_ports(dropped).await;
         for (want, key) in pending
             .into_iter()
             .filter_map(|(index, key)| wants.get(index).map(|want| (want, key)))
@@ -270,8 +282,10 @@ impl Listeners {
         };
         let tcp_local = tcp.as_ref().map(|tcp| tcp.local_addr()).transpose()?;
         let udp = match (sockets.udp, tcp_local) {
-            (Udp::Plain, Some(local)) => Some(bind_udp(local, None, bind.mark)?),
-            (Udp::Plain, None) => Some(bind_udp_alone(&bind)?),
+            (Udp::Plain | Udp::Endpoint(..), Some(local)) => {
+                Some(bind_udp(local, None, bind.mark)?)
+            }
+            (Udp::Plain | Udp::Endpoint(..), None) => Some(bind_udp_alone(&bind)?),
             _ => None,
         };
         let local = match (tcp_local, &udp) {
@@ -286,12 +300,26 @@ impl Listeners {
         };
 
         let assoc = Arc::new(Associations::default());
-        let slot = Arc::new(Slot::new(self.live(want, &assoc, tasks)));
+        let live = self.live(want, &assoc, tasks);
+        let slot = Arc::new(Slot::new(live.clone()));
         let cancel = CancellationToken::new();
         let mut handles = Vec::new();
-        if let Some(socket) = udp {
-            let out = UdpOut::new(Arc::new(socket), tasks.clone());
-            handles.push(tasks.spawn(crate::udp::run(slot.clone(), out, cancel.clone())));
+        let mut endpoint = None;
+        match (udp, want.service.endpoint()) {
+            (Some(socket), Some(service)) => {
+                let (current, serving) = watch::channel(Current {
+                    service: service.clone(),
+                    cx: live.cx.clone(),
+                });
+                let run = service.clone().run(socket.into_std()?, serving)?;
+                handles.push(tasks.spawn(run));
+                endpoint = Some(current);
+            }
+            (Some(socket), None) => {
+                let out = UdpOut::new(Arc::new(socket), tasks.clone());
+                handles.push(tasks.spawn(crate::udp::run(slot.clone(), out, cancel.clone())));
+            }
+            (None, _) => {}
         }
         if let Some(transparent) = transparent
             .clone()
@@ -333,6 +361,7 @@ impl Listeners {
             tasks: tasks.clone(),
             cancel,
             handles,
+            endpoint,
         })
     }
 }

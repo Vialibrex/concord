@@ -26,7 +26,8 @@ pub struct ListenerDef {
     pub proxy: Option<String>,
     pub routing_mark: u32,
     pub kind: ListenerKind,
-    /// The top-level key a default listener comes from, `ss-config` or `vmess-config`;
+    /// The top-level key a default listener comes from: `ss-config`, `vmess-config` or
+    /// `tuic-server`;
     /// `None` for an entry of `listeners`. mihomo keeps the two apart, so a listener of the
     /// same name does not replace a default one.
     pub default_of: Option<&'static str>,
@@ -39,7 +40,8 @@ pub enum Binds {
     /// `listen` and `port`. No ranges binds one port the system chooses, as an empty mihomo
     /// `port` does.
     Ports { ip: IpAddr, ports: Vec<PortRange> },
-    /// The comma-separated `host:port` list of `ss-config` and `vmess-config`.
+    /// The comma-separated `host:port` list of `ss-config`, `vmess-config` and
+    /// `tuic-server`.
     Addrs(Vec<SocketAddr>),
 }
 
@@ -69,6 +71,9 @@ pub enum ListenerKind {
     Vmess(VmessServer),
     Vless(VlessServer),
     Trojan(TrojanServer),
+    Tuic(TuicServer),
+    Hysteria2(Hysteria2Server),
+    AnyTls(AnyTlsServer),
 }
 
 impl ListenerKind {
@@ -84,6 +89,9 @@ impl ListenerKind {
             ListenerKind::Vmess(_) => "vmess",
             ListenerKind::Vless(_) => "vless",
             ListenerKind::Trojan(_) => "trojan",
+            ListenerKind::Tuic(_) => "tuic",
+            ListenerKind::Hysteria2(_) => "hysteria2",
+            ListenerKind::AnyTls(_) => "anytls",
         }
     }
 }
@@ -189,6 +197,58 @@ pub struct TrojanServer {
     pub users: Vec<TrojanUser>,
     pub tls: Option<ServerTls>,
     pub carriers: HttpCarriers,
+}
+
+/// mihomo's `listener/inbound/anytls.go`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnyTlsServer {
+    /// By name, the password.
+    pub users: IndexMap<String, String>,
+    /// As written; empty for the default scheme.
+    pub padding_scheme: String,
+    pub tls: Option<ServerTls>,
+}
+
+/// mihomo's `listener/config/tuic.go`. The numbers are as written, 0 where absent: the
+/// server applies mihomo's defaults (`listener/tuic/server.go:84-127`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TuicServer {
+    /// v4 tokens.
+    pub tokens: Vec<String>,
+    /// v5 users: by UUID, the password.
+    pub users: IndexMap<String, String>,
+    /// Empty certificate and key make the server sign its own.
+    pub tls: ServerTls,
+    pub alpn: Vec<String>,
+    pub congestion: String,
+    pub cwnd: u32,
+    pub bbr_profile: String,
+    pub max_idle_ms: u64,
+    pub auth_timeout_ms: u64,
+    pub max_udp_relay_packet: u64,
+}
+
+/// mihomo's `listener/inbound/hysteria2.go`. Rates and windows are as written, empty or 0
+/// where absent; the server applies sing-quic's defaults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hysteria2Server {
+    /// By name, the password.
+    pub users: IndexMap<String, String>,
+    /// The Salamander password, when the listener obfuscates.
+    pub salamander: Option<String>,
+    pub up: String,
+    pub down: String,
+    pub ignore_client_bandwidth: bool,
+    /// Empty certificate and key make the server sign its own.
+    pub tls: ServerTls,
+    pub alpn: Vec<String>,
+    pub udp_mtu: u32,
+    pub cwnd: u32,
+    pub bbr_profile: String,
+    pub initial_stream_window: u64,
+    pub max_stream_window: u64,
+    pub initial_conn_window: u64,
+    pub max_conn_window: u64,
 }
 
 /// Everything a profile opens besides the fixed ports of the general section.

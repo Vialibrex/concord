@@ -25,7 +25,7 @@ use crate::node::{Egress, resolve_server};
 
 /// quic-go's `HandshakeIdleTimeout`; quinn has no separate handshake timer, so a dial
 /// without its own deadline gets this as a whole-handshake bound.
-const HANDSHAKE_IDLE: Duration = Duration::from_secs(5);
+pub(crate) const HANDSHAKE_IDLE: Duration = Duration::from_secs(5);
 const CLIENT_CID_LENGTH: usize = 0;
 
 fn client_endpoint_config() -> EndpointConfig {
