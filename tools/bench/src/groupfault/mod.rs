@@ -309,6 +309,7 @@ async fn measure(
         proxy: None,
         tun: None,
         mitm: None,
+        trust: None,
         mixed: MIXED_PORT,
         placement: Placement {
             cpus: None,
