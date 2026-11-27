@@ -1475,3 +1475,171 @@ fn a_broken_url_run_matches_lone_rule_demands_and_error_order() {
     );
     assert_eq!(merged.to_string(), lone.to_string());
 }
+
+#[test]
+fn program_url_set_scans_once_and_preserves_order_across_main_and_sub_rules() {
+    let kit = Kit::new();
+    let main = [
+        "DOMAIN,early.a.test,EARLY",
+        r"URL-REGEX,^https://a\.test/,PASS",
+        "DOMAIN,d1.a.test,D1",
+        r"URL-REGEX,/(\w)\1/,FANCY",
+        "DOMAIN,d2.a.test,D2",
+        "SUB-RULE,(URL-REGEX,/sub),inner",
+        "DOMAIN,d3.a.test,D3",
+        "URL-REGEX,(?i)/AD,HIT",
+        "MATCH,FINAL",
+    ];
+    let inner: &[&str] = &[
+        "DOMAIN,sub-only.a.test,S0",
+        "URL-REGEX,/sub/pass-rule,PASS-RULE",
+        "DOMAIN,sub-mid.a.test,S1",
+        "URL-REGEX,(?<!x)/sub/pass-rule,SUB-FANCY",
+        "DOMAIN,sub-end.a.test,S2",
+        "URL-REGEX,/sub/end,SUB-END",
+    ];
+    let program = kit.compile_with(&main, &[("inner", inner)], 8);
+    assert!(program.url_set.is_set());
+
+    let early = drive(
+        &program,
+        &kit.geo,
+        &request("early.a.test", "https://early.a.test/ad", None),
+        true,
+    );
+    assert_eq!(early.accepted, pick(0, "EARLY"));
+    assert_eq!(program.url_set.scans(), 0);
+
+    let unread = drive(&program, &kit.geo, &Flow::domain("a.test"), true);
+    assert_eq!(unread.accepted, pick(8, "FINAL"));
+    assert!(unread.http_pending);
+    assert_eq!(program.url_set.scans(), 0);
+
+    let flow = request("a.test", "https://a.test/sub/pass-rule/AD", None);
+    let all = drive(&program, &kit.geo, &flow, false);
+    let want: Vec<(usize, String)> = [
+        (1, "PASS"),
+        (5, "PASS-RULE"),
+        (5, "SUB-FANCY"),
+        (7, "HIT"),
+        (8, "FINAL"),
+    ]
+    .map(|(i, t)| (i, t.to_string()))
+    .into();
+    assert_eq!(all.candidates, want);
+    assert_eq!(program.url_set.scans(), 1);
+    assert!(!all.http_pending);
+
+    let fancy = request("a.test", "https://a.test/xx/AD", None);
+    assert_eq!(accepted(&kit, &program, &fancy), pick(3, "FANCY"));
+    assert_eq!(program.url_set.scans(), 2);
+
+    let meta = Flow::domain("a.test").meta();
+    let ctx = crate::MatchCtx::new(&kit.geo);
+    let mut state = concord_common::RouteState::seed(&meta.dst);
+    state.http = Some(std::sync::Arc::new(concord_common::HttpFacts {
+        url: "https://a.test/sub/end".into(),
+        host: "a.test".into(),
+        user_agent: None,
+    }));
+    let mut run = program.start();
+    assert!(!run.has_url_hits());
+    let first = run.step(&meta, &state, &ctx);
+    assert!(matches!(
+        first,
+        crate::Step::Candidate { target: "PASS", .. }
+    ));
+    assert!(run.has_url_hits());
+    run.skip();
+    let second = run.step(&meta, &state, &ctx);
+    assert!(matches!(
+        second,
+        crate::Step::Candidate {
+            target: "SUB-END",
+            ..
+        }
+    ));
+    let scans_before_swap = program.url_set.scans();
+    state.http = Some(std::sync::Arc::new(concord_common::HttpFacts {
+        url: "https://a.test/AD".into(),
+        host: "a.test".into(),
+        user_agent: None,
+    }));
+    run.skip();
+    let third = run.step(&meta, &state, &ctx);
+    assert!(matches!(
+        third,
+        crate::Step::Candidate { target: "HIT", .. }
+    ));
+    assert_eq!(program.url_set.scans(), scans_before_swap + 1);
+    run.restart(None);
+    assert!(!run.has_url_hits());
+}
+
+#[test]
+fn program_url_set_handles_logic_rules_single_leaf_and_classical_sets() {
+    let kit = Kit::new();
+    fill(
+        &kit,
+        "set_a",
+        Behavior::Classical,
+        &[
+            "DOMAIN,nope.a.test",
+            "URL-REGEX,/set-hit",
+            "DOMAIN,nope2.a.test",
+            "URL-REGEX,/set-two",
+        ],
+    );
+    let program = kit.compile(
+        &[
+            "NOT,((URL-REGEX,/blocked)),NOT-BLOCKED",
+            "AND,((DOMAIN,a.test),(URL-REGEX,/blocked)),AND-HIT",
+            "OR,((URL-REGEX,/or1),(URL-REGEX,/or2)),OR-HIT",
+            "RULE-SET,set_a,SET",
+            "MATCH,FINAL",
+        ],
+        8,
+    );
+    assert!(program.url_set.is_set());
+
+    let no_http = drive(&program, &kit.geo, &Flow::domain("a.test"), true);
+    assert_eq!(no_http.accepted, pick(4, "FINAL"));
+    assert!(no_http.http_pending);
+    assert_eq!(program.url_set.scans(), 0);
+
+    let allowed = request("a.test", "https://a.test/ok", None);
+    assert_eq!(accepted(&kit, &program, &allowed), pick(0, "NOT-BLOCKED"));
+
+    let blocked = request("a.test", "https://a.test/blocked", None);
+    assert_eq!(accepted(&kit, &program, &blocked), pick(1, "AND-HIT"));
+
+    let from_set = request("b.test", "https://b.test/blocked/set-two", None);
+    assert_eq!(accepted(&kit, &program, &from_set), pick(3, "SET"));
+
+    let single = kit.compile(&["DOMAIN,x.a.test,X", "URL-REGEX,/one,ONE", "MATCH,F"], 8);
+    assert!(!single.url_set.is_set());
+    assert_eq!(
+        accepted(
+            &kit,
+            &single,
+            &request("a.test", "https://a.test/one", None)
+        ),
+        pick(1, "ONE")
+    );
+}
+
+#[test]
+fn url_set_fallback_matches_when_regex_set_cannot_be_built() {
+    let re0 = fancy_regex::Regex::new("/alpha").unwrap();
+    let re1 = fancy_regex::Regex::new("/beta").unwrap();
+    let set = crate::runs::UrlSet::build(vec!["(".into(), "(".into()], vec![re0, re1]);
+    assert!(!set.is_set());
+    let mut cache = None;
+    let http = std::sync::Arc::new(concord_common::HttpFacts {
+        url: "https://a.test/beta".into(),
+        host: "a.test".into(),
+        user_agent: None,
+    });
+    assert!(!set.matches(0, &http, &mut cache));
+    assert!(set.matches(1, &http, &mut cache));
+}

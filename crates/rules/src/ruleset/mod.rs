@@ -303,7 +303,17 @@ impl RuleSet {
             process_looked_up: true,
             ..RouteState::default()
         };
-        let mut ev = Ev::new(&flow, &state, geo, 0, 0, Default::default());
+        static EMPTY_URLS: crate::runs::UrlSet = crate::runs::UrlSet::empty();
+        let mut ev = Ev::new(
+            &flow,
+            &state,
+            geo,
+            0,
+            0,
+            Default::default(),
+            &EMPTY_URLS,
+            None,
+        );
         self.matches(&mut ev).unwrap_or(false)
     }
 }

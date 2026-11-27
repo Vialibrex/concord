@@ -2,11 +2,13 @@
 //! rule at or after `from` that matches", so a linear scan and the index agree.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
+use concord_common::HttpFacts;
 use concord_config::filter::Matcher;
 use concord_config::mitm::delegatable_regex;
-use regex::RegexSet;
+use regex::{RegexSet, SetMatches};
 
 use crate::eval::Ev;
 use crate::index::{HashIdx, SuffixHash, hash_key};
@@ -377,5 +379,105 @@ impl UrlRun {
             }
         }
         best
+    }
+}
+
+pub(crate) enum UrlNode {
+    Slot(u32),
+    Fancy(Box<fancy_regex::Regex>),
+}
+
+pub(crate) struct UrlCache {
+    http: Arc<HttpFacts>,
+    hits: SetMatches,
+}
+
+/// Program-wide pre-matcher for lone and nested `URL-REGEX` leaves across a
+/// `RouteProgram`'s main list and sub-rule lists.
+#[derive(Default)]
+pub(crate) struct UrlSet {
+    inner: UrlSetInner,
+    #[cfg(test)]
+    scans: std::sync::atomic::AtomicUsize,
+}
+
+#[derive(Default)]
+enum UrlSetInner {
+    #[default]
+    Empty,
+    Set(RegexSet),
+    Fallback(Box<[fancy_regex::Regex]>),
+}
+
+impl UrlSet {
+    pub(crate) const fn empty() -> UrlSet {
+        UrlSet {
+            inner: UrlSetInner::Empty,
+            #[cfg(test)]
+            scans: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn build(sources: Vec<String>, regexes: Vec<fancy_regex::Regex>) -> UrlSet {
+        let inner = match regexes.len() {
+            0 => UrlSetInner::Empty,
+            1 => UrlSetInner::Fallback(regexes.into_boxed_slice()),
+            _ => match RegexSet::new(&sources) {
+                Ok(set) => UrlSetInner::Set(set),
+                Err(_) => UrlSetInner::Fallback(regexes.into_boxed_slice()),
+            },
+        };
+        UrlSet {
+            inner,
+            #[cfg(test)]
+            scans: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    pub(crate) fn heap_bytes(&self) -> usize {
+        match &self.inner {
+            UrlSetInner::Fallback(list) => list.len() * std::mem::size_of::<fancy_regex::Regex>(),
+            UrlSetInner::Empty | UrlSetInner::Set(_) => 0,
+        }
+    }
+
+    pub(crate) fn matches(
+        &self,
+        slot: u32,
+        http: &Arc<HttpFacts>,
+        cache: &mut Option<Box<UrlCache>>,
+    ) -> bool {
+        match &self.inner {
+            UrlSetInner::Empty => false,
+            UrlSetInner::Set(set) => {
+                let hits = match cache {
+                    Some(cached) if Arc::ptr_eq(&cached.http, http) => &cached.hits,
+                    slot_cache => {
+                        #[cfg(test)]
+                        self.scans
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let cached = slot_cache.insert(Box::new(UrlCache {
+                            http: Arc::clone(http),
+                            hits: set.matches(&http.url),
+                        }));
+                        &cached.hits
+                    }
+                };
+                hits.matched(slot as usize)
+            }
+            UrlSetInner::Fallback(list) => list
+                .get(slot as usize)
+                .is_some_and(|regex| regex.is_match(&*http.url).unwrap_or(false)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_set(&self) -> bool {
+        matches!(self.inner, UrlSetInner::Set(_))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scans(&self) -> usize {
+        self.scans.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

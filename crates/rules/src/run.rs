@@ -5,7 +5,7 @@ use crate::eval::{Ev, Node, Yield};
 use crate::observed::Observed;
 use crate::prog::{Op, host_holds};
 use crate::program::{MatchCtx, RouteProgram, RuleRef, Step};
-use crate::runs::{IpRun, UrlRun};
+use crate::runs::{IpRun, UrlCache, UrlRun};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Frame {
@@ -48,6 +48,7 @@ pub struct Run<'p> {
     replay: u32,
     observed: Observed,
     http_pending: bool,
+    url_hits: Option<Box<UrlCache>>,
 }
 
 impl<'p> Run<'p> {
@@ -60,7 +61,13 @@ impl<'p> Run<'p> {
             replay: 0,
             observed: Observed::default(),
             http_pending: false,
+            url_hits: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_url_hits(&self) -> bool {
+        self.url_hits.is_some()
     }
 
     /// A rule passed over so far was left undecided for want of an HTTP request: with the
@@ -93,6 +100,7 @@ impl<'p> Run<'p> {
         self.pending = None;
         self.replay = 0;
         self.root = 0;
+        self.url_hits = None;
     }
 
     /// Leaves an empty record behind.
@@ -102,9 +110,19 @@ impl<'p> Run<'p> {
 
     pub fn step(&mut self, flow: &FlowMeta, state: &RouteState, ctx: &MatchCtx<'_>) -> Step<'p> {
         let program = self.program;
-        loop {
+        let mut ev = Ev::new(
+            flow,
+            state,
+            ctx.geo,
+            ctx.dscp,
+            std::mem::take(&mut self.replay),
+            std::mem::take(&mut self.observed),
+            &program.url_set,
+            std::mem::take(&mut self.url_hits),
+        );
+        let step = loop {
             let Some(&frame) = self.frames.last() else {
-                return Step::Done;
+                break Step::Done;
             };
             let Some(prog) = program.progs.get(frame.prog as usize) else {
                 self.frames.pop();
@@ -114,14 +132,6 @@ impl<'p> Run<'p> {
                 self.frames.pop();
                 continue;
             };
-            let mut ev = Ev::new(
-                flow,
-                state,
-                ctx.geo,
-                ctx.dscp,
-                std::mem::take(&mut self.replay),
-                std::mem::take(&mut self.observed),
-            );
             let mut miss_end = None;
             let outcome = match *op {
                 Op::Leaf { idx, node } => match prog.nodes.get(node as usize) {
@@ -177,10 +187,10 @@ impl<'p> Run<'p> {
                     }
                 },
             };
-            self.observed = ev.observed;
             match outcome {
-                Outcome::Yield(step) => return step,
+                Outcome::Yield(step) => break step,
                 Outcome::Next => {
+                    ev.reset_op();
                     if let Some(top) = self.frames.last_mut() {
                         top.op += 1;
                         if let Some(end) = miss_end {
@@ -189,6 +199,7 @@ impl<'p> Run<'p> {
                     }
                 }
                 Outcome::Enter { sub, from } => {
+                    ev.reset_op();
                     if self.frames.len() == 1 {
                         self.root = from;
                     }
@@ -208,10 +219,13 @@ impl<'p> Run<'p> {
                         .target(idx)
                         .map_or("", |id| program.target_name(id));
                     let rule = self.rule_ref(idx);
-                    return Step::Candidate { target, rule };
+                    break Step::Candidate { target, rule };
                 }
             }
-        }
+        };
+        self.observed = ev.observed;
+        self.url_hits = ev.url_hits;
+        step
     }
 
     fn rule_ref(&self, index: u32) -> RuleRef {

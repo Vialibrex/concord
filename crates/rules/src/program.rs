@@ -9,6 +9,7 @@ use crate::kind::RuleKind;
 use crate::prog::Prog;
 use crate::ruleset::{RuleSetHandle, RuleSetStore};
 use crate::run::{Frame, Run};
+use crate::runs::UrlSet;
 
 pub use concord_config::rule::{Cond, RuleDef, RuleLines};
 
@@ -239,6 +240,7 @@ pub struct RouteProgram {
     pub(crate) deferred_geo: Box<[GeoFile]>,
     /// The rule scripts by the index `Node::Script` names them with.
     pub(crate) scripts: Box<[Box<str>]>,
+    pub(crate) url_set: UrlSet,
 }
 
 impl RouteProgram {
@@ -330,6 +332,7 @@ impl RouteProgram {
                 .iter()
                 .map(|t| t.len() + 16)
                 .sum::<usize>()
+            + self.url_set.heap_bytes()
     }
 
     pub(crate) fn target_name(&self, id: u16) -> &str {

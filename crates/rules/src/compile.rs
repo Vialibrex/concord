@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use concord_common::{InboundKind, Network};
 use concord_config::filter::{Matcher, compile_pattern};
-use concord_config::mitm::regex_source;
+use concord_config::mitm::{delegatable_regex, regex_source};
 use concord_config::rule::{Cond, NetworkKind, RuleDef, RuleLines, parse_rule};
 use indexmap::IndexMap;
 
@@ -17,7 +17,7 @@ use crate::payload::rule_payload;
 use crate::prog::{Op, Prog, host_match};
 use crate::program::{CompileEnv, CompileError, Demands, RouteProgram};
 use crate::ruleset::RuleSetHandle;
-use crate::runs::{DomainItem, DomainRun, IpRun, UrlRun};
+use crate::runs::{DomainItem, DomainRun, IpRun, UrlNode, UrlRun, UrlSet};
 use crate::table::TableBuilder;
 use crate::text::go_lower;
 
@@ -90,6 +90,8 @@ struct Cx<'e> {
     check_targets: bool,
     deferred_geo: Vec<GeoFile>,
     scripts: Vec<Box<str>>,
+    url_sources: Vec<String>,
+    url_regexes: Vec<fancy_regex::Regex>,
 }
 
 impl<'e> Cx<'e> {
@@ -105,7 +107,21 @@ impl<'e> Cx<'e> {
             check_targets,
             deferred_geo: Vec::new(),
             scripts: Vec::new(),
+            url_sources: Vec::new(),
+            url_regexes: Vec::new(),
         }
+    }
+
+    fn add_url_leaf(&mut self, regex: fancy_regex::Regex) -> UrlNode {
+        if self.check_targets
+            && let Some(cooked) = delegatable_regex(regex.as_str())
+        {
+            let slot = self.url_sources.len() as u32;
+            self.url_sources.push(cooked);
+            self.url_regexes.push(regex);
+            return UrlNode::Slot(slot);
+        }
+        UrlNode::Fancy(Box::new(regex))
     }
 
     fn intern(&mut self, target: &str) -> Result<u16, CompileError> {
@@ -172,6 +188,7 @@ fn compile_from<D: Borrow<RuleDef>>(
             classical.push(handle.clone());
         }
     }
+    let url_set = UrlSet::build(cx.url_sources, cx.url_regexes);
     Ok(RouteProgram {
         progs: progs.into_boxed_slice(),
         sub_rule_names: sub_rules.keys().map(|name| name.as_str().into()).collect(),
@@ -181,6 +198,7 @@ fn compile_from<D: Borrow<RuleDef>>(
         demands: cx.demands,
         deferred_geo: cx.deferred_geo.into_boxed_slice(),
         scripts: cx.scripts.into_boxed_slice(),
+        url_set,
     })
 }
 
@@ -328,7 +346,7 @@ impl ListBuilder {
         if run.class == Class::Url {
             if run.count < merge_min {
                 for (idx, regex) in run.urls {
-                    self.nodes.push(Node::Url(Box::new(regex)));
+                    self.nodes.push(Node::Url(cx.add_url_leaf(regex)));
                     self.ops.push(Op::Leaf {
                         idx,
                         node: self.nodes.len() as u32 - 1,
@@ -666,7 +684,7 @@ fn node_for_cond(
         }
         Cond::UrlRegex(pattern) => {
             cx.demands.http = true;
-            Node::Url(Box::new(url_regex(pattern, loc)?))
+            Node::Url(cx.add_url_leaf(url_regex(pattern, loc)?))
         }
         Cond::UserAgent(pattern) => {
             cx.demands.http = true;

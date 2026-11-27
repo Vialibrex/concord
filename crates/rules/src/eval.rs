@@ -12,6 +12,7 @@ use concord_config::rule::UidRange;
 use crate::geo::{GeoStore, SiteSlot, is_lan};
 use crate::observed::Observed;
 use crate::ruleset::RuleSetHandle;
+use crate::runs::{UrlCache, UrlNode, UrlSet};
 use crate::text::{equal_fold, go_lower, wildcard_match};
 
 /// Why evaluation stopped before an answer.
@@ -85,7 +86,7 @@ pub(crate) enum Node {
     InName(Box<[Box<str>]>),
     RematchName(Box<[Box<str>]>),
     InType(u32),
-    Url(Box<fancy_regex::Regex>),
+    Url(UrlNode),
     UserAgent(Box<[u8]>),
     Process {
         by_name: bool,
@@ -136,6 +137,8 @@ pub(crate) struct Ev<'a> {
     pub dscp: u8,
     pub host: &'a str,
     pub observed: Observed,
+    url_set: &'a UrlSet,
+    pub url_hits: Option<Box<UrlCache>>,
     swapped: bool,
     quiet: bool,
     budget: u32,
@@ -159,6 +162,10 @@ impl<'a> Ev<'a> {
         ]
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "internal per-step evaluation context"
+    )]
     pub(crate) fn new(
         flow: &'a FlowMeta,
         state: &'a RouteState,
@@ -166,6 +173,8 @@ impl<'a> Ev<'a> {
         dscp: u8,
         replay: u32,
         observed: Observed,
+        url_set: &'a UrlSet,
+        url_hits: Option<Box<UrlCache>>,
     ) -> Self {
         Ev {
             flow,
@@ -174,6 +183,8 @@ impl<'a> Ev<'a> {
             dscp,
             host: state.host.as_deref().unwrap_or(""),
             observed,
+            url_set,
+            url_hits,
             swapped: false,
             quiet: false,
             budget: replay,
@@ -181,6 +192,13 @@ impl<'a> Ev<'a> {
             unknown: false,
             http_gap: false,
         }
+    }
+
+    pub(crate) fn reset_op(&mut self) {
+        self.budget = 0;
+        self.counted = 0;
+        self.unknown = false;
+        self.http_gap = false;
     }
 
     fn dst_unknown(&self) -> bool {
@@ -434,8 +452,11 @@ impl Ev<'_> {
     fn http_rule(&mut self, node: &Node) -> bool {
         let (state, flow) = (self.state, self.flow);
         match node {
-            Node::Url(regex) => match &state.http {
-                Some(http) => regex.is_match(&*http.url).unwrap_or(false),
+            Node::Url(matcher) => match &state.http {
+                Some(http) => match matcher {
+                    UrlNode::Fancy(regex) => regex.is_match(&*http.url).unwrap_or(false),
+                    UrlNode::Slot(slot) => self.url_set.matches(*slot, http, &mut self.url_hits),
+                },
                 None => self.undecided_http(),
             },
             Node::UserAgent(pattern) => {

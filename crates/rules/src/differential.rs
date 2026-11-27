@@ -736,3 +736,86 @@ fn programs_agree_with_a_linear_evaluator_soak() {
         run_seed(seed, 300, 20);
     }
 }
+
+fn interleaved_url_list(rng: &mut StdRng, blocks: usize, sub_names: &[&str]) -> Vec<String> {
+    let mut out = Vec::with_capacity(blocks * 6 + 1);
+    for _ in 0..blocks {
+        let non_url = rng.random_range(1..6);
+        for _ in 0..non_url {
+            match rng.random_range(0..5) {
+                0 => out.push(format!(
+                    "DOMAIN,{},{}",
+                    choose(rng, &HOSTS),
+                    choose(rng, &TARGETS)
+                )),
+                1 => out.push(format!(
+                    "DOMAIN-SUFFIX,{},{}",
+                    choose(rng, &["a.com", "b.com", "c.org", "io"]),
+                    choose(rng, &TARGETS)
+                )),
+                2 => out.push(format!(
+                    "IP-CIDR,{},{}{}",
+                    choose(rng, &CIDRS),
+                    choose(rng, &TARGETS),
+                    flags(rng)
+                )),
+                3 if !sub_names.is_empty() => out.push(format!(
+                    "SUB-RULE,(URL-REGEX,{}),{}",
+                    choose(rng, &URL_PATTERNS),
+                    choose(rng, sub_names)
+                )),
+                _ => out.push(format!(
+                    "AND,((DOMAIN,{}),(URL-REGEX,{})),{}",
+                    choose(rng, &HOSTS),
+                    choose(rng, &URL_PATTERNS),
+                    choose(rng, &TARGETS)
+                )),
+            }
+        }
+        out.push(url_line(rng));
+    }
+    if rng.random_bool(0.5) {
+        out.push(format!("MATCH,{}", choose(rng, &TARGETS)));
+    }
+    out
+}
+
+#[test]
+fn interleaved_url_leaves_agree_with_linear_evaluator() {
+    let mut rng = StdRng::seed_from_u64(42);
+    let kit = Kit::new();
+    let sets = install_sets(&kit);
+    let mut hits = 0usize;
+    let mut set_programs = 0usize;
+    for case_no in 0..80 {
+        let blocks = rng.random_range(3..20);
+        let case = Case {
+            rules: interleaved_url_list(&mut rng, blocks, &["s0", "s1"]),
+            subs: vec![
+                ("s0".to_string(), interleaved_url_list(&mut rng, 4, &[])),
+                ("s1".to_string(), interleaved_url_list(&mut rng, 4, &["s0"])),
+            ],
+        };
+        let probes: Vec<Flow> = (0..12).map(|_| flow(&mut rng)).collect();
+        for merge in [1, 2, 8, 1000] {
+            let (program, rules, subs) = compile_case(&kit, &case, merge);
+            if program.url_set.is_set() {
+                set_programs += 1;
+            }
+            for flow in &probes {
+                for accept_first in [false, true] {
+                    let want = oracle(&rules, &subs, &sets, flow, accept_first);
+                    let got = drive(&program, &kit.geo, flow, accept_first);
+                    hits += got.candidates.len();
+                    assert_eq!(
+                        want, got,
+                        "interleaved case {case_no} merge {merge} accept_first {accept_first}\nrules: {:#?}\nsubs: {:#?}\nflow http {:?}",
+                        case.rules, case.subs, flow.http
+                    );
+                }
+            }
+        }
+    }
+    assert!(set_programs > 100, "expected UrlSet::Set to be exercised");
+    assert!(hits > 1000);
+}
