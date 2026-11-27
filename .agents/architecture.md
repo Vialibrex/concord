@@ -82,7 +82,8 @@ destination) are routed once, and sessions keyed by (source, outbound) are share
 own rule while the external mapping stays endpoint-independent. A protocol that can reach only one destination per
 session (plain vmess) adds the destination to the session key. One connection record per session. A task that runs
 only while there is UDP traffic sweeps idle flows and sessions once a second, and the NAT clock counts its ticks. A
-full flow table evicts its oldest sixteenth at once, so a port scan does not rescan it for every new flow.
+full flow table evicts one entry per insert via a second-chance recency queue (matching sing-tun's freelru), so a port
+scan does not rescan it for every new flow.
 
 The TUN driver hands each receive round to the tunnel as one batch (`udp/batch.rs`). Inside a `BatchRound`, datagrams
 for sessions that send in batches are copied into a per-thread buffer, chained per session, and each session's run is

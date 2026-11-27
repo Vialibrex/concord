@@ -31,7 +31,7 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | h3 | Bound frame and DATA read-ahead | hyperium/h3#344, `c916ed5a` (frame headers); #328 and #386 are related | Backport #344; propose the DATA-body extension to hyperium/h3 |
 | h3 | Opt-in draft-00 datagram SETTINGS for WARP | None | Propose the default-off client builder switch to hyperium/h3 |
 | h3 | Discard unknown frames as they arrive; bound HEADERS and SETTINGS before buffering | None; quic-go bounds both (`http3/frames.go:134`, `:182`) | Propose to hyperium/h3 with the decoder tests |
-| h3 | Allow warnings in the manifest | None | None planned: it gives the path dependency a crates.io dependency's lint cap |
+| h3 | Fix 0.0.8 rustc warnings under current toolchains | hyperium/h3#318, `18df8ceb` (on master, unreleased) | Backport #318; drop once upgrading past a release that includes it |
 | h3-quinn | Public `SendStream::new` and `RecvStream::new` | None | Propose to hyperium/h3 |
 | h3-quinn | `RecvStream` keeps its quinn stream while a read waits, so `stop_sending` and `recv_id` do not panic | None | Issue and PR to hyperium/h3 with the NaiveProxy stop-while-reading test |
 | gotatun | Deliver already-ready encrypted IP packets to the bounded UDP queue together | None yet | Propose the batch handoff to mullvad/gotatun |
@@ -404,10 +404,12 @@ The package archive checksum is `10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662
   upstream's 431 and `HeaderTooBig`, with its receive side stopped with `H3_EXCESSIVE_LOAD`, and the connection
   stays, as with quic-go. `header_too_big_response_from_server` now reports the encoded length the decoder saw,
   not the decoded size, so it no longer pins `actual_size`.
-- `Cargo.toml`: `[lints.rust] warnings = "allow"`. A path dependency is built without the `--cap-lints` a
-  crates.io dependency gets, so 0.0.8's own warnings under the current toolchain (unused imports and variables
-  without the `tracing` feature, elided lifetimes) reached every workspace build and the editor. This also hides
-  warnings in the patches above: after changing one, run `cargo clippy` in `vendor/h3` with the line removed.
+- `src/stream.rs`, `src/buf.rs`, `src/shared_state.rs`, `src/qpack/dynamic.rs`, `src/qpack/prefix_string/decode.rs`:
+  backport upstream [PR #318](https://github.com/hyperium/h3/pull/318), commit
+  [`18df8ceb`](https://github.com/hyperium/h3/commit/18df8ceb) (on master, unreleased; crates.io is still 0.0.8),
+  fixing the 0.0.8 rustc warnings (unused `Decode` import, unused `err` without `tracing`, unread `StreamEnd::Reset`
+  payload via `#[allow(dead_code)]`, and elided lifetime syntax) so `Cargo.toml` no longer needs
+  `[lints.rust] warnings = "allow"`. Drop once upgrading past a release that includes #318.
 
 ## h3-quinn 0.0.10
 

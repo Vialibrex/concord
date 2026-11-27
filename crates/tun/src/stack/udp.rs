@@ -158,6 +158,7 @@ struct Recent {
 pub(crate) struct UdpTable {
     entries: HashMap<SocketAddr, Entry, FxBuild>,
     recency: VecDeque<Recent>,
+    #[cfg(test)]
     limit: usize,
     timeout_micros: i64,
     /// Set once a driver round: a flow's last use only needs the sweep's precision.
@@ -181,6 +182,7 @@ impl UdpTable {
         UdpTable {
             entries: HashMap::with_capacity_and_hasher(256, FxBuild::default()),
             recency: VecDeque::with_capacity(256),
+            #[cfg(test)]
             limit: TABLE_LIMIT,
             timeout_micros,
             now: 0,
@@ -200,6 +202,17 @@ impl UdpTable {
         self
     }
 
+    fn limit(&self) -> usize {
+        #[cfg(test)]
+        {
+            self.limit
+        }
+        #[cfg(not(test))]
+        {
+            TABLE_LIMIT
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -210,7 +223,7 @@ impl UdpTable {
 
     pub fn reply_for(&mut self, local: SocketAddr) -> &Arc<dyn UdpReply> {
         let now = self.now;
-        if self.entries.len() >= self.limit && !self.entries.contains_key(&local) {
+        if self.entries.len() >= self.limit() && !self.entries.contains_key(&local) {
             self.evict_oldest();
         }
         let (pool, replies, mtu, stats, recency) = (

@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn skipper_rules_normalize_host_once_outside_the_loop() {
+    fn skipper_rules_borrow_lowercase_host_and_match_mixed_case() {
         let recorder = Arc::new(RecordingMatcher::new());
         let rules = vec![
             FilterRule {
