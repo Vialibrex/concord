@@ -23,8 +23,17 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     data: Notify,
+    close: Notify,
     space: AtomicWaker,
     max_bytes: usize,
+}
+
+struct Launcher {
+    factory: Arc<RequestFactory>,
+    transport: Lease,
+    session: String,
+    interval: Range,
+    tasks: concord_common::Tasks,
 }
 
 fn lock(shared: &Shared) -> MutexGuard<'_, State> {
@@ -33,8 +42,14 @@ fn lock(shared: &Shared) -> MutexGuard<'_, State> {
 
 /// The uplink of `packet-up`: bytes pile up for at least the minimum interval and
 /// leave as numbered POSTs of at most `max_bytes`.
+///
+/// The upload task starts lazily on the first non-empty write, matching mihomo's
+/// `DialPacketUp` / `PacketUpWriter.Write` (`transport/xhttp/client.go:595-607, 67-69`),
+/// and `poll_shutdown` cancels any pending interval wait to flush buffered bytes
+/// immediately, matching `PacketUpWriter.Close` (`transport/xhttp/client.go:89-101, 143-156`).
 pub(crate) struct PacketUp {
     shared: Arc<Shared>,
+    launcher: Option<Launcher>,
 }
 
 impl PacketUp {
@@ -49,17 +64,20 @@ impl PacketUp {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             data: Notify::new(),
+            close: Notify::new(),
             space: AtomicWaker::new(),
             max_bytes,
         });
-        tasks.spawn(upload_loop(
-            shared.clone(),
-            factory,
-            transport,
-            session,
-            interval,
-        ));
-        PacketUp { shared }
+        PacketUp {
+            shared,
+            launcher: Some(Launcher {
+                factory,
+                transport,
+                session,
+                interval,
+                tasks: tasks.clone(),
+            }),
+        }
     }
 }
 
@@ -72,21 +90,44 @@ async fn upload_loop(
 ) {
     let mut seq: u64 = 0;
     loop {
-        loop {
+        let closing = loop {
+            let notified = shared.data.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             {
                 let state = lock(&shared);
                 if !state.buf.is_empty() {
-                    break;
+                    break state.closed;
                 }
                 if state.closed {
                     return;
                 }
             }
-            shared.data.notified().await;
+            notified.await;
+        };
+        if !closing {
+            let wait = Duration::from_millis(interval.rand() as u64);
+            if !wait.is_zero() {
+                let close_wait = shared.close.notified();
+                tokio::pin!(close_wait);
+                close_wait.as_mut().enable();
+                if !lock(&shared).closed {
+                    tokio::select! {
+                        biased;
+                        () = close_wait => {}
+                        () = tokio::time::sleep(wait) => {}
+                    }
+                }
+            }
         }
-        tokio::time::sleep(Duration::from_millis(interval.rand() as u64)).await;
         let payload = {
             let mut state = lock(&shared);
+            if state.buf.is_empty() {
+                if state.closed {
+                    return;
+                }
+                continue;
+            }
             state.posting = true;
             std::mem::take(&mut state.buf)
         };
@@ -123,8 +164,8 @@ impl AsyncWrite for PacketUp {
         cx: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let shared = &self.shared;
-        shared.space.register(cx.waker());
+        let this = self.get_mut();
+        let shared = &this.shared;
         let mut state = lock(shared);
         if let Some((kind, message)) = &state.failure {
             return Poll::Ready(Err(io::Error::new(*kind, message.clone())));
@@ -134,15 +175,26 @@ impl AsyncWrite for PacketUp {
         }
         let room = shared.max_bytes.saturating_sub(state.buf.len());
         if room == 0 {
+            shared.space.register(cx.waker());
             return Poll::Pending;
         }
         let take = data.len().min(room);
-        let Some(chunk) = data.get(..take) else {
+        let Some(chunk) = data.get(..take).filter(|chunk| !chunk.is_empty()) else {
             return Poll::Ready(Ok(0));
         };
         state.buf.extend_from_slice(chunk);
         drop(state);
-        shared.data.notify_one();
+        if let Some(launcher) = this.launcher.take() {
+            launcher.tasks.spawn(upload_loop(
+                shared.clone(),
+                launcher.factory,
+                launcher.transport,
+                launcher.session,
+                launcher.interval,
+            ));
+        } else {
+            shared.data.notify_one();
+        }
         Poll::Ready(Ok(take))
     }
 
@@ -151,18 +203,22 @@ impl AsyncWrite for PacketUp {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let shared = &self.shared;
-        shared.space.register(cx.waker());
+        let this = self.get_mut();
+        let shared = &this.shared;
         let mut state = lock(shared);
         if let Some((kind, message)) = &state.failure {
             return Poll::Ready(Err(io::Error::new(*kind, message.clone())));
         }
         state.closed = true;
         if state.buf.is_empty() && !state.posting {
+            drop(state);
+            this.launcher = None;
             return Poll::Ready(Ok(()));
         }
+        shared.space.register(cx.waker());
         drop(state);
         shared.data.notify_one();
+        shared.close.notify_waiters();
         Poll::Pending
     }
 }
@@ -171,5 +227,57 @@ impl Drop for PacketUp {
     fn drop(&mut self) {
         lock(&self.shared).closed = true;
         self.shared.data.notify_one();
+        self.shared.close.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::io::AsyncWriteExt;
+
+    use super::*;
+    use crate::DialFn;
+    use crate::xhttp::browser::Browser;
+    use crate::xhttp::config::{Settings, XhttpOptions};
+    use crate::xhttp::transport::Transport;
+
+    fn test_packet_up(interval_ms: usize) -> PacketUp {
+        let opts = XhttpOptions {
+            host: "cdn.example.com".into(),
+            path: "/xh".into(),
+            mode: "packet-up".into(),
+            ..XhttpOptions::default()
+        };
+        let settings = Settings::resolve(&opts).unwrap();
+        let factory = Arc::new(RequestFactory::new(opts, settings, Browser::new()));
+        let dial: DialFn = Arc::new(|| Box::pin(async { Err(io::Error::other("unused")) }));
+        let tasks = concord_common::Tasks::default();
+        let transport = Lease::owned(Transport::new(false, dial, 0, tasks.clone()));
+        PacketUp::start(
+            factory,
+            transport,
+            "session-1".into(),
+            1024,
+            Range {
+                min: interval_ms,
+                max: interval_ms,
+            },
+            &tasks,
+        )
+    }
+
+    #[tokio::test]
+    async fn uploader_does_not_start_until_first_non_empty_write() {
+        let mut idle = test_packet_up(30);
+        assert!(idle.launcher.is_some());
+        assert_eq!(idle.write(&[]).await.unwrap(), 0);
+        assert!(idle.launcher.is_some());
+        idle.shutdown().await.unwrap();
+        assert!(idle.launcher.is_none());
+
+        let mut active = test_packet_up(5_000);
+        assert!(active.launcher.is_some());
+        assert_eq!(active.write(b"hi").await.unwrap(), 2);
+        assert!(active.launcher.is_none());
     }
 }

@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use bytes::Bytes;
-use concord_common::BoxStream;
 use concord_common::sync::lock;
+use concord_common::{BoxStream, Stream};
 use concord_transport::{
     DialFn, GrpcOptions, GunClient, Layer, TransportStack, WsOptions, XhttpClient, XhttpOptions,
 };
@@ -467,6 +467,96 @@ async fn grpc_survives_a_malformed_server_message() {
     assert!(conn.read(&mut buf).await.is_err());
 }
 
+#[tokio::test]
+async fn grpc_round_trips_large_single_messages_above_32kib_and_1mib() {
+    let seen_sizes = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let sizes = seen_sizes.clone();
+    let dial: DialFn = Arc::new(move || {
+        let sizes = sizes.clone();
+        Box::pin(async move {
+            let (client, server) = duplex(2 << 20);
+            tokio::spawn(async move {
+                let mut conn = h2::server::Builder::new()
+                    .initial_window_size(4 << 20)
+                    .initial_connection_window_size(8 << 20)
+                    .handshake(server)
+                    .await
+                    .unwrap();
+                while let Some(Ok((request, mut respond))) = conn.accept().await {
+                    let sizes = sizes.clone();
+                    tokio::spawn(async move {
+                        let (_parts, body) = request.into_parts();
+                        let response = http::Response::builder()
+                            .status(200)
+                            .header("content-type", "application/grpc")
+                            .body(())
+                            .unwrap();
+                        let mut send = respond.send_response(response, false).unwrap();
+                        let mut reader = h2_servers::GunReader::new(body);
+                        while let Some(msg) = reader.message().await {
+                            lock(&sizes).push(msg.len());
+                            let wire = h2_servers::encode_gun(&msg);
+                            let mut offset = 0;
+                            while offset < wire.len() {
+                                let want = wire.len() - offset;
+                                send.reserve_capacity(want);
+                                let cap = std::future::poll_fn(|cx| send.poll_capacity(cx))
+                                    .await
+                                    .unwrap()
+                                    .unwrap();
+                                let n = cap.min(want);
+                                send.send_data(
+                                    Bytes::copy_from_slice(&wire[offset..offset + n]),
+                                    false,
+                                )
+                                .unwrap();
+                                offset += n;
+                            }
+                        }
+                        send.send_data(Bytes::new(), true).unwrap();
+                    });
+                }
+            });
+            Ok(Box::new(client) as BoxStream)
+        })
+    });
+    let client = GunClient::new(
+        GrpcOptions {
+            service_name: "ray".into(),
+            authority: "node.example.com:443".into(),
+            ..GrpcOptions::default()
+        },
+        dial,
+        Default::default(),
+    );
+    let mut conn = client.dial().await.unwrap();
+    let medium = pattern(64 * 1024);
+    let large = pattern(1 << 20);
+    conn.write_all(&medium).await.unwrap();
+    let mut got_medium = vec![0u8; medium.len()];
+    conn.read_exact(&mut got_medium).await.unwrap();
+    assert_eq!(got_medium, medium);
+
+    let options = concord_common::stream_buffer::ReadBufferOptions::for_copy(
+        Default::default(),
+        conn.write_requirements(),
+    )
+    .unwrap();
+    let mut owned_large = options.take_for_read(large.len(), 0).unwrap();
+    owned_large.spare_mut()[..large.len()].copy_from_slice(&large);
+    owned_large.advance(large.len()).unwrap();
+    let (mut rd, mut wr) = (Vec::with_capacity(large.len()), owned_large);
+    let accepted = std::future::poll_fn(|cx| conn.poll_write_buffer(cx, &mut wr))
+        .await
+        .unwrap();
+    assert_eq!(accepted, large.len());
+    assert!(wr.is_empty());
+    conn.shutdown().await.unwrap();
+    conn.read_to_end(&mut rd).await.unwrap();
+    assert_eq!(rd, large);
+    assert_eq!(*lock(&seen_sizes), vec![medium.len(), large.len()]);
+}
+
 struct XhttpSession {
     next: u64,
     pending: BTreeMap<u64, Vec<u8>>,
@@ -667,6 +757,31 @@ async fn xhttp_packet_up_orders_posts_by_sequence() {
         lock(&server.bad_requests)
     );
     assert!(*lock(&server.packets) >= 1);
+}
+
+#[tokio::test]
+async fn xhttp_packet_up_shutdown_flushes_without_waiting_for_interval() {
+    let server = Arc::new(XhttpServer::default());
+    let mut opts = xhttp_opts("packet-up");
+    opts.sc_min_posts_interval_ms = "5000".into();
+    let client =
+        XhttpClient::new(opts, xhttp_dial(server.clone()), None, Default::default()).unwrap();
+    let mut conn = client.dial().await.unwrap();
+    conn.write_all(b"flush-now").await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_millis(500), conn.shutdown())
+        .await
+        .expect("shutdown should flush pending packet-up bytes without waiting 5s")
+        .unwrap();
+    let mut got = [0u8; 9];
+    tokio::time::timeout(
+        std::time::Duration::from_millis(500),
+        conn.read_exact(&mut got),
+    )
+    .await
+    .expect("server should echo flushed packet-up bytes immediately")
+    .unwrap();
+    assert_eq!(&got, b"flush-now");
+    assert_eq!(*lock(&server.packets), 1);
 }
 
 #[tokio::test]

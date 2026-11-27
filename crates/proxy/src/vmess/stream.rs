@@ -302,6 +302,12 @@ struct Writer {
 }
 
 impl Writer {
+    /// True for unchunked `Security::None` TCP/MUX bodies, matching sing-vmess
+    /// `CreateWriter` (`protocol.go:254-283`) returning `upstream` directly.
+    fn is_raw(&self, request: &Request) -> bool {
+        !self.encoder.chunked() && request.security == Security::None
+    }
+
     fn poll_owned_plain<W: AsyncWrite + Unpin>(
         &mut self,
         cx: &mut Context<'_>,
@@ -348,7 +354,14 @@ impl Writer {
         if let Some(accepted) = self.staged.take() {
             return Poll::Ready(Ok(accepted));
         }
-        let take = data.len().min(CHUNK);
+        if self.is_raw(request) && self.handshake.is_none() {
+            return Pin::new(io).poll_write(cx, data);
+        }
+        let take = if self.is_raw(request) {
+            data.len()
+        } else {
+            data.len().min(CHUNK)
+        };
         self.stage_handshake(cfg, request)?;
         if take > 0 {
             let payload = data.get(..take).unwrap_or_default();
@@ -619,6 +632,9 @@ impl<S: Stream> Stream for VmessStream<S> {
             into_tcp);
 
     fn write_requirements(&self) -> BufferRequirements {
+        if self.writer.is_raw(&self.request) {
+            return self.io.write_requirements();
+        }
         self.writer
             .encoder
             .owned_requirements()
@@ -633,6 +649,13 @@ impl<S: Stream> Stream for VmessStream<S> {
     ) -> Poll<io::Result<usize>> {
         ready!(self.poll_owned(cx))?;
         ready!(self.writer.drain(cx, &mut self.io))?;
+        if self.writer.is_raw(&self.request)
+            && self.writer.handshake.is_none()
+            && self.writer.staged.is_none()
+            && !buffer.is_empty()
+        {
+            return self.io.poll_write_buffer(cx, buffer);
+        }
         let length = buffer.len();
         let requirements = self.write_requirements();
         if self.writer.handshake.is_some()
@@ -892,5 +915,169 @@ mod tests {
         far_write.write_all(b"more").await.unwrap();
         far_write.shutdown().await.unwrap();
         assert_eq!(reader.await.unwrap(), b"downmore");
+    }
+
+    struct RecordingStream {
+        requirements: BufferRequirements,
+        pending_once: bool,
+        scalar_writes: Vec<usize>,
+        owned_writes: Vec<(usize, usize)>,
+        wire: Vec<u8>,
+    }
+
+    impl RecordingStream {
+        fn new(requirements: BufferRequirements) -> Self {
+            Self {
+                requirements,
+                pending_once: false,
+                scalar_writes: Vec::new(),
+                owned_writes: Vec::new(),
+                wire: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncRead for RecordingStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for RecordingStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            if this.pending_once {
+                this.pending_once = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            this.scalar_writes.push(buf.len());
+            this.wire.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Stream for RecordingStream {
+        concord_common::stream_policy!(
+            own: write_requirements, poll_write_buffer;
+            default: into_split, read_requirements, poll_read_buffer, raw_socket, tcp, peer_addr,
+                needs_handshake, direct, into_tcp);
+
+        fn write_requirements(&self) -> BufferRequirements {
+            self.requirements
+        }
+
+        fn poll_write_buffer(
+            &mut self,
+            _cx: &mut Context<'_>,
+            buffer: &mut StreamBuffer,
+        ) -> Poll<io::Result<usize>> {
+            let len = buffer.len();
+            let ptr = buffer.as_slice().as_ptr() as usize;
+            self.owned_writes.push((len, ptr));
+            self.wire.extend_from_slice(buffer.as_slice());
+            buffer.consume(len)?;
+            Poll::Ready(Ok(len))
+        }
+    }
+
+    #[tokio::test]
+    async fn none_tcp_passes_writes_through_without_chunking_and_keeps_handshake_coalescing() {
+        let inner_req = BufferRequirements {
+            mtu: 0,
+            front: 16,
+            rear: 8,
+        };
+        let mut inner = RecordingStream::new(inner_req);
+        inner.pending_once = true;
+        let cfg = Arc::new(VmessCfg::new(
+            "00000000-0000-0000-0000-000000000001",
+            0,
+            Security::None,
+            false,
+            false,
+            Arc::new(SystemTime::now),
+        ));
+        let request = Request::new(Security::None, CMD_TCP, false, false);
+        let mut stream =
+            VmessStream::new(inner, cfg, request, Address::new("example.com", 443)).unwrap();
+        assert_eq!(stream.write_requirements(), inner_req);
+
+        let first: Vec<u8> = (0..20_000usize).map(|n| (n % 251) as u8).collect();
+        let mut first_buf = filled(inner_req, &first);
+        let n = std::future::poll_fn(|cx| stream.poll_write_buffer(cx, &mut first_buf))
+            .await
+            .unwrap();
+        assert_eq!(n, first.len());
+        assert!(first_buf.is_empty());
+        assert_eq!(stream.io.scalar_writes.len(), 1);
+        assert!(stream.io.scalar_writes[0] > first.len());
+        assert!(stream.io.wire.ends_with(&first));
+
+        let big: Vec<u8> = (0..32_700usize).map(|n| ((n * 7) % 251) as u8).collect();
+        let mut big_buf = filled(inner_req, &big);
+        let expected_ptr = big_buf.as_slice().as_ptr() as usize;
+        let n = std::future::poll_fn(|cx| stream.poll_write_buffer(cx, &mut big_buf))
+            .await
+            .unwrap();
+        assert_eq!(n, big.len());
+        assert!(big_buf.is_empty());
+        assert_eq!(stream.io.owned_writes, vec![(big.len(), expected_ptr)]);
+        assert!(stream.io.wire.ends_with(&big));
+
+        let scalar: Vec<u8> = (0..24_000usize).map(|n| ((n * 13) % 251) as u8).collect();
+        let written = stream.write(&scalar).await.unwrap();
+        assert_eq!(written, scalar.len());
+        assert_eq!(stream.io.scalar_writes.last().copied(), Some(scalar.len()));
+        assert!(stream.io.wire.ends_with(&scalar));
+    }
+
+    #[tokio::test]
+    async fn non_none_and_udp_writes_keep_chunk_framing() {
+        for (security, command, expected_mtu) in [
+            (Security::Aes128Gcm, CMD_TCP, CHUNK),
+            (Security::Chacha20Poly1305, CMD_TCP, CHUNK),
+            (Security::Legacy, CMD_TCP, 0),
+            (Security::None, CMD_UDP, 0),
+        ] {
+            let cfg = Arc::new(VmessCfg::new(
+                "00000000-0000-0000-0000-000000000001",
+                0,
+                security,
+                false,
+                false,
+                Arc::new(SystemTime::now),
+            ));
+            let request = Request::new(security, command, false, false);
+            let mut stream = VmessStream::new(
+                RecordingStream::new(BufferRequirements::default()),
+                cfg,
+                request,
+                Address::new("example.com", 443),
+            )
+            .unwrap();
+            stream.writer.handshake = None;
+            assert!(!stream.writer.is_raw(&stream.request));
+            assert_eq!(stream.write_requirements().mtu, expected_mtu);
+            let payload = vec![0xABu8; CHUNK + 100];
+            let written = stream.write(&payload).await.unwrap();
+            assert_eq!(written, CHUNK);
+        }
     }
 }

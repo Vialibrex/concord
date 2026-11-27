@@ -9,8 +9,15 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::http1::invalid;
 
-const MAX_MESSAGE: usize = 32 * 1024;
 const FRONT_HEADROOM: usize = 6 + 10;
+
+fn wire_message_len(payload_len: usize) -> Option<u32> {
+    let var_len = uvarint_len(payload_len as u64);
+    1usize
+        .checked_add(var_len)?
+        .checked_add(payload_len)
+        .and_then(|total| u32::try_from(total).ok())
+}
 
 enum Read {
     Header {
@@ -90,7 +97,8 @@ impl GunWrite {
             return Poll::Ready(Ok(done));
         }
         ready!(poll_drain(io, cx, &mut self.out, &mut self.out_off))?;
-        let take = data.len().min(MAX_MESSAGE);
+        let max_payload = usize::try_from(u32::MAX - 6).unwrap_or(usize::MAX);
+        let take = data.len().min(max_payload);
         let Some(chunk) = data.get(..take).filter(|c| !c.is_empty()) else {
             return Poll::Ready(Ok(0));
         };
@@ -212,8 +220,10 @@ impl<S: Stream> Stream for GunStream<S> {
         ))?;
         let length = buffer.len();
         let requirements = self.write_requirements();
+        let Some(msg_len) = wire_message_len(length) else {
+            return stream_buffer::poll_write_buffer(self, cx, buffer);
+        };
         if length == 0
-            || length > MAX_MESSAGE
             || buffer.headroom() < requirements.front
             || buffer.tailroom() < requirements.rear
         {
@@ -224,7 +234,7 @@ impl<S: Stream> Stream for GunStream<S> {
         let (prefix, varint) = head
             .split_at_mut_checked(6)
             .ok_or_else(|| invalid("short gRPC header"))?;
-        let [a, b, c, d] = ((1 + var_len + length) as u32).to_be_bytes();
+        let [a, b, c, d] = msg_len.to_be_bytes();
         prefix.copy_from_slice(&[0, a, b, c, d, 0x0A]);
         let mut value = length as u64;
         for byte in varint {
@@ -479,7 +489,7 @@ mod tests {
     fn owned(sender: &BoxStream, payload: &[u8]) -> StreamBuffer {
         let options =
             ReadBufferOptions::for_copy(Default::default(), sender.write_requirements()).unwrap();
-        let mut buffer = options.take();
+        let mut buffer = options.take_for_read(payload.len(), 0).unwrap();
         buffer.spare_mut()[..payload.len()].copy_from_slice(payload);
         buffer.advance(payload.len()).unwrap();
         buffer
@@ -487,7 +497,7 @@ mod tests {
 
     #[tokio::test]
     async fn owned_messages_survive_partial_writes_then_scalar_data_and_close() {
-        for length in [1, 127, 128, 15_000, MAX_MESSAGE - FRONT_HEADROOM] {
+        for length in [1, 127, 128, 15_000, 32 * 1024 - FRONT_HEADROOM, 64 * 1024] {
             let payload: Vec<_> = (0..length).map(|n| (n % 239) as u8).collect();
             let (near, mut far) = duplex(7);
             let mut sender = gun_framed(near);
@@ -511,6 +521,47 @@ mod tests {
             };
             let ((), wire) = tokio::join!(writer, reader);
             assert_eq!(wire, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn large_owned_and_streaming_messages_round_trip_as_single_frames() {
+        for length in [48 * 1024usize, 1 << 20] {
+            let payload: Vec<_> = (0..length).map(|n| ((n * 29) % 251) as u8).collect();
+            let (near, far) = duplex(1 << 16);
+            let mut sender = gun_framed(near);
+            let mut receiver = gun_framed(far);
+            let mut buffer = owned(&sender, &payload);
+            let mut expected = Vec::new();
+            encode_message(&mut expected, &payload);
+            assert_eq!(
+                u32::from_be_bytes([expected[1], expected[2], expected[3], expected[4]]) as usize,
+                1 + uvarint_len(length as u64) + length
+            );
+            let writer = async {
+                let accepted = std::future::poll_fn(|cx| sender.poll_write_buffer(cx, &mut buffer))
+                    .await
+                    .unwrap();
+                assert_eq!(accepted, length);
+                assert!(buffer.is_empty());
+                sender.shutdown().await.unwrap();
+            };
+            // Read with a small 4 KiB caller buffer to verify streaming decode without
+            // pre-allocating by declared message length.
+            let reader = async {
+                let mut got = Vec::with_capacity(length);
+                let mut chunk = [0u8; 4096];
+                loop {
+                    let n = receiver.read(&mut chunk).await.unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    got.extend_from_slice(&chunk[..n]);
+                }
+                got
+            };
+            let ((), got) = tokio::join!(writer, reader);
+            assert_eq!(got, payload);
         }
     }
 
