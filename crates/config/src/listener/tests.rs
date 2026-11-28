@@ -125,10 +125,6 @@ fn listeners_this_core_does_not_serve_are_skipped_with_a_warning() {
             "reality-config",
         ),
         (
-            json!({"name": "f", "type": "vless", "users": [{"uuid": "u", "flow": "xtls-rprx-vision"}]}),
-            "xtls-rprx-vision",
-        ),
-        (
             json!({"name": "p", "type": "vless", "users": [{"uuid": "u"}]}),
             "disallow using Vless",
         ),
@@ -171,6 +167,19 @@ fn proxy_users_have_three_states() {
         server(json!([{"username": "a", "password": "b"}])),
         ProxyUsers::Own(vec![("a".into(), "b".into())])
     );
+}
+
+#[test]
+fn a_vless_user_keeps_its_flow() {
+    let def = one(
+        json!({"name": "f", "type": "vless", "certificate": "c", "private-key": "k",
+        "users": [{"uuid": "u", "flow": "xtls-rprx-vision"}, {"uuid": "w"}]}),
+    );
+    let ListenerKind::Vless(server) = def.kind else {
+        panic!("vless")
+    };
+    let flows: Vec<&str> = server.users.iter().map(|user| user.flow.as_str()).collect();
+    assert_eq!(flows, ["xtls-rprx-vision", ""]);
 }
 
 #[test]

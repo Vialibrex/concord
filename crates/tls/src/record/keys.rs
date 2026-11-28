@@ -4,7 +4,6 @@ use std::sync::atomic::AtomicBool;
 
 use aws_lc_rs::aead;
 use concord_common::sync::lock;
-use rustls::client::ClientConnectionData;
 use rustls::crypto::cipher::{AeadKey, Iv, MessageDecrypter, MessageEncrypter};
 use rustls::kernel::KernelConnection;
 use rustls::{
@@ -101,12 +100,12 @@ pub(crate) trait KeySchedule: std::marker::Send {
     fn next_rx(&mut self) -> io::Result<Box<dyn MessageDecrypter>>;
 }
 
-struct RustlsSchedule {
-    kernel: KernelConnection<ClientConnectionData>,
+struct RustlsSchedule<D> {
+    kernel: KernelConnection<D>,
     suite: SupportedCipherSuite,
 }
 
-impl KeySchedule for RustlsSchedule {
+impl<D: std::marker::Send> KeySchedule for RustlsSchedule<D> {
     fn next_tx(&mut self) -> io::Result<Box<dyn MessageEncrypter>> {
         let (_, secrets) = self.kernel.update_tx_secret().map_err(tls_error)?;
         encrypter(self.suite, secrets, 0)
@@ -129,9 +128,9 @@ pub(crate) struct Keys {
 }
 
 impl Keys {
-    pub(crate) fn from_rustls(
+    pub(crate) fn from_rustls<D: std::marker::Send + 'static>(
         secrets: ExtractedSecrets,
-        kernel: KernelConnection<ClientConnectionData>,
+        kernel: KernelConnection<D>,
     ) -> io::Result<Self> {
         let suite = kernel.negotiated_cipher_suite();
         let limit = match suite {

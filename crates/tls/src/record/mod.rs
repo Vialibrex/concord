@@ -43,7 +43,7 @@ const MAX_USELESS_RECORDS: u8 = 16;
 const KEY_UPDATE_NOT_REQUESTED: u8 = 0;
 const KEY_UPDATE_REQUESTED: u8 = 1;
 
-/// A TLS client connection past its handshake. The handshake library keeps the key
+/// A TLS connection past its handshake. The handshake library keeps the key
 /// schedule; each direction seals or opens its own records with its own cipher and sequence
 /// number, so the halves of a split share nothing on the data path, as Go's `in` and `out`
 /// halfConns.
@@ -91,6 +91,7 @@ impl RecordStream {
             useless: 0,
             closed: false,
             failed: None,
+            peer_is_server: true,
         };
         let send = Send {
             shared,
@@ -108,6 +109,13 @@ impl RecordStream {
             send,
             alpn,
         }
+    }
+
+    /// The server's side: a ticket from the client fails the read and the connection closes.
+    /// Go's server sends an `unexpected_message` alert before it fails; this one sends none.
+    pub(crate) fn serving(mut self) -> Self {
+        self.recv.peer_is_server = false;
+        self
     }
 
     pub(crate) fn alpn(&self) -> Option<&[u8]> {

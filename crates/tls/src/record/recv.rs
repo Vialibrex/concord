@@ -119,6 +119,8 @@ pub(super) struct Recv {
     pub(super) useless: u8,
     pub(super) closed: bool,
     pub(super) failed: Option<(io::ErrorKind, String)>,
+    /// Only a server sends tickets after the handshake (RFC 8446 4.6.1).
+    pub(super) peer_is_server: bool,
 }
 
 impl Recv {
@@ -278,7 +280,7 @@ impl Recv {
             };
             match (HandshakeType::from(typ), body) {
                 // Resumption is off, so a ticket is of no use.
-                (HandshakeType::NewSessionTicket, _) if self.tls13 => {}
+                (HandshakeType::NewSessionTicket, _) if self.tls13 && self.peer_is_server => {}
                 (HandshakeType::KeyUpdate, &[request]) if self.tls13 => {
                     if self.handshake.len() != 4 + len {
                         return Err(invalid("tls: KeyUpdate not at a record boundary"));

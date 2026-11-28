@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 
-use super::support::{Ca, Leaf, ServerSpec, connect_whole, server_config};
+use super::support::{Ca, Leaf, Sealer, ServerSpec, connect_whole, server_config};
 use crate::{ClientFingerprint, TlsConnector, TlsOptions};
 
 const TOTAL: usize = 4 << 20;
@@ -623,24 +623,6 @@ async fn a_native_write_half_refuses_data_after_close_notify() {
     let mut sent = Vec::new();
     server.read_to_end(&mut sent).await.unwrap();
     assert_eq!(sent, b"last");
-}
-
-struct Sealer {
-    encrypter: Box<dyn rustls::crypto::cipher::MessageEncrypter>,
-    seq: u64,
-}
-
-impl Sealer {
-    fn seal(&mut self, typ: rustls::ContentType, payload: &[u8]) -> Vec<u8> {
-        let message = rustls::crypto::cipher::OutboundPlainMessage {
-            typ,
-            version: rustls::ProtocolVersion::TLSv1_2,
-            payload: rustls::crypto::cipher::OutboundChunks::Single(payload),
-        };
-        let sealed = self.encrypter.encrypt(message, self.seq).unwrap().encode();
-        self.seq += 1;
-        sealed
-    }
 }
 
 async fn tls12_read_half_and_server_records() -> (BoxRead, BoxWrite, TcpStream, Sealer) {

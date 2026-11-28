@@ -53,6 +53,16 @@ pub(super) struct ServerCerts {
     _watch: Option<DropGuard>,
 }
 
+#[cfg(test)]
+impl ServerCerts {
+    pub(super) fn fixed(certs: Arc<Certs>) -> Self {
+        ServerCerts {
+            certs,
+            _watch: None,
+        }
+    }
+}
+
 enum Source {
     Pem(Vec<u8>),
     File(PathBuf),

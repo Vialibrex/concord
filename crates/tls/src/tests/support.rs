@@ -238,6 +238,10 @@ pub fn pem_of(der: &CertificateDer<'_>) -> String {
     encode("CERTIFICATE", der.as_ref())
 }
 
+pub fn key_pem_of(pkcs8: &[u8]) -> String {
+    base64_pem::encode("PRIVATE KEY", pkcs8)
+}
+
 mod base64_pem {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD;
@@ -251,5 +255,25 @@ mod base64_pem {
         }
         out.push_str(&format!("-----END {label}-----\n"));
         out
+    }
+}
+
+/// Seals records of any type as the peer would, for a test that sends what a real
+/// peer would not.
+pub(super) struct Sealer {
+    pub(super) encrypter: Box<dyn rustls::crypto::cipher::MessageEncrypter>,
+    pub(super) seq: u64,
+}
+
+impl Sealer {
+    pub(super) fn seal(&mut self, typ: rustls::ContentType, payload: &[u8]) -> Vec<u8> {
+        let message = rustls::crypto::cipher::OutboundPlainMessage {
+            typ,
+            version: rustls::ProtocolVersion::TLSv1_2,
+            payload: rustls::crypto::cipher::OutboundChunks::Single(payload),
+        };
+        let sealed = self.encrypter.encrypt(message, self.seq).unwrap().encode();
+        self.seq += 1;
+        sealed
     }
 }

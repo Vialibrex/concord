@@ -191,15 +191,19 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   `routing-mark` and, on the stream protocols, TLS with `client-auth-type`, `ws-path` and `grpc-service-name`.
   `IN-NAME`, `IN-TYPE`, `IN-USER` and `IN-PORT` match their flows as in mihomo. A listener of another type, or one
   that asks for something not served (`reality-config`, `shadow-tls`, `res-tls`, `jls`, `tlsmirror-config`,
-  `mkcp-config`, `mekya-config`, `kcp-tun`, `ech-key`, `xhttp-config`, VLESS `decryption` or the `xtls-rprx-vision`
-  flow, Trojan `ss-option`, Shadowsocks `simple-obfs`, TLS on `http`, `socks` or `mixed`), stays closed with a
-  `listener_skipped` warning while the rest of the profile loads. sing-mux (smux, yamux and h2mux, with
-  `mux-option` padding and Brutal) and Mux.Cool, its TCP sessions and XUDP alike, are served as in mihomo. A sing-mux
-  stream whose destination cannot be reached closes without the error status mihomo writes first. Brutal is set
-  only on Linux and Android, where the tcp-brutal module must be loaded, and only for a session on the accepted TCP
-  connection itself: elsewhere a listener that enables it is skipped, and a session inside TLS, a carrier, QUIC or
-  another mux has its exchange refused, as in mihomo. An `anytls` listener takes `users` and `padding-scheme` and
-  needs TLS or `allow-insecure`; a password it does not know closes the connection, as in mihomo. VMess takes AEAD requests only, so a client with `alterId`
+  `mkcp-config`, `mekya-config`, `kcp-tun`, `ech-key`, `xhttp-config`, VLESS `decryption`, Trojan `ss-option`,
+  Shadowsocks `simple-obfs`, TLS on `http`, `socks` or `mixed`), stays closed with a `listener_skipped` warning while
+  the rest of the profile loads. sing-mux (smux, yamux and h2mux, with `mux-option` padding and Brutal) and Mux.Cool,
+  its TCP sessions and XUDP alike, are served as in mihomo. A sing-mux stream whose destination cannot be reached
+  closes without the error status mihomo writes first. Brutal is set only on Linux and Android, where the tcp-brutal
+  module must be loaded, and only for a session on the accepted TCP connection itself: elsewhere a listener that
+  enables it is skipped, and a session inside TLS, a carrier, QUIC or another mux has its exchange refused, as in
+  mihomo. A VLESS user with the `xtls-rprx-vision` flow is served over the listener's own TLS when nothing is carried
+  over it: as in mihomo, a request without a flow is still taken from that user, a Vision request needs TLS 1.3 and
+  TCP or Mux.Cool, and past an inner TLS 1.3 handshake both directions go to the socket, unless the inner suite is
+  `TLS_AES_128_CCM_8_SHA256`. An `anytls` listener takes `users` and `padding-scheme` and needs TLS or
+  `allow-insecure`; a password it does not know closes the connection, as in mihomo. VMess takes AEAD requests only,
+  so a client with `alterId`
   above 0 cannot connect; mihomo also takes the legacy header. A Trojan request with an unknown key is closed, with no
   fallback, and one with the trojan-go mux command (`0x7f`) is closed too. A Shadowsocks server takes the ciphers its
   node does: `aes-192-gcm`, which mihomo's server also takes, is not served. A `hysteria2` listener serves

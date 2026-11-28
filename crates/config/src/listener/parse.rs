@@ -633,9 +633,6 @@ fn vless_server(f: &mut Fields<'_>) -> R<VlessServer> {
             flow: user.remove(0),
         })
         .collect();
-    if let Some(user) = users.iter().find(|user| !user.flow.is_empty()) {
-        return skip(format!("flow '{}' is not served yet", user.flow));
-    }
     let decryption = f.string("decryption")?;
     if !decryption.is_empty() && decryption != "none" {
         return skip("option 'decryption' is not served yet");

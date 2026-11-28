@@ -75,6 +75,11 @@ impl Mux {
             socket: serve.brutal.as_ref().and_then(|_| duplicate(stream)),
         }
     }
+
+    #[cfg(test)]
+    pub(super) fn may_run_brutal(&self) -> bool {
+        self.socket.is_some()
+    }
 }
 
 #[cfg(unix)]

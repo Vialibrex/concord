@@ -3,9 +3,16 @@ use std::sync::Arc;
 
 use concord_common::BoxStream;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::client::{EchConfig, EchMode, Resumption, UnbufferedClientConnection};
+use rustls::client::{
+    ClientConnectionData, EchConfig, EchMode, Resumption, UnbufferedClientConnection,
+};
+use rustls::kernel::KernelConnection;
+use rustls::server::{ServerConfig, ServerConnectionData, UnbufferedServerConnection};
 use rustls::unbuffered::{ConnectionState, EncodeError, InsufficientSizeError, UnbufferedStatus};
-use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme, SupportedProtocolVersion};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, ExtractedSecrets, SignatureScheme,
+    SupportedProtocolVersion,
+};
 use rustls_pki_types::{CertificateDer, EchConfigListBytes, ServerName, UnixTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -137,7 +144,8 @@ pub(crate) async fn connect(
     } else {
         RecordIo::unaligned(io)
     };
-    let handover = handshake(config, name, &mut io).await?;
+    let conn = UnbufferedClientConnection::new(config.clone(), name).map_err(tls_error)?;
+    let handover = handshake(conn, &mut io).await?;
     let keys = Keys::from_rustls(handover.secrets, handover.kernel)?;
     Ok(RecordStream::new(
         io,
@@ -146,6 +154,17 @@ pub(crate) async fn connect(
         handover.leftover,
         handover.early,
     ))
+}
+
+/// The server side of [`connect`]: a config that allows secret extraction, and records
+/// aligned so that a caller can take the transport back at a record boundary.
+pub(crate) async fn accept(config: &Arc<ServerConfig>, io: BoxStream) -> io::Result<RecordStream> {
+    let mut io = RecordIo::new(io);
+    let conn = UnbufferedServerConnection::new(config.clone()).map_err(tls_error)?;
+    let handover = handshake(conn, &mut io).await?;
+    let keys = Keys::from_rustls(handover.secrets, handover.kernel)?;
+    let records = RecordStream::new(io, keys, handover.alpn, handover.leftover, handover.early);
+    Ok(records.serving())
 }
 
 const HANDSHAKE_READ: usize = 16 * 1024 + 2048 + 5;
@@ -169,22 +188,155 @@ fn tls_error(err: rustls::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, err)
 }
 
-/// Drives rustls's unbuffered client to the end of the handshake, then takes the traffic
-/// secrets so each direction can run its own record layer.
-struct Handover {
-    secrets: rustls::ExtractedSecrets,
-    kernel: rustls::kernel::KernelConnection<rustls::client::ClientConnectionData>,
+/// Either side of rustls's unbuffered connection, which the handshake drives alike.
+trait Unbuffered {
+    type Data: std::marker::Send + 'static;
+
+    fn process<'c, 'i>(
+        &'c mut self,
+        incoming: &'i mut [u8],
+    ) -> UnbufferedStatus<'c, 'i, Self::Data>;
+    fn is_handshaking(&self) -> bool;
+    fn alpn(&self) -> Option<Vec<u8>>;
+    fn into_kernel(self)
+    -> Result<(ExtractedSecrets, KernelConnection<Self::Data>), rustls::Error>;
+}
+
+impl Unbuffered for UnbufferedClientConnection {
+    type Data = ClientConnectionData;
+
+    fn process<'c, 'i>(
+        &'c mut self,
+        incoming: &'i mut [u8],
+    ) -> UnbufferedStatus<'c, 'i, Self::Data> {
+        self.process_tls_records(incoming)
+    }
+
+    fn is_handshaking(&self) -> bool {
+        (**self).is_handshaking()
+    }
+
+    fn alpn(&self) -> Option<Vec<u8>> {
+        self.alpn_protocol().map(<[u8]>::to_vec)
+    }
+
+    fn into_kernel(
+        self,
+    ) -> Result<(ExtractedSecrets, KernelConnection<Self::Data>), rustls::Error> {
+        self.dangerous_into_kernel_connection()
+    }
+}
+
+impl Unbuffered for UnbufferedServerConnection {
+    type Data = ServerConnectionData;
+
+    fn process<'c, 'i>(
+        &'c mut self,
+        incoming: &'i mut [u8],
+    ) -> UnbufferedStatus<'c, 'i, Self::Data> {
+        self.process_tls_records(incoming)
+    }
+
+    fn is_handshaking(&self) -> bool {
+        (**self).is_handshaking()
+    }
+
+    fn alpn(&self) -> Option<Vec<u8>> {
+        self.alpn_protocol().map(<[u8]>::to_vec)
+    }
+
+    fn into_kernel(
+        self,
+    ) -> Result<(ExtractedSecrets, KernelConnection<Self::Data>), rustls::Error> {
+        self.dangerous_into_kernel_connection()
+    }
+}
+
+/// Drives rustls's unbuffered connection to the end of the handshake, then takes the
+/// traffic secrets so each direction can run its own record layer.
+struct Handover<D> {
+    secrets: ExtractedSecrets,
+    kernel: KernelConnection<D>,
     alpn: Option<Vec<u8>>,
     leftover: Vec<u8>,
     early: Vec<u8>,
 }
 
-async fn handshake(
-    config: &Arc<ClientConfig>,
-    name: ServerName<'static>,
+fn encode<D>(
+    data: &mut rustls::unbuffered::EncodeTlsData<'_, D>,
+    outgoing: &mut Vec<u8>,
+    encoded: usize,
+) -> io::Result<usize> {
+    loop {
+        match data.encode(outgoing.get_mut(encoded..).unwrap_or_default()) {
+            Ok(n) => return Ok(n),
+            Err(EncodeError::InsufficientSize(InsufficientSizeError { required_size })) => {
+                outgoing.resize(encoded + required_size, 0);
+            }
+            Err(err) => return Err(io::Error::other(err.to_string())),
+        }
+    }
+}
+
+/// What the handshake had read and not yet processed, and encoded and not yet sent. rustls
+/// keeps ranges into the read buffer between calls, so each call takes the same buffer.
+struct Pending<'a> {
+    incoming: &'a mut [u8],
+    used: usize,
+    outgoing: &'a mut Vec<u8>,
+    encoded: usize,
+}
+
+/// rustls queues the fatal alert for an error it reports, and gives it out on the next call
+/// only; the handshake sends it, as tokio-rustls and Go do, before it fails.
+async fn send_alert<C: Unbuffered>(
+    conn: &mut C,
     io: &mut RecordIo<BoxStream>,
-) -> io::Result<Handover> {
-    let mut conn = UnbufferedClientConnection::new(config.clone(), name).map_err(tls_error)?;
+    pending: Pending<'_>,
+) {
+    let Pending {
+        incoming,
+        mut used,
+        outgoing,
+        mut encoded,
+    } = pending;
+    for _ in 0..4 {
+        let UnbufferedStatus { discard, state } =
+            conn.process(incoming.get_mut(..used).unwrap_or_default());
+        let more = match state {
+            Ok(ConnectionState::EncodeTlsData(mut data)) => {
+                match encode(&mut data, outgoing, encoded) {
+                    Ok(n) => {
+                        encoded += n;
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
+            Ok(ConnectionState::TransmitTlsData(data)) => {
+                data.done();
+                false
+            }
+            _ => false,
+        };
+        incoming.copy_within(discard..used, 0);
+        used -= discard;
+        if !more {
+            break;
+        }
+    }
+    if encoded > 0 {
+        let _ = io
+            .write_all(outgoing.get(..encoded).unwrap_or_default())
+            .await;
+        let _ = io.flush().await;
+    }
+}
+
+async fn handshake<C: Unbuffered>(
+    mut conn: C,
+    io: &mut RecordIo<BoxStream>,
+) -> io::Result<Handover<C::Data>> {
     let mut incoming = vec![0u8; HANDSHAKE_READ];
     let mut used = 0;
     let mut outgoing: Vec<u8> = Vec::new();
@@ -192,22 +344,28 @@ async fn handshake(
     let mut early = Vec::new();
     loop {
         let UnbufferedStatus { discard, state } =
-            conn.process_tls_records(incoming.get_mut(..used).unwrap_or_default());
+            conn.process(incoming.get_mut(..used).unwrap_or_default());
         let mut blocked = false;
-        let mut done = false;
-        match state.map_err(tls_error)? {
-            ConnectionState::EncodeTlsData(mut data) => loop {
-                match data.encode(outgoing.get_mut(encoded..).unwrap_or_default()) {
-                    Ok(n) => {
-                        encoded += n;
-                        break;
-                    }
-                    Err(EncodeError::InsufficientSize(InsufficientSizeError { required_size })) => {
-                        outgoing.resize(encoded + required_size, 0);
-                    }
-                    Err(err) => return Err(io::Error::other(err.to_string())),
-                }
-            },
+        let mut writable = false;
+        let state = match state {
+            Ok(state) => state,
+            Err(err) => {
+                incoming.copy_within(discard..used, 0);
+                used -= discard;
+                let pending = Pending {
+                    incoming: &mut incoming,
+                    used,
+                    outgoing: &mut outgoing,
+                    encoded,
+                };
+                send_alert(&mut conn, io, pending).await;
+                return Err(tls_error(err));
+            }
+        };
+        match state {
+            ConnectionState::EncodeTlsData(mut data) => {
+                encoded += encode(&mut data, &mut outgoing, encoded)?;
+            }
             ConnectionState::TransmitTlsData(data) => {
                 io.write_all(outgoing.get(..encoded).unwrap_or_default())
                     .await?;
@@ -221,7 +379,7 @@ async fn handshake(
                     early.extend_from_slice(record.map_err(tls_error)?.payload);
                 }
             }
-            ConnectionState::WriteTraffic(_) => done = true,
+            ConnectionState::WriteTraffic(_) => writable = true,
             ConnectionState::PeerClosed | ConnectionState::Closed => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -232,9 +390,10 @@ async fn handshake(
         }
         incoming.copy_within(discard..used, 0);
         used -= discard;
-        if done {
+        if writable && !conn.is_handshaking() {
             break;
         }
+        blocked |= writable;
         if blocked {
             if used == incoming.len() {
                 if incoming.len() >= MAX_HANDSHAKE_BUFFER {
@@ -262,8 +421,8 @@ async fn handshake(
             .await?;
         io.flush().await?;
     }
-    let alpn = conn.alpn_protocol().map(<[u8]>::to_vec);
-    let (secrets, kernel) = conn.dangerous_into_kernel_connection().map_err(tls_error)?;
+    let alpn = conn.alpn();
+    let (secrets, kernel) = conn.into_kernel().map_err(tls_error)?;
     incoming.truncate(used);
     Ok(Handover {
         secrets,

@@ -152,6 +152,15 @@ fn protocol_cases(port: u16) -> Vec<(String, String, Option<&'static str>)> {
         format!("{{name: out, type: anytls, server: 127.0.0.1, port: {port}, password: secret, skip-cert-verify: true, udp: true}}"),
         Some("alice"),
     ));
+    cases.push((
+        format!(
+            "{{name: in, type: vless, listen: 127.0.0.1, port: {port}, certificate: {:?}, private-key: {:?}, users: [{{username: erin, uuid: {UUID}, flow: xtls-rprx-vision}}]}}",
+            made.cert.pem(),
+            made.signing_key.serialize_pem()
+        ),
+        format!("{{name: out, type: vless, server: 127.0.0.1, port: {port}, uuid: {UUID}, flow: xtls-rprx-vision, tls: true, skip-cert-verify: true, udp: true}}"),
+        Some("erin"),
+    ));
     cases
 }
 
@@ -231,5 +240,115 @@ async fn a_quic_listener_whose_obfuscation_changes_serves_the_new_key_after_a_re
     })
     .await
     .expect("the reloaded listener serves the new key");
+    rig.engine.shutdown().await;
+}
+
+/// A TLS 1.3 echo server, so that a Vision flow to it hands both directions to the socket,
+/// and the records it read and wrote.
+#[cfg(feature = "server")]
+async fn tls13_echo() -> (
+    SocketAddr,
+    rustls_pki_types::CertificateDer<'static>,
+    concord_test_support::tap::Seen,
+) {
+    let made = rcgen::generate_simple_self_signed(vec!["inner.test".to_owned()]).unwrap();
+    let key = rustls_pki_types::PrivateKeyDer::try_from(made.signing_key.serialize_der()).unwrap();
+    let config = tokio_rustls::rustls::ServerConfig::builder_with_protocol_versions(&[
+        &tokio_rustls::rustls::version::TLS13,
+    ])
+    .with_no_client_auth()
+    .with_single_cert(vec![made.cert.der().clone()], key)
+    .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = concord_test_support::tap::Seen::default();
+    let kept = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            let stream = concord_test_support::tap::Recorded::new(stream, &kept);
+            tokio::spawn(async move {
+                let Ok(stream) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let (mut read, mut write) = tokio::io::split(stream);
+                let _ = tokio::io::copy(&mut read, &mut write).await;
+                let _ = write.shutdown().await;
+            });
+        }
+    });
+    (addr, made.cert.der().clone(), seen)
+}
+
+#[cfg(feature = "server")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_vision_listener_carries_an_inner_tls13_connection_both_ways() {
+    let (echo, inner, echoed) = tls13_echo().await;
+    let port = port_to_bind_later();
+    let (relay, outer) =
+        concord_test_support::tap::tap(SocketAddr::from((Ipv4Addr::LOCALHOST, port))).await;
+    let relay = relay.port();
+    let made = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+    let rig = Rig::new();
+    rig.apply(&format!(
+        "proxies:\n  - {{name: out, type: vless, server: 127.0.0.1, port: {relay}, uuid: {UUID}, flow: xtls-rprx-vision, tls: true, skip-cert-verify: true}}\nlisteners:\n  - {{name: in, type: vless, listen: 127.0.0.1, port: {port}, certificate: {:?}, private-key: {:?}, users: [{{username: erin, uuid: {UUID}, flow: xtls-rprx-vision}}]}}\nrules:\n  - IN-NAME,in,DIRECT\n  - MATCH,out\n",
+        made.cert.pem(),
+        made.signing_key.serialize_pem()
+    ))
+    .await
+    .unwrap();
+    rig.engine.start_listeners().await;
+
+    let stream = socks_connect(rig.mixed, echo).await.unwrap();
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    roots.add(inner).unwrap();
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(
+        tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    ));
+    let name = rustls_pki_types::ServerName::try_from("inner.test").unwrap();
+    let secured = timeout(Duration::from_secs(10), tls.connect(name, stream))
+        .await
+        .expect("the inner handshake stalled")
+        .unwrap();
+    let (mut read, mut write) = tokio::io::split(secured);
+    let sent: Vec<u8> = (0..1u32 << 20).map(|i| (i % 251) as u8).collect();
+    let sending = {
+        let sent = sent.clone();
+        tokio::spawn(async move {
+            write.write_all(&sent).await.unwrap();
+            write.flush().await.unwrap();
+            write
+        })
+    };
+    let mut got = vec![0u8; sent.len()];
+    timeout(Duration::from_secs(20), read.read_exact(&mut got))
+        .await
+        .expect("the echo stalled")
+        .unwrap();
+    assert!(got == sent, "the echo differs from what was sent");
+    drop(sending.await.unwrap());
+    let middle = |bytes: Vec<u8>| bytes[bytes.len() / 2..][..1024].to_vec();
+    assert!(
+        concord_test_support::tap::carries(&outer.read(), &middle(echoed.read())),
+        "the client's inner records were not sent to the socket as they are"
+    );
+    assert!(
+        concord_test_support::tap::carries(&outer.written(), &middle(echoed.written())),
+        "the server's inner records were not sent to the socket as they are"
+    );
+    let served = rig
+        .engine
+        .connections()
+        .into_iter()
+        .filter(|record| &*record.meta.inbound.name == "in")
+        .collect::<Vec<_>>();
+    assert!(
+        served
+            .iter()
+            .any(|record| record.meta.inbound.user.as_deref() == Some("erin"))
+    );
     rig.engine.shutdown().await;
 }

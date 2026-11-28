@@ -19,6 +19,7 @@ use std::time::Duration;
 use concord_common::{CoreEvent, CoreOptions, EventSink};
 use concord_engine::{Engine, EngineConfig, SetupRequest};
 use concord_platform::NativePlatform;
+use concord_test_support::tap::{Recorded, Seen, carries, tap};
 use concord_test_support::{port_to_bind_later, tcp_echo, udp_echo};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -151,6 +152,16 @@ fn cases() -> Vec<Case> {
                 "type: vless, uuid: {UUID}, udp: true, tls: true, {trust}, network: ws, ws-opts: {{path: /v}}"
             ),
             None,
+        ),
+        case(
+            "vless-vision",
+            &format!(
+                "type: vless, {tls}, users: [{{username: erin, uuid: {UUID}, flow: xtls-rprx-vision}}]"
+            ),
+            &format!(
+                "type: vless, uuid: {UUID}, udp: true, tls: true, {trust}, flow: xtls-rprx-vision"
+            ),
+            Some("erin"),
         ),
         case(
             "vless-grpc",
@@ -502,6 +513,104 @@ async fn socks_tcp(
     Ok((rd, wr))
 }
 
+/// A TLS 1.3 echo server that keeps the records it read and wrote: through Vision both
+/// directions of it leave the outer TLS for the socket.
+async fn tls13_echo() -> (SocketAddr, rustls_pki_types::CertificateDer<'static>, Seen) {
+    let made = rcgen::generate_simple_self_signed(vec!["inner.test".to_owned()]).unwrap();
+    let key = rustls_pki_types::PrivateKeyDer::try_from(made.signing_key.serialize_der()).unwrap();
+    let config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_no_client_auth()
+        .with_single_cert(vec![made.cert.der().clone()], key)
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen = Seen::default();
+    let kept = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            let stream = Recorded::new(stream, &kept);
+            tokio::spawn(async move {
+                let Ok(stream) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let (mut read, mut write) = tokio::io::split(stream);
+                let _ = tokio::io::copy(&mut read, &mut write).await;
+            });
+        }
+    });
+    (addr, made.cert.der().clone(), seen)
+}
+
+/// A TLS 1.3 round trip through the SOCKS port to `target`, with several sizes each way.
+async fn socks_inner_tls(
+    port: u16,
+    target: SocketAddr,
+    trusted: rustls_pki_types::CertificateDer<'static>,
+) -> std::io::Result<()> {
+    let SocketAddr::V4(v4) = target else {
+        panic!("IPv4 expected")
+    };
+    let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await?;
+    stream.write_all(&[5, 1, 0]).await?;
+    let mut method = [0u8; 2];
+    stream.read_exact(&mut method).await?;
+    let mut request = vec![5, 1, 0, 1];
+    request.extend_from_slice(&v4.ip().octets());
+    request.extend_from_slice(&v4.port().to_be_bytes());
+    stream.write_all(&request).await?;
+    let mut reply = [0u8; 10];
+    stream.read_exact(&mut reply).await?;
+    if reply[1] != 0 {
+        return Err(std::io::Error::other(format!("SOCKS reply {}", reply[1])));
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(trusted).map_err(std::io::Error::other)?;
+    let config = rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let name =
+        rustls_pki_types::ServerName::try_from("inner.test").map_err(std::io::Error::other)?;
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+        .connect(name, stream)
+        .await?;
+    let (mut read, mut write) = tokio::io::split(tls);
+    for size in [5usize, 200_000, 3000] {
+        let data: Vec<u8> = (0..size)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        let sent = data.clone();
+        let (written, got) = tokio::join!(write.write_all(&sent), async {
+            let mut got = vec![0u8; size];
+            read.read_exact(&mut got).await.map(|_| got)
+        });
+        written?;
+        if got? != data {
+            return Err(std::io::Error::other("the inner echo differs"));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the middle of what the echo read and of what it wrote crossed the outer
+/// connection as it is, which only a Vision flow that went to the socket both ways does.
+fn went_direct(echo: &Seen, outer: &Seen) -> Result<(), String> {
+    let middle = |bytes: Vec<u8>| {
+        let start = bytes.len() / 2;
+        bytes[start..(start + 1024).min(bytes.len())].to_vec()
+    };
+    if !carries(&outer.read(), &middle(echo.read())) {
+        return Err("the client's inner records did not reach the server as they are".into());
+    }
+    if !carries(&outer.written(), &middle(echo.written())) {
+        return Err("the server's inner records did not reach the client as they are".into());
+    }
+    Ok(())
+}
+
 /// A SOCKS5 UDP association: the control stream that holds it, the client socket and the
 /// relay to send to.
 struct Association {
@@ -632,8 +741,20 @@ async fn mihomo_clients_reach_every_concord_server() {
         !started.contains("ERROR") && !started.contains("is not started"),
         "a Concord listener did not start:\n{started}"
     );
-    let mut mihomo = start_mihomo(&binary, client_dir.path(), &cases, &ports);
+    let mut taps = BTreeMap::new();
+    let mut dials = Vec::new();
+    for (case, (server, client)) in cases.iter().zip(&ports) {
+        if case.name.contains("vision") {
+            let (relay, seen) = tap(SocketAddr::from((Ipv4Addr::LOCALHOST, *server))).await;
+            taps.insert(case.name, seen);
+            dials.push((relay.port(), *client));
+        } else {
+            dials.push((*server, *client));
+        }
+    }
+    let mut mihomo = start_mihomo(&binary, client_dir.path(), &cases, &dials);
     wait_listening(&mut mihomo, ports.iter().map(|(_, client)| *client)).await;
+    let (inner, trusted, echoed) = tls13_echo().await;
 
     let tcp = tcp_echo().await;
     let udp = udp_echo().await;
@@ -645,6 +766,17 @@ async fn mihomo_clients_reach_every_concord_server() {
             Ok(Ok(halves)) => held = Some(halves),
             Ok(Err(err)) => failures.push(format!("{} tcp: {err}", case.name)),
             Err(_) => failures.push(format!("{} tcp: timed out", case.name)),
+        }
+        if let Some(outer) = taps.get(case.name) {
+            match timeout(PATIENCE, socks_inner_tls(*client, inner, trusted.clone())).await {
+                Ok(Ok(())) => {
+                    if let Err(err) = went_direct(&echoed, outer) {
+                        failures.push(format!("{} inner tls: {err}", case.name));
+                    }
+                }
+                Ok(Err(err)) => failures.push(format!("{} inner tls: {err}", case.name)),
+                Err(_) => failures.push(format!("{} inner tls: timed out", case.name)),
+            }
         }
         if case.udp {
             match timeout(PATIENCE, socks_udp(*client, udp)).await {

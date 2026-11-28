@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+pub mod tap;
+
 /// A loopback TCP port that was free a moment ago.
 pub fn free_port() -> u16 {
     std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))

@@ -11,8 +11,8 @@ use concord_common::{
 };
 use concord_config::proxy::{ProxyDef, VlessOpts};
 
-pub(crate) use self::stream::{CMD_MUX, CMD_TCP, CMD_UDP};
-use self::stream::{FLOW_VISION, ResponseSkip, Vision, request_header};
+pub(crate) use self::stream::{CMD_MUX, CMD_TCP, CMD_UDP, FLOW_VISION, Vision};
+use self::stream::{ResponseSkip, request_header};
 use crate::addr_codec::{MAX_ADDR_LEN, PACKET_ADDR};
 use crate::ctx::{BuildCtx, BuildError};
 use crate::dgram::{Decoded, Decoder, Encoder, StreamSession};

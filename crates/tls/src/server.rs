@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arc_swap::ArcSwap;
-use concord_common::Stream;
+use concord_common::{BoxStream, Stream};
 use rustls::client::danger::HandshakeSignatureValid;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
@@ -21,6 +21,7 @@ use rustls_pki_types::pem::{self, PemObject};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_rustls::TlsAcceptor;
 
+use crate::TlsConn;
 use crate::policy::provider;
 
 /// Go's `tls.ClientAuthType`.
@@ -122,13 +123,17 @@ fn certified(
 #[derive(Clone)]
 pub struct TlsServer {
     acceptor: TlsAcceptor,
+    records: Arc<ServerConfig>,
 }
 
 impl TlsServer {
     pub fn new(options: &ServerOptions<'_>) -> Result<Self, ServerTlsError> {
         let config = server_config(options, rustls::DEFAULT_VERSIONS)?;
+        let mut records = config.clone();
+        records.enable_secret_extraction = true;
         Ok(TlsServer {
             acceptor: TlsAcceptor::from(Arc::new(config)),
+            records: Arc::new(records),
         })
     }
 
@@ -139,6 +144,13 @@ impl TlsServer {
 
     pub async fn accept<S: Stream>(&self, stream: S) -> io::Result<ServerTls<S>> {
         Ok(ServerTls(self.acceptor.accept(stream).await?))
+    }
+
+    /// The same handshake, past which the connection keeps its own record layer and hands
+    /// out the transport beneath at a record boundary, as XTLS Vision needs.
+    pub async fn accept_records(&self, stream: BoxStream) -> io::Result<TlsConn> {
+        let records = crate::rustls_backend::accept(&self.records, stream).await?;
+        Ok(TlsConn::Record(Box::new(records)))
     }
 }
 

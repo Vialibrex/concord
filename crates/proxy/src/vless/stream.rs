@@ -66,6 +66,15 @@ impl<S> ResponseSkip<S> {
         }
     }
 
+    /// A server's request header was read before the stream was wrapped.
+    #[cfg(feature = "server")]
+    fn passed(inner: S) -> Self {
+        ResponseSkip {
+            inner,
+            state: Response::Done,
+        }
+    }
+
     fn get_mut(&mut self) -> &mut S {
         &mut self.inner
     }
@@ -349,24 +358,44 @@ struct VisionWriter<W> {
 
 impl Vision {
     pub(crate) fn new(tls: TlsConn, header: Vec<u8>, user: [u8; 16]) -> io::Result<Self> {
-        if !tls.is_tls13() {
-            return Err(io::Error::other(
-                "XTLS Vision based on TLS 1.3 outer connection",
-            ));
-        }
-        let (read, write) = tls
-            .into_halves()
-            .map_err(|_| io::Error::other("XTLS Vision needs the TLS record layer"))?;
+        let (read, write) = halves(tls)?;
         Ok(Self::from_halves(read, write, header, user))
     }
+
+    /// The server's side, past the request header it read: its writes start with
+    /// `response`, and the user's UUID opens the padding both ways, as mihomo's
+    /// `vision.NewConn` on either side.
+    #[cfg(feature = "server")]
+    pub(crate) fn serve(tls: TlsConn, response: Vec<u8>, user: [u8; 16]) -> io::Result<Self> {
+        let (read, write) = halves(tls)?;
+        Ok(Self::over(
+            ResponseSkip::passed(read),
+            HeadFirst::new(write, response),
+            user,
+        ))
+    }
+}
+
+fn halves(tls: TlsConn) -> io::Result<(TlsRead, TlsWrite)> {
+    if !tls.is_tls13() {
+        return Err(io::Error::other(
+            "XTLS Vision based on TLS 1.3 outer connection",
+        ));
+    }
+    tls.into_halves()
+        .map_err(|_| io::Error::other("XTLS Vision needs the TLS record layer"))
 }
 
 impl<R, W> Vision<R, W> {
     pub(super) fn from_halves(read: R, write: W, header: Vec<u8>, user: [u8; 16]) -> Self {
+        Self::over(ResponseSkip::new(read), HeadFirst::new(write, header), user)
+    }
+
+    fn over(read: ResponseSkip<R>, write: HeadFirst<W>, user: [u8; 16]) -> Self {
         let filter = Arc::new(Mutex::new(Filter::new()));
         Vision {
             reader: VisionReader {
-                io: ResponseSkip::new(read),
+                io: read,
                 user,
                 filter: filter.clone(),
                 read_process: true,
@@ -381,7 +410,7 @@ impl<R, W> Vision<R, W> {
                 direct_read: false,
             },
             writer: VisionWriter {
-                io: HeadFirst::new(write, header),
+                io: write,
                 filter,
                 write_filter: true,
                 write_direct: false,
