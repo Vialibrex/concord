@@ -243,7 +243,9 @@ fn singbox_profile(launch: &Launch<'_>) -> Result<Value, String> {
                 "password": node["password"],
                 "quic": node["quic"],
                 "udp_over_tcp": node["udp-over-tcp"],
-                "tls": {"enabled": true, "server_name": node["sni"], "certificate_path": trust},
+                // cronet dials its TLS name, not `server`: `localhost` would go to ::1 first,
+                // and its QUIC does not fall back to the server's 127.0.0.1.
+                "tls": {"enabled": true, "server_name": node["server"], "certificate_path": trust},
             })
         }
         Some(_) => {
@@ -659,6 +661,7 @@ mod tests {
         assert_eq!(outbound["quic"], true);
         assert_eq!(outbound["udp_over_tcp"], true);
         assert_eq!(outbound["tls"]["certificate_path"], "/certs/cert.pem");
+        assert_eq!(outbound["tls"]["server_name"], "peer.test");
         assert!(outbound["tls"].get("insecure").is_none());
     }
 

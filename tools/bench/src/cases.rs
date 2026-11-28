@@ -1,6 +1,7 @@
 //! One outbound per protocol and the listener that serves it. Listener and
 //! client fields follow `crates/proxy/tests/interop.rs`.
 
+use std::net::IpAddr;
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -643,11 +644,19 @@ fn singbox_case(spec: Spec, host: &str, port: u16, certs: &Path) -> Option<Case>
     None
 }
 
-pub fn write_certs(dir: &Path) -> std::io::Result<()> {
-    let made = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-        .map_err(std::io::Error::other)?;
-    std::fs::write(dir.join("cert.pem"), made.cert.pem())?;
-    std::fs::write(dir.join("key.pem"), made.signing_key.serialize_pem())?;
+/// Also names the server's address, for a client that dials its TLS name. Valid for days, not
+/// rcgen's centuries: Chromium (sing-box's naive client) refuses a certificate valid for longer
+/// than 398 days even from a root it was handed (ERR_CERT_VALIDITY_TOO_LONG).
+pub fn write_certs(dir: &Path, server: IpAddr) -> std::io::Result<()> {
+    let names = vec!["localhost".to_string(), server.to_string()];
+    let mut params = rcgen::CertificateParams::new(names).map_err(std::io::Error::other)?;
+    let now = time::OffsetDateTime::now_utc();
+    params.not_before = now - time::Duration::days(1);
+    params.not_after = now + time::Duration::days(30);
+    let key = rcgen::KeyPair::generate().map_err(std::io::Error::other)?;
+    let cert = params.self_signed(&key).map_err(std::io::Error::other)?;
+    std::fs::write(dir.join("cert.pem"), cert.pem())?;
+    std::fs::write(dir.join("key.pem"), key.serialize_pem())?;
     crate::openvpn::write_pki(dir)
 }
 

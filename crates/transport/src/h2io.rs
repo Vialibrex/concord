@@ -279,6 +279,14 @@ impl H2Reader {
         }
     }
 
+    /// None once the tunnel has ended: the error is the stream's own reset.
+    fn read_error(&self, cx: &Context<'_>, err: h2::Error) -> Option<io::Error> {
+        match &self.ended {
+            Some(ended) if ended.poll_ended(cx) => None,
+            _ => Some(h2_io_error(err)),
+        }
+    }
+
     fn finish_read(&mut self, released: usize, saw_data: bool) {
         if released > 0
             && let Incoming::Body(recv) = &mut self.incoming
@@ -336,7 +344,11 @@ impl AsyncRead for H2Reader {
                 Incoming::Response(future) => {
                     let response = match Pin::new(future).poll(cx) {
                         Poll::Pending => return Poll::Pending,
-                        Poll::Ready(res) => res.map_err(h2_io_error)?,
+                        Poll::Ready(Ok(response)) => response,
+                        Poll::Ready(Err(err)) => {
+                            this.incoming = Incoming::Done;
+                            return Poll::Ready(this.read_error(cx, err).map_or(Ok(()), Err));
+                        }
                     };
                     let (head, body) = response.into_parts();
                     let checked = match this.check.take() {
@@ -369,12 +381,9 @@ impl AsyncRead for H2Reader {
                     Poll::Ready(Some(Err(err))) => {
                         this.finish_read(released, saw_data);
                         this.incoming = Incoming::Done;
-                        if let Some(ended) = &this.ended
-                            && ended.poll_ended(cx)
-                        {
+                        let Some(err) = this.read_error(cx, err) else {
                             return Poll::Ready(Ok(()));
-                        }
-                        let err = h2_io_error(err);
+                        };
                         if copied > 0 {
                             this.pending_err = Some(err);
                             return Poll::Ready(Ok(()));

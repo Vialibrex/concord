@@ -158,7 +158,7 @@ impl Rig {
         // mihomo reads files only from under its home directory.
         let certs = self.dir.join("server/certs");
         std::fs::create_dir_all(&certs).map_err(|e| e.to_string())?;
-        cases::write_certs(&certs).map_err(|e| e.to_string())?;
+        cases::write_certs(&certs, ip).map_err(|e| e.to_string())?;
         let mut built = self.build_cases(ip, &certs);
         let server = if built.iter().any(|c| c.listener.is_some()) {
             let home = self.dir.join("server");
