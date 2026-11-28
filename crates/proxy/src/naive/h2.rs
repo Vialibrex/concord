@@ -1,6 +1,6 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
 use bytes::Bytes;
@@ -47,10 +47,15 @@ impl Windows {
     }
 }
 
-/// Chromium's SETTINGS, which h2 sends in ascending id order as Chromium does.
+/// The weight octet of naiveproxy's CONNECT: weight 147, Chromium's for SPDY priority 3.
+const CONNECT_WEIGHT: u8 = 146;
+
+/// Chromium's SETTINGS, which h2 sends in ascending id order as Chromium does, and its HPACK
+/// indexing.
 fn builder(windows: Windows) -> h2::client::Builder {
     let mut builder = h2::client::Builder::new();
     builder
+        .index_pseudo_headers(false)
         .header_table_size(HEADER_TABLE)
         .enable_push(false)
         .initial_window_size(windows.stream)
@@ -63,6 +68,7 @@ pub(super) struct Session {
     sender: SendRequest<Bytes>,
     activity: Arc<Activity>,
     going_away: AtomicBool,
+    tunnels: Arc<Mutex<Vec<u32>>>,
 }
 
 /// A CONNECT sent, its answer not yet read.
@@ -70,6 +76,19 @@ pub(super) struct Opened {
     response: ResponseFuture,
     send: h2::SendStream<Bytes>,
     session: Arc<Session>,
+    tunnel: Tunnel,
+}
+
+/// A tunnel stream new ones depend on until it is dropped.
+struct Tunnel {
+    id: u32,
+    tunnels: Arc<Mutex<Vec<u32>>>,
+}
+
+impl Drop for Tunnel {
+    fn drop(&mut self) {
+        concord_common::sync::lock(&self.tunnels).retain(|&id| id != self.id);
+    }
 }
 
 impl Session {
@@ -88,6 +107,7 @@ impl Session {
             sender,
             activity,
             going_away: AtomicBool::new(false),
+            tunnels: Arc::default(),
         }))
     }
 
@@ -128,27 +148,48 @@ impl Session {
         self.activity.close();
     }
 
-    pub(super) async fn open(self: &Arc<Self>, request: Request<()>) -> io::Result<Opened> {
+    /// The CONNECT depends exclusively on the newest tunnel still open, or on the root, as
+    /// Chromium's `Http2PriorityDependencies` places a stream among those of its priority.
+    pub(super) async fn open(self: &Arc<Self>, mut request: Request<()>) -> io::Result<Opened> {
         self.activity.before_stream();
-        let sent = match self.sender.clone().ready().await {
-            Ok(mut sender) => sender.send_request(request, false),
-            Err(err) => Err(err),
-        };
-        let (response, send) = sent.map_err(|err| self.refused(err))?;
+        let mut sender = self
+            .sender
+            .clone()
+            .ready()
+            .await
+            .map_err(|err| self.refused(err))?;
+        let mut tunnels = concord_common::sync::lock(&self.tunnels);
+        request.extensions_mut().insert(h2::ext::StreamPriority {
+            dependency: tunnels.last().copied().unwrap_or(0),
+            weight: CONNECT_WEIGHT,
+            exclusive: true,
+        });
+        let (response, send) = sender
+            .send_request(request, false)
+            .map_err(|err| self.refused(err))?;
+        let id = u32::from(send.stream_id());
+        tunnels.push(id);
+        drop(tunnels);
         Ok(Opened {
             response,
             send,
             session: self.clone(),
+            tunnel: Tunnel {
+                id,
+                tunnels: self.tunnels.clone(),
+            },
         })
     }
 }
 
 impl Opened {
     pub(super) fn early(self, check: ResponseCheck) -> BoxStream {
+        let tunnel = self.tunnel;
         Box::new(
             H2Body::new(self.send, Incoming::Response(self.response))
                 .with_response_check(check)
-                .without_half_close(),
+                .without_half_close()
+                .on_drop(move || drop(tunnel)),
         )
     }
 
@@ -156,12 +197,14 @@ impl Opened {
         self,
         check: impl FnOnce(&http::response::Parts) -> io::Result<()>,
     ) -> io::Result<BoxStream> {
-        let session = self.session;
+        let (session, tunnel) = (self.session, self.tunnel);
         let answer = self.response.await.map_err(|err| session.refused(err))?;
         let (head, body) = answer.into_parts();
         check(&head)?;
         Ok(Box::new(
-            H2Body::new(self.send, Incoming::Body(body)).without_half_close(),
+            H2Body::new(self.send, Incoming::Body(body))
+                .without_half_close()
+                .on_drop(move || drop(tunnel)),
         ))
     }
 }

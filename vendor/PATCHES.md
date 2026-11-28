@@ -38,6 +38,10 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | h2 | Ignore DATA and HEADERS on forgotten client streams | None as of 0.4.20 | Issue and PR to hyperium/h2 with the delayed-DATA-after-reset transport test |
 | h2 | Opt-in split-I/O client direct DATA writes | None as of 0.4.20 | Propose split-transport client API to hyperium/h2 once framing and multi-stream contracts settle |
 | h2 | `SendStream::poll_drained` before a reset | None as of 0.4.20 | Propose to hyperium/h2 with the NaiveProxy tunnel-close transport test |
+| h2 | Request priority through `ext::StreamPriority` | None | None planned: only the NaiveProxy outbound's fingerprint uses it |
+| h2 | Huffman-code a string only when that is shorter | None as of 0.4.20 | PR to hyperium/h2 citing Go's hpack, Chromium's encoder and nghttp2, which all choose so |
+| h2 | `client::Builder::index_pseudo_headers` | None | None planned: only the NaiveProxy outbound's fingerprint uses it |
+| h2 | `SendStream::send_reset_padded` | None | None planned: only the NaiveProxy outbound's fingerprint uses it |
 | mio | High-resolution timed waits on Windows | None | PR to tokio-rs/mio, citing Go's default poller path |
 | mio | Nanosecond timed waits through `epoll_pwait2` on Linux | None | PR to tokio-rs/mio |
 | quinn | `MAX_TRANSMIT_DATAGRAMS` 80 (`MAX_TRANSMIT_SEGMENTS` back to upstream's 10) | n0-computer/noq#636 (noq) | The segment cap is upstream's again; propose only the datagram limit to quinn-rs/quinn |
@@ -119,6 +123,30 @@ The package archive checksum is `7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c
   were seen to (one TLS record, the first HEADERS in the next). Before, the preface went out on its own, SETTINGS in a second write and the
   WINDOW_UPDATE with the first request; `client::handshake` still works that way, as upstream does.
   `h2io::tests::split_handshake_writes_preface_settings_and_window_update_at_once` checks the one write.
+- `src/ext.rs`, `src/client.rs`, `src/proto/streams/streams.rs`, `src/frame/headers.rs`, `src/frame/priority.rs`:
+  a client request may carry an `ext::StreamPriority { dependency, weight, exclusive }` extension; its HEADERS frame
+  then sets PRIORITY and carries the five priority octets (RFC 9113 §6.2), as Chromium's requests do. Upstream sends
+  no priority on requests and `Streams::send_request` clears every extension, so the priority is taken out before the
+  clear. A request without the extension is encoded as before. `h2io::tests::a_request_carries_its_priority_and_raw_values_where_huffman_is_longer`
+  checks the octets; the NaiveProxy outbound chains the dependency as Chromium's `Http2PriorityDependencies` does.
+- `src/hpack/encoder.rs`: a string literal is Huffman-coded only when that is shorter than the raw octets, as Go's
+  hpack and Chromium's HPACK encoder decide; upstream always Huffman-codes. This changes every h2 outbound and the
+  server's responses, but only the bytes of values whose Huffman form is not shorter (such as `CONNECT`, or values of
+  characters the code spends 8 bits or more on), which now go out raw; a decoder reads both. `h2io` tests check a
+  raw value; the transport's gun, xhttp and h2mux interop tests run against it.
+- `src/hpack/encoder.rs`, `src/hpack/table.rs`, `src/codec/mod.rs`, `src/codec/framed_write.rs`, `src/client.rs`:
+  `client::Builder::index_pseudo_headers(false)` keeps pseudo-headers other than `:authority` out of the HPACK
+  dynamic table (sent from the static table or as literals without indexing), as Chromium's encoder does (quiche
+  `HpackEncoder::DefaultPolicy`). The default, `true`, indexes them as upstream does.
+  `h2io::tests::pseudo_headers_other_than_authority_can_stay_out_of_the_dynamic_table` checks both.
+- `src/share.rs`, `src/proto/streams/streams.rs`, `src/proto/streams/send.rs`, `src/proto/streams/prioritize.rs`, `src/proto/streams/stream.rs`, `src/frame/reset.rs`:
+  `SendStream::send_reset_padded(reason, padding)` resets a stream as `send_reset` does, first writing an empty DATA
+  frame with END_STREAM and PADDED whose payload is `padding` octets (the pad-length octet included), when both
+  flow-control windows hold it and the connection window holds at least 72 octets; the padding counts against both
+  windows. This is how Chromium cancels a stream (`SpdySession::EnqueueResetStreamFrame`, naiveproxy
+  `v154.0.8037.49-5`), except that Chromium checks and charges only the connection window; padding counts against
+  the stream's window too (RFC 9113 §6.9.1), so a stream without room for it gets only the reset. The DATA rides in
+  the queued `Reset` frame so the two go out together. `send_reset` is unchanged. `h2io` tests check the frame, the 72-octet floor and the reset that follows.
 - `.cargo_vcs_info.json`, `Cargo.lock`, `Cargo.toml.orig`: crates.io packaging metadata, omitted.
 
 ## mio 1.2.4

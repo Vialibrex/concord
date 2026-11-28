@@ -38,6 +38,8 @@ pub(crate) trait CodecWrite<B> {
     fn max_send_frame_size(&self) -> usize;
     fn set_max_send_frame_size(&mut self, val: usize);
     fn set_send_header_table_size(&mut self, val: usize);
+    // Concord: see `client::Builder::index_pseudo_headers`.
+    fn set_index_pseudo_headers(&mut self, enabled: bool);
     fn take_last_data_frame(&mut self) -> Option<Data<B>>;
     fn is_write_empty(&self) -> bool;
 }
@@ -86,6 +88,10 @@ where
 
     fn set_send_header_table_size(&mut self, val: usize) {
         FramedWrite::set_header_table_size(self, val);
+    }
+
+    fn set_index_pseudo_headers(&mut self, enabled: bool) {
+        FramedWrite::set_index_pseudo_headers(self, enabled);
     }
 
     fn take_last_data_frame(&mut self) -> Option<Data<B>> {
@@ -354,6 +360,10 @@ where
 
     fn set_send_header_table_size(&mut self, val: usize) {
         Codec::set_send_header_table_size(self, val);
+    }
+
+    fn set_index_pseudo_headers(&mut self, enabled: bool) {
+        self.framed_write().set_index_pseudo_headers(enabled);
     }
 
     fn take_last_data_frame(&mut self) -> Option<Data<B>> {

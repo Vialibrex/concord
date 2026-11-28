@@ -340,6 +340,10 @@ where
         use http::Method;
 
         let protocol = request.extensions_mut().remove::<Protocol>();
+        // Concord: see `ext::StreamPriority`.
+        let priority = request
+            .extensions_mut()
+            .remove::<crate::ext::StreamPriority>();
 
         // Clear before taking lock, incase extensions contain a StreamRef.
         request.extensions_mut().clear();
@@ -388,8 +392,13 @@ where
         }
 
         // Convert the message
-        let headers =
-            client::Peer::convert_send_message(stream_id, request, protocol, end_of_stream)?;
+        let headers = client::Peer::convert_send_message(
+            stream_id,
+            request,
+            protocol,
+            priority,
+            end_of_stream,
+        )?;
 
         let mut stream = me.store.insert(stream.id, stream);
 
@@ -1333,6 +1342,16 @@ impl<B> StreamRef<B> {
                 .send
                 .send_trailers(frame, send_buffer, stream, counts, &mut actions.task)
         })
+    }
+
+    // Concord: see `SendStream::send_reset_padded`.
+    pub fn send_reset_padded(&mut self, reason: Reason, padding: u8) {
+        {
+            let mut me = self.opaque.inner.lock().unwrap();
+            let mut stream = me.store.resolve(self.opaque.key);
+            stream.reset_padding = padding;
+        }
+        self.send_reset(reason);
     }
 
     pub fn send_reset(&mut self, reason: Reason) {

@@ -361,6 +361,15 @@ impl<B: Buf> SendStream<B> {
         self.inner.send_reset(reason)
     }
 
+    // Concord: Chromium's stream cancel.
+    /// Resets the stream as `send_reset` does, first sending an empty DATA frame with
+    /// END_STREAM and `padding` octets of padding (the pad-length octet included, at least 1)
+    /// when both flow-control windows hold it and the connection window holds at least 72
+    /// octets, as Chromium cancels a stream. The padding counts against both windows.
+    pub fn send_reset_padded(&mut self, reason: Reason, padding: u8) {
+        self.inner.send_reset_padded(reason, padding.max(1))
+    }
+
     /// Polls to be notified when the client resets this stream.
     ///
     /// If stream is still open, this returns `Poll::Pending`, and

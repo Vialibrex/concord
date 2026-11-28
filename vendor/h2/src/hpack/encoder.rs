@@ -18,6 +18,8 @@ pub struct Encoder {
     /// across frames instead of being allocated and freed per frame. See
     /// `take_scratch` / `return_scratch`.
     scratch: BytesMut,
+    // Concord: false keeps pseudo-headers other than `:authority` out of the dynamic table.
+    index_pseudo_headers: bool,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -35,7 +37,14 @@ impl Encoder {
             max_allowed_size: DEFAULT_MAX_ALLOWED_SIZE,
             size_update: None,
             scratch: BytesMut::new(),
+            index_pseudo_headers: true,
         }
+    }
+
+    // Concord: Chromium's HPACK encoder indexes `:authority` and no other pseudo-header
+    // (quiche `HpackEncoder::DefaultPolicy`).
+    pub(crate) fn set_index_pseudo_headers(&mut self, enabled: bool) {
+        self.index_pseudo_headers = enabled;
     }
 
     #[cfg(test)]
@@ -114,7 +123,12 @@ impl Encoder {
                 // The header has an associated name. In which case, try to
                 // index it in the table.
                 Ok(header) => {
-                    let index = self.table.index(header);
+                    // Concord: see `client::Builder::index_pseudo_headers`.
+                    let index = if self.index_pseudo_headers || !unindexed_pseudo(&header) {
+                        self.table.index(header)
+                    } else {
+                        self.table.index_static_only(header)
+                    };
                     self.encode_header(&index, dst);
 
                     last_index = Some(index);
@@ -228,6 +242,18 @@ impl Default for Encoder {
     }
 }
 
+// Concord: see `Encoder::set_index_pseudo_headers`.
+fn unindexed_pseudo(header: &Header) -> bool {
+    matches!(
+        header,
+        Header::Method(_)
+            | Header::Scheme(_)
+            | Header::Path(_)
+            | Header::Protocol(_)
+            | Header::Status(_)
+    )
+}
+
 fn encode_size_update(val: usize, dst: &mut BytesMut) {
     encode_int(val, 5, 0b0010_0000, dst)
 }
@@ -264,6 +290,14 @@ fn encode_str(val: &[u8], dst: &mut BytesMut) {
         huffman::encode(val, dst);
 
         let huff_len = position(dst) - (idx + 1);
+
+        // Concord: Huffman only when it is shorter, as Go's hpack and Chromium's encoder decide.
+        if huff_len >= val.len() {
+            dst.truncate(idx);
+            encode_int(val.len(), 7, 0, dst);
+            dst.put_slice(val);
+            return;
+        }
 
         if encode_int_one_byte(huff_len, 7) {
             // Write the string head

@@ -27,6 +27,14 @@ const AT_RISK: Duration = Duration::from_secs(10);
 const HUNG: Duration = Duration::from_secs(10);
 /// How long a tunnel that ends with RST_STREAM waits for its queued DATA to go out first.
 const RESET_DRAIN: Duration = HUNG;
+/// Least and most padding of the empty END_STREAM DATA frame ahead of the reset, as Chromium's
+/// `SpdySession::EnqueueResetStreamFrame` picks it.
+const END_PADDING_LEAST: u8 = 26;
+const END_PADDING_MOST: u8 = 50;
+
+fn end_padding() -> u8 {
+    rand::random_range(END_PADDING_LEAST..=END_PADDING_MOST)
+}
 pub(crate) const STREAM_WINDOW: u32 = 4 * 1024 * 1024;
 pub(crate) const CONN_WINDOW: u32 = 65_535 + (1 << 30);
 pub(crate) const MAX_FRAME_SIZE: u32 = 1 << 20;
@@ -497,6 +505,25 @@ impl H2Writer {
     }
 }
 
+/// A tunnel dropped before its shutdown still ends as Chromium cancels a stream, and its reader,
+/// which may sit in the other half of a split, ends without an error; a direct write cut off
+/// mid-frame leaves a plain reset to h2, which finishes that frame first.
+impl Drop for H2Writer {
+    fn drop(&mut self) {
+        let Some(end) = &self.end else {
+            return;
+        };
+        if self.ended {
+            return;
+        }
+        end.end();
+        if !self.send.has_direct_in_flight() {
+            self.send
+                .send_reset_padded(h2::Reason::CANCEL, end_padding());
+        }
+    }
+}
+
 impl AsyncWrite for H2Writer {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -564,7 +591,8 @@ impl AsyncWrite for H2Writer {
             }
             // Ended before the reset, so a reader that sees the reset as an error also sees it ended.
             end.end();
-            this.send.send_reset(h2::Reason::CANCEL);
+            this.send
+                .send_reset_padded(h2::Reason::CANCEL, end_padding());
             this.ended = true;
             return Poll::Ready(Ok(()));
         }
@@ -624,7 +652,8 @@ impl H2Body {
     }
 
     /// Shutdown ends the whole stream rather than half of it, as a Chromium tunnel does: it waits
-    /// up to `RESET_DRAIN` for the queued DATA, resets the stream, and reads end.
+    /// up to `RESET_DRAIN` for the queued DATA, sends an empty padded END_STREAM DATA frame when
+    /// the windows allow, resets the stream, and reads end.
     pub fn without_half_close(mut self) -> Self {
         let ended = Arc::new(Ended::default());
         self.reader.ended = Some(ended.clone());

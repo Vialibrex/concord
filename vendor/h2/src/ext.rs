@@ -5,6 +5,19 @@ use crate::hpack::BytesStr;
 use bytes::Bytes;
 use std::fmt;
 
+// Concord: request priority for clients that send it, as Chromium does.
+/// The priority fields of a client request's HEADERS frame (RFC 9113 §6.2, §5.3), given as a
+/// request extension. Without it the HEADERS frame carries none.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamPriority {
+    /// The stream this one depends on; 0 is the root.
+    pub dependency: u32,
+    /// The weight as it goes on the wire, one less than the weight (0 is weight 1).
+    pub weight: u8,
+    /// Whether the dependency is exclusive.
+    pub exclusive: bool,
+}
+
 /// Represents the `:protocol` pseudo-header used by
 /// the [Extended CONNECT Protocol].
 ///

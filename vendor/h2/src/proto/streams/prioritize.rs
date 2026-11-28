@@ -126,6 +126,15 @@ impl Prioritize {
         stream_win.min(conn_avail)
     }
 
+    // Concord: whether `len` octets of padding fit both windows, with Chromium's 72-octet
+    // connection floor (`SpdySession::EnqueueResetStreamFrame`). Chromium checks only the
+    // connection window; padding counts against the stream's too (RFC 9113 §6.9.1).
+    pub(crate) fn can_send_padding(&self, stream: &store::Ptr, len: WindowSize) -> bool {
+        self.flow.window_size() >= 72
+            && self.flow.available().as_size() + stream.send_flow.available().as_size() >= len
+            && stream.send_flow.window_size() >= len
+    }
+
     /// Consumes `len` bytes from stream and connection flow-control windows for a
     /// direct DATA frame write, preserving all FlowControl accounting invariants.
     pub(crate) fn direct_consume(&mut self, len: WindowSize, stream: &mut store::Ptr) {

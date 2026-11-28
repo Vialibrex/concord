@@ -70,6 +70,10 @@ pub(super) struct Stream {
     /// Set to true when the stream is pending to be opened
     pub is_pending_open: bool,
 
+    // Concord: padding for an empty END_STREAM DATA frame sent ahead of this stream's reset
+    // (`SendStream::send_reset_padded`); 0 for none.
+    pub reset_padding: u8,
+
     /// Set to true when a push is pending for this stream
     pub is_pending_push: bool,
 
@@ -176,6 +180,7 @@ impl Stream {
             next_pending_send_capacity: None,
             send_capacity_inc: false,
             is_pending_open: false,
+            reset_padding: 0,
             next_open: None,
             is_pending_push: false,
 

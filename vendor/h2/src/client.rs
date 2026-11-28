@@ -135,7 +135,8 @@
 //! [`Builder`]: struct.Builder.html
 //! [`Error`]: ../struct.Error.html
 
-use crate::codec::{new_framed_write, Codec, CodecRead, SendError, SplitRead, UserError};
+// Concord: `CodecWrite` for `index_pseudo_headers`.
+use crate::codec::{new_framed_write, Codec, CodecRead, CodecWrite, SendError, SplitRead, UserError};
 use crate::ext::Protocol;
 use crate::frame::{Headers, Pseudo, Reason, Settings, StreamId};
 use crate::proto::{self, DirectWriter, Error};
@@ -341,6 +342,9 @@ pub struct Builder {
 
     /// Initial `Settings` frame to send as part of the handshake.
     settings: Settings,
+
+    // Concord: see `Builder::index_pseudo_headers`.
+    index_pseudo_headers: bool,
 
     /// The stream ID of the first (lowest) stream. Subsequent streams will use
     /// monotonically increasing stream IDs.
@@ -674,10 +678,20 @@ impl Builder {
             initial_target_connection_window_size: None,
             initial_max_send_streams: usize::MAX,
             settings: Default::default(),
+            index_pseudo_headers: true,
             stream_id: 1.into(),
             local_max_error_reset_streams: Some(proto::DEFAULT_LOCAL_RESET_COUNT_MAX),
             data_frame_budget: proto::DataFrameBudget::Auto,
         }
+    }
+
+    // Concord: Chromium's HPACK indexing for clients that copy its fingerprint.
+    /// Whether pseudo-headers other than `:authority` may enter the HPACK dynamic table. With
+    /// `false` they are sent from the static table or as literals without indexing, as
+    /// Chromium sends them. The default, `true`, indexes them like any other header.
+    pub fn index_pseudo_headers(&mut self, enabled: bool) -> &mut Self {
+        self.index_pseudo_headers = enabled;
+        self
     }
 
     /// Indicates the initial window size (in octets) for stream-level
@@ -1388,6 +1402,8 @@ where
         // Create the codec
         let mut codec = Codec::new(io);
         builder.apply_recv_limits(&mut codec);
+        // Concord: see `Builder::index_pseudo_headers`.
+        CodecWrite::set_index_pseudo_headers(&mut codec, builder.index_pseudo_headers);
 
         // Send initial settings frame
         codec
@@ -1549,6 +1565,7 @@ where
         // Concord: the preface, SETTINGS and the connection WINDOW_UPDATE go out in one write,
         // as Go's HTTP/2 client (`net/http/internal/http2`) and Chromium send them.
         let mut sink = new_framed_write::<W, proto::Prioritized<B>>(write, msg);
+        sink.set_index_pseudo_headers(builder.index_pseudo_headers);
         sink.buffer(builder.settings.clone().into())
             .expect("invalid SETTINGS frame");
 
@@ -1760,6 +1777,7 @@ impl Peer {
         id: StreamId,
         request: Request<()>,
         protocol: Option<Protocol>,
+        priority: Option<crate::ext::StreamPriority>,
         end_of_stream: bool,
     ) -> Result<Headers, SendError> {
         use http::request::Parts;
@@ -1811,6 +1829,14 @@ impl Peer {
 
         // Create the HEADERS frame
         let mut frame = Headers::new(id, pseudo, headers);
+        // Concord: see `ext::StreamPriority`.
+        if let Some(priority) = priority {
+            frame.set_priority(crate::frame::StreamDependency::new(
+                StreamId::from(priority.dependency),
+                priority.weight,
+                priority.exclusive,
+            ));
+        }
 
         if end_of_stream {
             frame.set_end_stream()

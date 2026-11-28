@@ -350,6 +350,11 @@ impl<T, B> FramedWrite<T, B> {
         self.encoder.hpack.update_max_size(val);
     }
 
+    // Concord: see `client::Builder::index_pseudo_headers`.
+    pub(crate) fn set_index_pseudo_headers(&mut self, enabled: bool) {
+        self.encoder.hpack.set_index_pseudo_headers(enabled);
+    }
+
     /// Retrieve the last data frame that has been sent
     pub fn take_last_data_frame(&mut self) -> Option<frame::Data<B>> {
         self.encoder.last_data_frame.take()

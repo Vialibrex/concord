@@ -244,6 +244,12 @@ impl Headers {
         self.flags.set_end_stream()
     }
 
+    // Concord: a client request may carry priority fields (`ext::StreamPriority`).
+    pub(crate) fn set_priority(&mut self, dependency: StreamDependency) {
+        self.stream_dep = Some(dependency);
+        self.flags.set_priority();
+    }
+
     pub fn is_over_size(&self) -> bool {
         self.header_block.is_over_size
     }
@@ -284,10 +290,16 @@ impl Headers {
 
         // Get the HEADERS frame head
         let head = self.head();
+        // Concord: priority octets precede the header block fragment.
+        let stream_dep = self.stream_dep;
 
         self.header_block
             .into_encoding(encoder)
-            .encode(&head, dst, Some(encoder), |_| {})
+            .encode(&head, dst, Some(encoder), |dst| {
+                if let Some(dep) = &stream_dep {
+                    dep.encode(dst);
+                }
+            })
     }
 
     fn head(&self) -> Head {
@@ -783,6 +795,11 @@ impl HeadersFlag {
 
     pub fn is_priority(&self) -> bool {
         self.0 & PRIORITY == PRIORITY
+    }
+
+    // Concord: set by `Headers::set_priority`.
+    pub fn set_priority(&mut self) {
+        self.0 |= PRIORITY;
     }
 }
 

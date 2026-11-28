@@ -71,7 +71,7 @@ impl<S: AsyncRead + Unpin> AsyncRead for Tee<S> {
         let before = buf.filled().len();
         let polled = Pin::new(&mut this.io).poll_read(cx, buf);
         let mut preface = this.seen.preface.lock().unwrap();
-        if preface.len() < 4096 {
+        if preface.len() < 1 << 16 {
             preface.extend_from_slice(&buf.filled()[before..]);
         }
         polled
@@ -230,7 +230,7 @@ async fn tunnels_share_one_connection_and_fast_open_once_padding_is_known() {
     let names: Vec<&str> = headers.keys().map(http::HeaderName::as_str).collect();
     assert_eq!(
         names,
-        ["proxy-authorization", "padding", "padding-type-request"]
+        ["padding", "padding-type-request", "proxy-authorization"]
     );
 }
 
@@ -336,6 +336,198 @@ async fn concurrency_spreads_tunnels_and_a_reset_redials() {
     node.reset_sessions();
     assert_eq!(echo(&*node, b"again").await.unwrap(), b"again");
     assert_eq!(server.seen.connections.load(Ordering::Relaxed), 3);
+}
+
+struct Frame {
+    kind: u8,
+    flags: u8,
+    stream: u32,
+    payload: Vec<u8>,
+}
+
+/// The frames the client sent after the preface, as far as the server kept them.
+fn client_frames(seen: &Seen) -> Vec<Frame> {
+    let bytes = seen.preface.lock().unwrap().clone();
+    let mut rest = &bytes[24..];
+    let mut frames = Vec::new();
+    while rest.len() >= 9 {
+        let length = u32::from_be_bytes([0, rest[0], rest[1], rest[2]]) as usize;
+        if rest.len() < 9 + length {
+            break;
+        }
+        frames.push(Frame {
+            kind: rest[3],
+            flags: rest[4],
+            stream: u32::from_be_bytes([rest[5], rest[6], rest[7], rest[8]]) & 0x7fff_ffff,
+            payload: rest[9..9 + length].to_vec(),
+        });
+        rest = &rest[9 + length..];
+    }
+    frames
+}
+
+/// The stream, dependency, exclusive flag and weight octet of each HEADERS frame the client sent
+/// with priority fields.
+fn priorities(seen: &Seen) -> Vec<(u32, u32, bool, u8)> {
+    client_frames(seen)
+        .iter()
+        .filter(|frame| frame.kind == 1 && frame.flags & 0x20 != 0)
+        .map(|frame| {
+            let dependency = u32::from_be_bytes(frame.payload[..4].try_into().unwrap());
+            (
+                frame.stream,
+                dependency & 0x7fff_ffff,
+                dependency >> 31 == 1,
+                frame.payload[4],
+            )
+        })
+        .collect()
+}
+
+/// A tunnel in `testdata/naiveproxy-h2.txt`.
+struct Recorded {
+    flags: u8,
+    exclusive: bool,
+    weight: u8,
+    block: Vec<u8>,
+    fields: Vec<String>,
+    end: Vec<String>,
+}
+
+fn recorded_tunnels() -> Vec<Recorded> {
+    let value = |line: &str, key: &str| {
+        line.split(' ')
+            .find_map(|word| word.strip_prefix(key))
+            .unwrap()
+            .to_owned()
+    };
+    let mut tunnels: Vec<Recorded> = Vec::new();
+    for line in include_str!("testdata/naiveproxy-h2.txt").lines() {
+        if line.starts_with("HEADERS ") {
+            let block = value(line, "block=");
+            tunnels.push(Recorded {
+                flags: u8::from_str_radix(value(line, "flags=0x").as_str(), 16).unwrap(),
+                exclusive: value(line, "excl=") == "true",
+                weight: value(line, "weight=").parse().unwrap(),
+                block: (0..block.len())
+                    .step_by(2)
+                    .map(|at| u8::from_str_radix(&block[at..at + 2], 16).unwrap())
+                    .collect(),
+                fields: Vec::new(),
+                end: Vec::new(),
+            });
+        } else if let Some(field) = line.strip_prefix("field ") {
+            let name = field.split(' ').nth(1).unwrap().trim_end_matches(':');
+            tunnels.last_mut().unwrap().fields.push(name.to_owned());
+        } else if let Some(tunnel) = tunnels.last_mut()
+            && (line.starts_with("DATA flags=0x9 ") || line.starts_with("RST_STREAM "))
+        {
+            tunnel.end.push(line.to_owned());
+        }
+    }
+    tunnels
+}
+
+#[tokio::test]
+async fn tunnels_open_and_end_as_naiveproxy_does() {
+    let recorded = recorded_tunnels();
+    assert_eq!(recorded.len(), 3);
+    let server = server(Answer::Padded).await;
+    let node = node(&server, json!({}));
+    for _ in &recorded {
+        echo(&*node, b"x").await.unwrap();
+    }
+    let resets = |frames: &[Frame]| frames.iter().filter(|frame| frame.kind == 3).count();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while resets(&client_frames(&server.seen)) < recorded.len() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let frames = client_frames(&server.seen);
+    let requests = server.seen.requests.lock().unwrap();
+    let opened: Vec<&Frame> = frames.iter().filter(|frame| frame.kind == 1).collect();
+    assert_eq!(opened.len(), recorded.len());
+    for ((reference, headers), (_, fields)) in recorded.iter().zip(opened).zip(requests.iter()) {
+        assert_eq!(headers.flags, reference.flags);
+        // naiveproxy's non-zero dependencies are the GETs it sends ahead of a tunnel.
+        assert_eq!(headers.payload[..4], [0x80, 0, 0, 0]);
+        assert!(reference.exclusive);
+        assert_eq!(headers.payload[4], reference.weight);
+        let method = &reference.block[..9];
+        assert_eq!(method, b"\x02\x07CONNECT");
+        assert!(headers.payload[5..].starts_with(method));
+        let names: Vec<&str> = fields.keys().map(http::HeaderName::as_str).collect();
+        assert_eq!(names, reference.fields[2..]);
+        assert!(reference.end[0].starts_with("DATA flags=0x9 "));
+        assert!(reference.end[1].starts_with("RST_STREAM "));
+        let padding: usize = reference.end[0]
+            .split(' ')
+            .find_map(|word| word.strip_prefix("len="))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((26..=50).contains(&padding));
+        let end: Vec<&Frame> = frames
+            .iter()
+            .filter(|frame| frame.stream == headers.stream && matches!(frame.kind, 0 | 3))
+            .collect();
+        let [.., data, reset] = end.as_slice() else {
+            panic!("no end on stream {}", headers.stream);
+        };
+        assert_eq!((data.kind, data.flags), (0, 0x9));
+        assert!((26..=50).contains(&data.payload.len()));
+        assert_eq!(usize::from(data.payload[0]), data.payload.len() - 1);
+        assert_eq!(reset.kind, 3);
+        assert_eq!(reset.payload, u32::from(::h2::Reason::CANCEL).to_be_bytes());
+    }
+}
+
+async fn tunnel(node: &dyn Outbound) -> BoxStream {
+    let env = test_env();
+    let cx = DialCx::new(&env, Initiator::Direct, None);
+    let mut stream = node
+        .connect(&cx, &Address::Domain("example.com".into(), 443))
+        .await
+        .unwrap();
+    stream.write_all(b"x").await.unwrap();
+    let mut echoed = [0];
+    stream.read_exact(&mut echoed).await.unwrap();
+    stream
+}
+
+#[tokio::test]
+async fn tunnels_one_after_another_depend_on_the_root() {
+    let server = server(Answer::Padded).await;
+    let node = node(&server, json!({}));
+    echo(&*node, b"x").await.unwrap();
+    echo(&*node, b"y").await.unwrap();
+    assert_eq!(
+        priorities(&server.seen),
+        [(1, 0, true, 146), (3, 0, true, 146)]
+    );
+}
+
+#[tokio::test]
+async fn a_tunnel_depends_on_the_newest_one_still_open() {
+    let server = server(Answer::Padded).await;
+    let node = node(&server, json!({}));
+    let first = tunnel(&*node).await;
+    let second = tunnel(&*node).await;
+    drop(second);
+    let third = tunnel(&*node).await;
+    let fourth = tunnel(&*node).await;
+    drop((first, third, fourth));
+    assert_eq!(
+        priorities(&server.seen),
+        [
+            (1, 0, true, 146),
+            (3, 1, true, 146),
+            (5, 1, true, 146),
+            (7, 5, true, 146)
+        ]
+    );
 }
 
 #[tokio::test]
@@ -518,7 +710,7 @@ async fn quic_tunnels_share_one_connection() {
     let names: Vec<&str> = requests[0].1.keys().map(http::HeaderName::as_str).collect();
     assert_eq!(
         names,
-        ["proxy-authorization", "padding", "padding-type-request"]
+        ["padding", "padding-type-request", "proxy-authorization"]
     );
 }
 

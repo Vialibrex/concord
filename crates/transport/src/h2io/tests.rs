@@ -542,12 +542,13 @@ async fn a_peer_that_only_sends_window_updates_is_not_pinged_to_death() {
     assert!(!activity.ended());
 }
 
-/// What a server that never ends its side of a tunnel saw: the DATA, then how the stream ended.
-async fn holding_server(far: DuplexStream) -> (Vec<u8>, Option<h2::Reason>) {
+/// What a server that never ends its side of a tunnel saw: the DATA, whether END_STREAM came
+/// first, then how the stream ended.
+async fn holding_server(far: DuplexStream) -> (Vec<u8>, bool, Option<h2::Reason>) {
     let mut conn = h2::server::handshake(far).await.unwrap();
     let (request, mut respond) = conn.accept().await.unwrap().unwrap();
     tokio::spawn(async move { while conn.accept().await.is_some() {} });
-    let _send = respond
+    let mut send = respond
         .send_response(http::Response::new(()), false)
         .unwrap();
     let mut body = request.into_body();
@@ -558,8 +559,11 @@ async fn holding_server(far: DuplexStream) -> (Vec<u8>, Option<h2::Reason>) {
                 got.extend_from_slice(&data);
                 body.flow_control().release_capacity(data.len()).unwrap();
             }
-            Some(Err(err)) => return (got, err.reason()),
-            None => return (got, None),
+            Some(Err(err)) => return (got, false, err.reason()),
+            None => {
+                let reset = std::future::poll_fn(|cx| send.poll_reset(cx)).await;
+                return (got, true, reset.ok());
+            }
         }
     }
 }
@@ -586,7 +590,7 @@ async fn a_split_tunnel_without_half_close_sends_its_writes_then_resets_the_stre
 
 async fn writes_then_reset(
     mut sender: h2::client::SendRequest<Bytes>,
-    server: tokio::task::JoinHandle<(Vec<u8>, Option<h2::Reason>)>,
+    server: tokio::task::JoinHandle<(Vec<u8>, bool, Option<h2::Reason>)>,
     direct: bool,
 ) {
     let (response, send) = sender.send_request(http::Request::new(()), false).unwrap();
@@ -608,12 +612,13 @@ async fn writes_then_reset(
             .unwrap(),
         0
     );
-    let (got, reason) = tokio::time::timeout(patience, server)
+    let (got, ended, reason) = tokio::time::timeout(patience, server)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(got.len(), payload.len());
     assert!(got == payload);
+    assert!(ended);
     assert_eq!(reason, Some(h2::Reason::CANCEL));
 }
 
@@ -707,4 +712,158 @@ async fn split_handshake_writes_preface_settings_and_window_update_at_once() {
     let increment = u32::from_be_bytes(rest[9..13].try_into().unwrap());
     assert_eq!(increment, CONN_WINDOW - 65_535);
     assert_eq!(rest.len(), 13);
+}
+
+type RawFrame = (u8, u8, Vec<u8>);
+
+/// Plays a server that sends empty SETTINGS and no WINDOW_UPDATE, and returns the client's frames
+/// after the preface up to the one `last` picks.
+async fn raw_frames(mut far: DuplexStream, last: impl Fn(&[RawFrame]) -> bool) -> Vec<RawFrame> {
+    far.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await.unwrap();
+    let mut preface = [0; 24];
+    far.read_exact(&mut preface).await.unwrap();
+    let mut frames = Vec::new();
+    while !last(&frames) {
+        let mut header = [0; 9];
+        far.read_exact(&mut header).await.unwrap();
+        let length = u32::from_be_bytes([0, header[0], header[1], header[2]]) as usize;
+        let mut payload = vec![0; length];
+        far.read_exact(&mut payload).await.unwrap();
+        frames.push((header[3], header[4], payload));
+    }
+    frames
+}
+
+fn ends_with_reset(frames: &[RawFrame]) -> bool {
+    frames.last().is_some_and(|frame| frame.0 == 3)
+}
+
+async fn tunnel_end(written: usize) -> Vec<RawFrame> {
+    let (near, far) = duplex(1 << 20);
+    let frames = tokio::spawn(raw_frames(far, ends_with_reset));
+    let (mut sender, conn) = handshake_split(&client_builder(), Box::new(near))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    let (response, send) = sender.send_request(http::Request::new(()), false).unwrap();
+    let mut body = H2Body::new(send, Incoming::Response(response)).without_half_close();
+    body.write_all(&vec![7; written]).await.unwrap();
+    body.shutdown().await.unwrap();
+    let mut frames = tokio::time::timeout(Duration::from_secs(5), frames)
+        .await
+        .unwrap()
+        .unwrap();
+    frames.retain(|frame| matches!(frame.0, 0 | 3));
+    frames
+}
+
+#[tokio::test]
+async fn a_tunnel_sends_a_padded_empty_end_stream_ahead_of_its_reset() {
+    let frames = tunnel_end(4).await;
+    assert_eq!(frames.len(), 3, "{frames:?}");
+    assert_eq!((frames[0].0, frames[0].1, frames[0].2.len()), (0, 0, 4));
+    let (kind, flags, padding) = &frames[1];
+    assert_eq!((*kind, *flags), (0, 0x1 | 0x8));
+    assert!((26..=50).contains(&padding.len()), "{}", padding.len());
+    assert_eq!(usize::from(padding[0]), padding.len() - 1);
+    assert!(padding[1..].iter().all(|&octet| octet == 0));
+    assert_eq!(frames[2].2, u32::from(h2::Reason::CANCEL).to_be_bytes());
+}
+
+#[tokio::test]
+async fn a_tunnel_with_under_72_octets_of_connection_window_sends_only_its_reset() {
+    let frames = tunnel_end(65_535 - 71).await;
+    let (last, data) = frames.split_last().unwrap();
+    assert_eq!(last.0, 3);
+    assert!(data.iter().all(|frame| frame.1 == 0), "{frames:?}");
+    assert_eq!(
+        data.iter().map(|frame| frame.2.len()).sum::<usize>(),
+        65_535 - 71
+    );
+}
+
+async fn connect_headers(builder: &h2::client::Builder) -> Vec<(u8, Vec<u8>)> {
+    let (near, far) = duplex(1 << 16);
+    let frames = tokio::spawn(raw_frames(far, |frames| {
+        frames.iter().filter(|frame| frame.0 == 1).count() == 2
+    }));
+    let (mut sender, conn) = handshake_split(builder, Box::new(near)).await.unwrap();
+    tokio::spawn(conn);
+    let mut streams = Vec::new();
+    for _ in 0..2 {
+        let mut request = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("example.com:443")
+            .header("padding", "!!!!")
+            .body(())
+            .unwrap();
+        request.extensions_mut().insert(h2::ext::StreamPriority {
+            dependency: 0,
+            weight: 73,
+            exclusive: true,
+        });
+        streams.push(sender.send_request(request, false).unwrap());
+    }
+    let frames = tokio::time::timeout(Duration::from_secs(5), frames)
+        .await
+        .unwrap()
+        .unwrap();
+    frames
+        .into_iter()
+        .filter(|frame| frame.0 == 1)
+        .map(|(_, flags, payload)| (flags, payload))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_request_carries_its_priority_and_raw_values_where_huffman_is_longer() {
+    let headers = connect_headers(&client_builder()).await;
+    for (flags, payload) in &headers {
+        assert_eq!(*flags, 0x4 | 0x20);
+        assert_eq!(payload[..5], [0x80, 0, 0, 0, 73]);
+    }
+    assert!(headers[0].1[5..].windows(5).any(|run| run == b"\x04!!!!"));
+}
+
+#[tokio::test]
+async fn pseudo_headers_other_than_authority_can_stay_out_of_the_dynamic_table() {
+    let indexed = connect_headers(&client_builder()).await;
+    assert_eq!(indexed[0].1[5], 0x42);
+    assert!(indexed[1].1[5] & 0x80 != 0);
+    let mut builder = client_builder();
+    builder.index_pseudo_headers(false);
+    let literal = connect_headers(&builder).await;
+    for (_, payload) in &literal {
+        assert!(payload[5..].starts_with(b"\x02\x07CONNECT"));
+    }
+    assert_eq!(literal[0].1[14], 0x41);
+    assert!(literal[1].1[14] & 0x80 != 0);
+}
+
+#[tokio::test]
+async fn a_split_tunnel_whose_write_half_is_dropped_ends_its_read_half_without_an_error() {
+    let (near, far) = duplex(1 << 16);
+    let server = tokio::spawn(holding_server(far));
+    let (mut sender, connection) = h2::client::handshake(near).await.unwrap();
+    tokio::spawn(connection);
+    let (response, send) = sender.send_request(http::Request::new(()), false).unwrap();
+    let body = H2Body::new(send, Incoming::Response(response)).without_half_close();
+    let (mut read, mut write) = Box::new(body).into_split();
+    write.write_all(b"tail").await.unwrap();
+    drop(write);
+    let patience = std::time::Duration::from_secs(5);
+    let mut rest = Vec::new();
+    assert_eq!(
+        tokio::time::timeout(patience, read.read_to_end(&mut rest))
+            .await
+            .unwrap()
+            .unwrap(),
+        0
+    );
+    let (_, ended, reason) = tokio::time::timeout(patience, server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(ended);
+    assert_eq!(reason, Some(h2::Reason::CANCEL));
 }

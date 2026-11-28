@@ -267,7 +267,16 @@ impl Send {
             self.prioritize.clear_queue(buffer, stream);
         }
 
-        let frame = frame::Reset::new(stream.id, reason);
+        let mut frame = frame::Reset::new(stream.id, reason);
+        // Concord: the padded END_STREAM DATA counts against both windows; Chromium sends it
+        // only while the connection window holds at least 72 octets.
+        let padding = std::mem::take(&mut stream.reset_padding);
+        if padding > 0
+            && self.prioritize.can_send_padding(stream, padding.into())
+        {
+            self.prioritize.direct_consume(padding.into(), stream);
+            frame.set_padded_end(padding);
+        }
 
         tracing::trace!("send_reset -- queueing; frame={:?}", frame);
         self.prioritize

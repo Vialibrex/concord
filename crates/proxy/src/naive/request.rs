@@ -17,9 +17,10 @@ const PADDING_TYPE_REQUEST: &str = "padding-type-request";
 const PADDING_TYPE_REPLY: &str = "padding-type-reply";
 /// Variant1 first, then none, as naiveproxy offers them.
 const OFFERED: &str = "1, 0";
-/// Printable characters HPACK's Huffman code spends at least 8 bits on, so the header's
-/// encoded size stays its length; the 17th fills the tail.
-const NON_INDEX: &[u8; 17] = b"!#$()+<>?@[]^`{}~";
+/// The first 17 printable characters, by code, that HPACK's Huffman code spends at least 8 bits
+/// on, so the value goes out as its length in raw octets; the 17th fills the tail
+/// (naiveproxy `padding_utils.cc`, `InitializeNonindexCodes`).
+const NON_INDEX: &[u8; 17] = b"!\"#$&'()*+,;<>?@X";
 const PADDING_MIN: usize = 16;
 const PADDING_MAX: usize = 32;
 const PADDING_UNIQUE: usize = 16;
@@ -39,12 +40,14 @@ pub(super) fn padding_value() -> String {
             } else {
                 NON_INDEX.len() - 1
             };
-            char::from(NON_INDEX.get(index).copied().unwrap_or(b'~'))
+            char::from(NON_INDEX.get(index).copied().unwrap_or(b'X'))
         })
         .collect()
 }
 
-/// The fixed part of every CONNECT a node sends, in the order naiveproxy sends it.
+/// The fixed part of every CONNECT a node sends, in the order naiveproxy sends it: `padding`,
+/// the node's own headers, `padding-type-request`, then `proxy-authorization`, which Chromium's
+/// proxy auth adds after the tunnel's extra headers.
 pub(super) struct Template {
     authorization: Option<HeaderValue>,
     extra: Vec<(HeaderName, HeaderValue)>,
@@ -84,9 +87,6 @@ impl Template {
     /// A user header of the same name replaces a built-in one in place, as cronet-go's map does.
     pub(super) fn request(&self, dst: &Address) -> io::Result<Request<()>> {
         let mut headers = HeaderMap::new();
-        if let Some(authorization) = &self.authorization {
-            headers.insert(http::header::PROXY_AUTHORIZATION, authorization.clone());
-        }
         let padding = HeaderValue::try_from(padding_value()).map_err(io::Error::other)?;
         headers.insert(HeaderName::from_static(PADDING), padding);
         for (name, value) in &self.extra {
@@ -97,6 +97,11 @@ impl Template {
                 HeaderName::from_static(PADDING_TYPE_REQUEST),
                 HeaderValue::from_static(OFFERED),
             );
+        }
+        if let Some(authorization) = &self.authorization
+            && !headers.contains_key(http::header::PROXY_AUTHORIZATION)
+        {
+            headers.insert(http::header::PROXY_AUTHORIZATION, authorization.clone());
         }
         let mut request = Request::builder()
             .method(Method::CONNECT)
@@ -180,8 +185,27 @@ mod tests {
             let value = padding_value();
             assert!((PADDING_MIN..=PADDING_MAX).contains(&value.len()));
             assert!(value.bytes().all(|b| NON_INDEX.contains(&b)));
-            assert!(value.bytes().skip(PADDING_UNIQUE).all(|b| b == b'~'));
-            assert!(value.bytes().take(PADDING_UNIQUE).all(|b| b != b'~'));
+            assert!(value.bytes().skip(PADDING_UNIQUE).all(|b| b == b'X'));
+            assert!(value.bytes().take(PADDING_UNIQUE).all(|b| b != b'X'));
+        }
+    }
+
+    #[test]
+    fn recorded_naiveproxy_padding_uses_the_same_characters() {
+        let recorded: Vec<&str> = include_str!("testdata/naiveproxy-h2.txt")
+            .lines()
+            .filter_map(|line| line.strip_prefix("field 2 padding: "))
+            .collect();
+        assert_eq!(recorded.len(), 3);
+        for value in recorded {
+            assert!((PADDING_MIN..=PADDING_MAX).contains(&value.len()));
+            let (unique, fill) = value.as_bytes().split_at(PADDING_UNIQUE);
+            assert!(
+                unique
+                    .iter()
+                    .all(|b| NON_INDEX[..PADDING_UNIQUE].contains(b))
+            );
+            assert!(fill.iter().all(|&b| b == NON_INDEX[PADDING_UNIQUE]));
         }
     }
 
@@ -199,10 +223,10 @@ mod tests {
         assert_eq!(
             names,
             [
-                "proxy-authorization",
                 "padding",
                 "x-foo",
-                "padding-type-request"
+                "padding-type-request",
+                "proxy-authorization"
             ]
         );
         assert_eq!(

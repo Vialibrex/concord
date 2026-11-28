@@ -69,4 +69,14 @@ impl StreamDependency {
     pub fn dependency_id(&self) -> StreamId {
         self.dependency_id
     }
+
+    // Concord: the five priority octets a client's HEADERS frame carries.
+    pub(crate) fn encode<B: bytes::BufMut>(&self, dst: &mut B) {
+        let mut id = u32::from(self.dependency_id);
+        if self.is_exclusive {
+            id |= 1 << 31;
+        }
+        dst.put_u32(id);
+        dst.put_u8(self.weight);
+    }
 }

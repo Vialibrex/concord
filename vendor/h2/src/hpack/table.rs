@@ -157,6 +157,11 @@ impl Table {
         self.index_dynamic(header, statik)
     }
 
+    // Concord: the static table only, leaving the dynamic table untouched.
+    pub fn index_static_only(&self, header: Header) -> Index {
+        Index::new(index_static(&header), header)
+    }
+
     fn index_dynamic(&mut self, header: Header, statik: Option<(usize, bool)>) -> Index {
         debug_assert!(self.assert_valid_state("one"));
 
