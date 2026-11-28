@@ -75,6 +75,7 @@ impl InboundCx {
             host: false,
             user_agent: None,
             special: self.special.clone(),
+            tcp_carried: false,
         }
     }
 }

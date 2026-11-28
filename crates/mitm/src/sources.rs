@@ -2,8 +2,8 @@
 
 use std::net::IpAddr;
 
+use concord_common::cidr::IpCidrSet;
 use concord_config::mitm::SourceEntryDef;
-use ipnetwork::IpNetwork;
 
 use crate::view::SourceEntryView;
 
@@ -11,25 +11,29 @@ use crate::view::SourceEntryView;
 /// an entry with `-` leaves its clients out whatever else names them.
 #[derive(Debug, Default)]
 pub(crate) struct SourceList {
-    include: Vec<IpNetwork>,
-    exclude: Vec<IpNetwork>,
+    include: IpCidrSet,
+    exclude: IpCidrSet,
 }
 
 impl SourceList {
     pub(crate) fn add(&mut self, entries: &[SourceEntryDef]) -> Vec<SourceEntryView> {
+        self.include.extend(
+            entries
+                .iter()
+                .filter(|entry| !entry.exclude)
+                .map(|entry| (entry.network.ip(), entry.network.prefix())),
+        );
+        self.exclude.extend(
+            entries
+                .iter()
+                .filter(|entry| entry.exclude)
+                .map(|entry| (entry.network.ip(), entry.network.prefix())),
+        );
         entries
             .iter()
-            .map(|entry| {
-                let list = if entry.exclude {
-                    &mut self.exclude
-                } else {
-                    &mut self.include
-                };
-                list.push(entry.network);
-                SourceEntryView {
-                    network: entry.network.to_string(),
-                    exclude: entry.exclude,
-                }
+            .map(|entry| SourceEntryView {
+                network: entry.network.to_string(),
+                exclude: entry.exclude,
             })
             .collect()
     }
@@ -49,8 +53,7 @@ impl SourceList {
 
     pub(crate) fn allows(&self, ip: IpAddr) -> bool {
         let ip = ip.to_canonical();
-        !self.exclude.iter().any(|net| net.contains(ip))
-            && (self.include.is_empty() || self.include.iter().any(|net| net.contains(ip)))
+        !self.exclude.contains(ip) && (self.include.is_empty() || self.include.contains(ip))
     }
 }
 
@@ -83,5 +86,67 @@ mod tests {
         assert!(!skipped.allows(ip("192.168.4.51")));
         let mut bad = SourceList::default();
         assert!(bad.add_line("192.168.1.0/24, lan").1.is_err());
+    }
+
+    #[test]
+    fn source_list_agrees_with_linear_scan_and_preserves_views() {
+        let probes: Vec<IpAddr> = [
+            "0.0.0.0",
+            "10.0.0.1",
+            "192.168.1.1",
+            "192.168.1.2",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "::ffff:192.168.1.1",
+            "::ffff:192.168.1.2",
+            "2001:db8::1",
+            "2001:db8::2",
+        ]
+        .into_iter()
+        .map(ip)
+        .collect();
+
+        let cases: &[&[&str]] = &[
+            &[],
+            &["-192.168.1.2/32", "-2001:db8::1/128"],
+            &["0.0.0.0/0", "-192.168.1.2/32"],
+            &["::/0", "-2001:db8::1/128"],
+            &["192.168.1.0/24, 192.168.1.1/32, -192.168.1.2, 2001:db8::/32"],
+            &["-192.168.1.0/24", "192.168.1.1/32", "0.0.0.0/0", "::/0"],
+        ];
+
+        for lines in cases {
+            let mut sources = SourceList::default();
+            let mut raw_include = Vec::new();
+            let mut raw_exclude = Vec::new();
+            for line in *lines {
+                let (entries, err) = concord_config::mitm::parse_source_line(line);
+                assert!(err.is_none());
+                let expected_views: Vec<SourceEntryView> = entries
+                    .iter()
+                    .map(|e| SourceEntryView {
+                        network: e.network.to_string(),
+                        exclude: e.exclude,
+                    })
+                    .collect();
+                let views = sources.add(&entries);
+                assert_eq!(views, expected_views);
+                for entry in entries {
+                    if entry.exclude {
+                        raw_exclude.push(entry.network);
+                    } else {
+                        raw_include.push(entry.network);
+                    }
+                }
+            }
+            for &addr in &probes {
+                let canonical = addr.to_canonical();
+                let linear = !raw_exclude.iter().any(|net| net.contains(canonical))
+                    && (raw_include.is_empty()
+                        || raw_include.iter().any(|net| net.contains(canonical)));
+                assert_eq!(sources.allows(addr), linear, "case={lines:?} ip={addr}");
+            }
+        }
     }
 }

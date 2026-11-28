@@ -25,7 +25,7 @@ pub(super) async fn serve<E: Encoder, D: Decoder>(
     let session = Arc::new(StreamSession::new(
         stream, encoder, decoder, remote, &cx.tasks,
     ));
-    serve_session(session, inbound, src, cx).await;
+    serve_session(session, inbound.over_tcp(), src, cx).await;
 }
 
 /// The same for a protocol whose stream is already a packet session.

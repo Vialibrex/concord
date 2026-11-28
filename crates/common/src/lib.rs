@@ -3,6 +3,7 @@
 
 pub mod addr;
 pub mod backoff;
+pub mod cidr;
 pub mod clock;
 pub mod exchange_query;
 pub mod meta;

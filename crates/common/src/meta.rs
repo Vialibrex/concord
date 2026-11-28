@@ -108,6 +108,8 @@ pub struct InboundInfo {
     /// The User-Agent of the HTTP proxy CONNECT request that opened the flow.
     pub user_agent: Option<Arc<str>>,
     pub special: Option<Arc<Special>>,
+    /// Whether this flow's datagrams arrive over a TCP stream (so `src` is a TCP peer port).
+    pub tcp_carried: bool,
 }
 
 impl InboundInfo {
@@ -120,7 +122,13 @@ impl InboundInfo {
             host: false,
             user_agent: None,
             special: None,
+            tcp_carried: false,
         }
+    }
+
+    pub fn over_tcp(mut self) -> Self {
+        self.tcp_carried = true;
+        self
     }
 }
 

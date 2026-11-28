@@ -419,6 +419,7 @@ mod tests {
 
     #[test]
     fn this_process_owns_its_sockets() {
+        let _spawn = concord_common::sync::lock(&crate::SPAWN_GUARD);
         let exe = std::env::current_exe().unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let client = connect_tcp(listener.local_addr().unwrap());
@@ -474,6 +475,7 @@ mod tests {
 
     #[test]
     fn a_closed_socket_on_the_same_port_is_not_listed() {
+        let _spawn = concord_common::sync::lock(&crate::SPAWN_GUARD);
         // Newer than the live socket, the closed one comes first in the list until its peer closes.
         let first = TcpListener::bind("127.0.0.1:0").unwrap();
         let second = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -512,7 +514,9 @@ mod tests {
 
     #[test]
     fn an_unused_port_has_no_owner() {
-        let unused = bind_udp("127.0.0.1:0");
+        let _spawn = concord_common::sync::lock(&crate::SPAWN_GUARD);
+        let port = concord_test_support::port_to_bind_later();
+        let unused = bind_udp(&format!("127.0.0.1:{port}"));
         let addr = unused.local_addr().unwrap();
         drop(unused);
         assert!(find(Network::Udp, addr).is_none());
@@ -520,6 +524,7 @@ mod tests {
 
     #[test]
     fn descriptors_name_the_process_holding_a_socket() {
+        let _spawn = concord_common::sync::lock(&crate::SPAWN_GUARD);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let mut nc = std::process::Command::new("/usr/bin/nc")
             .arg("127.0.0.1")
@@ -546,12 +551,14 @@ mod tests {
 
     #[test]
     fn descriptors_fall_back_to_a_wildcard_udp_socket() {
+        let _spawn = concord_common::sync::lock(&crate::SPAWN_GUARD);
         let own = std::process::id();
         let exact = bind_udp("127.0.0.1:0");
         let addr = exact.local_addr().unwrap();
         assert_eq!(find_by_descriptors(Network::Udp, addr), Some(own));
 
-        let any = bind_udp("0.0.0.0:0");
+        let port = concord_test_support::port_to_bind_later();
+        let any = bind_udp(&format!("0.0.0.0:{port}"));
         let src = SocketAddr::new(
             "127.0.0.1".parse().unwrap(),
             any.local_addr().unwrap().port(),

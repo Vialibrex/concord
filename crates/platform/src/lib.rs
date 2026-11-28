@@ -34,6 +34,9 @@ mod udpbuf;
 mod utun;
 mod watch;
 
+#[cfg(all(test, target_os = "macos"))]
+pub(crate) static SPAWN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 

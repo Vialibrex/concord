@@ -798,7 +798,7 @@ async fn a_side_load_replaces_a_rule_set_without_a_reapply() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_empty_mrs_cache_is_not_taken_as_loaded() {
-    let mut set = concord_rules::cidr_set::IpCidrSet::new();
+    let mut set = concord_common::cidr::IpCidrSet::new();
     assert!(set.add_str("192.0.2.0/24"));
     set.merge();
     let mrs = concord_rules::mrs::encode(1, &concord_rules::mrs::MrsPayload::IpCidr(set));

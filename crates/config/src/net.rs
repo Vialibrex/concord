@@ -11,17 +11,7 @@ pub struct IpCidr {
 
 impl IpCidr {
     pub fn parse(text: &str) -> Option<IpCidr> {
-        let (addr, bits) = text.split_once('/')?;
-        let addr: IpAddr = addr.parse().ok()?;
-        if bits.is_empty()
-            || !bits.bytes().all(|b| b.is_ascii_digit())
-            || (bits.len() > 1 && bits.starts_with('0'))
-        {
-            return None;
-        }
-        let bits: u8 = bits.parse().ok()?;
-        let max = if addr.is_ipv4() { 32 } else { 128 };
-        (bits <= max).then_some(IpCidr { addr, prefix: bits })
+        concord_common::cidr::parse_prefix(text).map(|(addr, prefix)| IpCidr { addr, prefix })
     }
 
     pub fn is_ipv4(&self) -> bool {

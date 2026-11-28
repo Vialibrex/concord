@@ -21,10 +21,14 @@ fn derive(label: &[u8], public: &[u8; 32]) -> [u8; 32] {
     hash.finalize().into()
 }
 
+fn keyed_mac(key: &[u8], parts: &[u8]) -> Option<Blake2sMac<U16>> {
+    let mut state = Blake2sMac::<U16>::new_from_slice(key).ok()?;
+    state.update(parts);
+    Some(state)
+}
+
 fn mac(key: &[u8], parts: &[u8]) -> Option<[u8; MAC]> {
-    let mut mac = Blake2sMac::<U16>::new_from_slice(key).ok()?;
-    mac.update(parts);
-    Some(mac.finalize().into_bytes().into())
+    Some(keyed_mac(key, parts)?.finalize().into_bytes().into())
 }
 
 /// The MACs of a handshake message cover its type, which AmneziaWG replaces, so they are
@@ -97,10 +101,11 @@ impl Macs {
         let Some(mac1_at) = mac2_at.checked_sub(MAC) else {
             return false;
         };
-        let expected = message
-            .get(..mac1_at)
-            .and_then(|body| mac(&self.mac1, body));
-        expected.is_some_and(|expected| message.get(mac1_at..mac2_at) == Some(expected.as_slice()))
+        let (Some(body), Some(claimed)) = (message.get(..mac1_at), message.get(mac1_at..mac2_at))
+        else {
+            return false;
+        };
+        keyed_mac(&self.mac1, body).is_some_and(|state| state.verify_slice(claimed).is_ok())
     }
 
     /// Takes the cookie out of a cookie reply to the last initiation sent to this peer.

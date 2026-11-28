@@ -2,10 +2,11 @@
 
 use std::io::Read;
 
+use concord_common::cidr::IpCidrSet;
 use ruzstd::decoding::StreamingDecoder;
 use ruzstd::encoding::{CompressionLevel, compress_to_vec};
 
-use crate::cidr_set::IpCidrSet;
+use crate::cidr_set;
 use crate::domain_set::DomainSet;
 use crate::error::FormatError;
 
@@ -128,7 +129,7 @@ pub fn decode(buf: &[u8], expected: MrsBehavior) -> Result<Mrs, FormatError> {
         .ok_or_else(|| FormatError::new("unexpected EOF"))?;
     let payload = match expected {
         MrsBehavior::Domain => MrsPayload::Domain(DomainSet::read_bin(body)?.0),
-        MrsBehavior::IpCidr => MrsPayload::IpCidr(IpCidrSet::read_bin(body)?.0),
+        MrsBehavior::IpCidr => MrsPayload::IpCidr(cidr_set::read_bin(body)?.0),
     };
     Ok(Mrs {
         count: u64::try_from(count).unwrap_or(0),
@@ -148,7 +149,7 @@ pub fn encode(count: u64, payload: &MrsPayload) -> Vec<u8> {
     raw.extend_from_slice(&0i64.to_be_bytes());
     match payload {
         MrsPayload::Domain(set) => set.write_bin(&mut raw),
-        MrsPayload::IpCidr(set) => set.write_bin(&mut raw),
+        MrsPayload::IpCidr(set) => cidr_set::write_bin(set, &mut raw),
     }
     compress_to_vec(raw.as_slice(), CompressionLevel::Fastest)
 }

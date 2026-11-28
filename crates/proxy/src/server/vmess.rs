@@ -269,7 +269,7 @@ impl Conn for Vmess {
                     let session = Arc::new(VmessPackets::new(stream, dst, packet_addr));
                     cx.tasks.spawn(packets::serve_session(
                         session,
-                        inbound,
+                        inbound.over_tcp(),
                         peer.src,
                         cx.clone(),
                     ));

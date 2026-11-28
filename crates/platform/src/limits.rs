@@ -247,6 +247,8 @@ mod unix {
             // Its process-wide descriptor fixture must therefore run in its own process.
             const CHILD: &str = "CONCORD_TEST_FD_PRESSURE_CHILD";
             if std::env::var_os(CHILD).is_none() {
+                #[cfg(target_os = "macos")]
+                let _spawn = concord_common::sync::lock(&crate::SPAWN_GUARD);
                 let output = std::process::Command::new(std::env::current_exe().unwrap())
                     .env(CHILD, "1")
                     .args([

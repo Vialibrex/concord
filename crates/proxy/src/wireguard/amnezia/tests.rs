@@ -155,6 +155,30 @@ async fn a_message_with_a_wrong_mac_is_dropped() {
     assert!(b.unframe(&mut last, from()).is_none());
 }
 
+#[test]
+fn check_mac1_accepts_valid_and_rejects_tampered_or_short_messages() {
+    let macs = Macs::new(&B);
+    for (kind, len) in [(1, INITIATION), (2, RESPONSE)] {
+        let valid = handshake(kind, len, &B);
+        assert!(macs.check_mac1(&valid));
+
+        let mut bad_first = valid.clone();
+        bad_first[len - 32] ^= 1;
+        assert!(!macs.check_mac1(&bad_first));
+
+        let mut bad_last = valid.clone();
+        bad_last[len - 17] ^= 1;
+        assert!(!macs.check_mac1(&bad_last));
+
+        let mut bad_body = valid.clone();
+        bad_body[8] ^= 1;
+        assert!(!macs.check_mac1(&bad_body));
+    }
+    for len in 0..32 {
+        assert!(!macs.check_mac1(&vec![0u8; len]));
+    }
+}
+
 #[tokio::test]
 async fn a_cookie_reply_sets_mac2_on_the_next_initiation() {
     let (a, _) = pair(legacy());

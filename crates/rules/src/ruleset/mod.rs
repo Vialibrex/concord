@@ -9,13 +9,13 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use arc_swap::{ArcSwap, Guard};
+use concord_common::cidr::IpCidrSet;
 use concord_common::sync::lock;
 use concord_common::{Address, FlowMeta, InboundInfo, InboundKind, Network, RouteState};
 use concord_config::provider::{RuleBehavior, RuleFormat};
 
 pub use convert::{CompileSetError, CompiledRuleSet, SetInfo, compile_rule_set, dump_mrs};
 
-use crate::cidr_set::IpCidrSet;
 use crate::domain_set::{DomainSet, DomainSetBuilder};
 use crate::error::FormatError;
 use crate::eval::{Ev, EvResult};

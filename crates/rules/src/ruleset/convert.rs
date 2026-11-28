@@ -2,10 +2,10 @@
 
 use std::fmt;
 
+use concord_common::cidr::{IpCidrSet, parse_prefix};
 use serde_json::Value;
 
 use super::{Behavior, Format, lines};
-use crate::cidr_set::{IpCidrSet, parse_prefix};
 use crate::domain_set::{DomainSet, DomainSetBuilder};
 use crate::mrs::{self, MrsBehavior, MrsPayload};
 

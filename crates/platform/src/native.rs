@@ -81,12 +81,14 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[test]
     #[allow(
         clippy::disallowed_methods,
         reason = "the test connects to its own loopback listener"
     )]
-    async fn a_connection_of_this_process_is_found_through_the_trait() {
+    fn a_connection_of_this_process_is_found_through_the_trait() {
+        #[cfg(target_os = "macos")]
+        let _spawn = concord_common::sync::lock(&crate::SPAWN_GUARD);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let client = TcpStream::connect(addr).unwrap();
@@ -97,7 +99,11 @@ mod tests {
         };
         let platform: Box<dyn Platform> = Box::new(NativePlatform::new());
         if cfg!(any(target_os = "macos", target_os = "linux", windows)) {
-            let info = platform.find_owner(&flow).await.unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let info = rt.block_on(platform.find_owner(&flow)).unwrap();
             assert!(!info.path.is_empty());
         }
         assert!(!platform.fd_pressure());

@@ -2,9 +2,9 @@ use std::borrow::Cow;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use concord_common::cidr::IpCidrSet;
 use concord_config::net::IpCidr;
 use concord_config::rule::{Cond, RuleDef};
-use concord_rules::cidr_set::IpCidrSet;
 
 use crate::trie::DomainSet;
 use crate::{DnsError, DomainMatch, GeoIpLookup, IpMatch, RuleEnv};
@@ -15,12 +15,12 @@ pub struct CidrSet {
 
 impl CidrSet {
     pub fn new(items: Vec<IpCidr>) -> Self {
-        let mut set = IpCidrSet::new();
-        for cidr in items {
-            set.add_prefix(cidr.addr, cidr.prefix);
+        CidrSet {
+            set: items
+                .into_iter()
+                .map(|cidr| (cidr.addr, cidr.prefix))
+                .collect(),
         }
-        set.merge();
-        CidrSet { set }
     }
 
     #[cfg(test)]
@@ -459,6 +459,49 @@ mod tests {
         }]);
         assert!(uncanonical.matches("192.168.1.1".parse().unwrap()));
         assert!(!uncanonical.matches("192.168.2.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn cidr_set_agrees_with_linear_scan_across_edge_cases() {
+        let probes: Vec<IpAddr> = [
+            "0.0.0.0",
+            "10.0.0.1",
+            "10.0.0.255",
+            "192.168.1.1",
+            "192.168.1.2",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "::ffff:192.168.1.1",
+            "::ffff:10.0.0.1",
+            "2001:db8::1",
+            "fe80::1",
+            "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+        ]
+        .into_iter()
+        .map(|text| text.parse().unwrap())
+        .collect();
+
+        let cases: &[&[&str]] = &[
+            &[],
+            &["0.0.0.0/0"],
+            &["::/0"],
+            &["192.168.1.1/32", "2001:db8::1/128"],
+            &["192.168.1.0/24", "::ffff:192.168.1.0/120"],
+            &["10.0.0.0/8", "10.0.0.1/32", "0.0.0.0/0", "::/0"],
+        ];
+
+        for entries in cases {
+            let cidrs: Vec<IpCidr> = entries
+                .iter()
+                .map(|text| IpCidr::parse(text).unwrap())
+                .collect();
+            let set = CidrSet::new(cidrs.clone());
+            for &ip in &probes {
+                let linear = cidrs.iter().any(|cidr| cidr.contains(ip));
+                assert_eq!(set.matches(ip), linear, "case={entries:?} ip={ip}");
+            }
+        }
     }
 
     struct RecordingMatcher {

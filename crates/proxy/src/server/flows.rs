@@ -137,3 +137,142 @@ pub(super) fn udp(
         ));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use concord_common::sync::lock;
+    use concord_common::{FlowHandler, InboundKind, Tasks, UdpFlow, UdpPayload, UdpReply};
+    use concord_config::listener::MuxServer;
+    use concord_transport::{MuxDialFn, MuxProtocol, SingMuxClient, SingMuxOptions};
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::Notify;
+
+    use super::*;
+    use crate::server::mux::MuxServe;
+
+    #[derive(Default)]
+    struct SeenUdp {
+        flows: Mutex<Vec<(InboundKind, bool, Address)>>,
+        arrived: Notify,
+    }
+
+    impl SeenUdp {
+        async fn wait_for(&self, count: usize) -> Vec<(InboundKind, bool, Address)> {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let notified = self.arrived.notified();
+                {
+                    let flows = lock(&self.flows);
+                    if flows.len() >= count {
+                        return flows.clone();
+                    }
+                }
+                tokio::time::timeout_at(deadline, notified)
+                    .await
+                    .expect("expected UDP flow did not arrive");
+            }
+        }
+    }
+
+    impl FlowHandler for SeenUdp {
+        fn handle_tcp(&self, _meta: FlowMeta, _stream: BoxStream) {}
+
+        fn handle_udp(
+            &self,
+            flow: UdpFlow<'_>,
+            _payload: UdpPayload<'_>,
+            _reply: &Arc<dyn UdpReply>,
+        ) {
+            lock(&self.flows).push((flow.inbound.kind, flow.inbound.tcp_carried, flow.dst));
+            self.arrived.notify_waiters();
+        }
+    }
+
+    #[tokio::test]
+    async fn ss_uot_and_mux_mark_udp_flows_as_tcp_carried() {
+        let peer = Peer {
+            src: "127.0.0.1:41234".parse().unwrap(),
+            local: "127.0.0.1:8388".parse().unwrap(),
+        };
+        let target = Address::Socket("1.1.1.1:53".parse().unwrap());
+        let mux_serve = MuxServe::new(&MuxServer::default());
+
+        let seen = Arc::new(SeenUdp::default());
+        let cx = Arc::new(InboundCx {
+            name: "ss".into(),
+            special: None,
+            handler: seen.clone(),
+            tasks: Tasks::default(),
+        });
+
+        let (mut uot_v2, far) = tokio::io::duplex(4096);
+        let inbound = cx.inbound(InboundKind::Shadowsocks, peer.local, None);
+        tcp(
+            Box::new(far),
+            Address::new(UOT_MAGIC, 0),
+            inbound,
+            peer,
+            &cx,
+            &Mux::new(&mux_serve),
+        );
+        let mut head = vec![1u8];
+        head.resize(1 + SOCKS.len(&target), 0);
+        SOCKS.write_into(&target, &mut head[1..]).unwrap();
+        head.extend_from_slice(&[0, 2, b'o', b'k']);
+        uot_v2.write_all(&head).await.unwrap();
+
+        let (mut uot_legacy, far) = tokio::io::duplex(4096);
+        let inbound = cx.inbound(InboundKind::Shadowsocks, peer.local, None);
+        tcp(
+            Box::new(far),
+            Address::new(UOT_LEGACY_MAGIC, 0),
+            inbound,
+            peer,
+            &cx,
+            &Mux::new(&mux_serve),
+        );
+        let mut frame = vec![0u8; UOT.len(&target)];
+        UOT.write_into(&target, &mut frame).unwrap();
+        frame.extend_from_slice(&[0, 2, b'h', b'i']);
+        uot_legacy.write_all(&frame).await.unwrap();
+
+        let mux_cx = cx.clone();
+        let mux_for_dial = mux_serve.clone();
+        let dial: MuxDialFn = Arc::new(move |_| {
+            let (near, far) = tokio::io::duplex(1 << 16);
+            let inbound = mux_cx.inbound(InboundKind::Shadowsocks, peer.local, None);
+            tcp(
+                Box::new(far),
+                Address::new(SING_MUX, 0),
+                inbound,
+                peer,
+                &mux_cx,
+                &Mux::new(&mux_for_dial),
+            );
+            Box::pin(async move { Ok(Box::new(near) as BoxStream) })
+        });
+        let smux = SingMuxClient::new(
+            SingMuxOptions {
+                protocol: MuxProtocol::Smux,
+                padding: false,
+                max_connections: 1,
+                ..SingMuxOptions::default()
+            },
+            dial,
+            Tasks::default(),
+        );
+        let mut smux_udp = smux.connect_udp(&target).await.unwrap();
+        smux_udp.write_all(&[0, 1, b'x']).await.unwrap();
+
+        let got = seen.wait_for(3).await;
+        assert_eq!(got.len(), 3);
+        for (kind, tcp_carried, dst) in got {
+            assert_eq!(kind, InboundKind::Shadowsocks);
+            assert!(tcp_carried);
+            assert_eq!(dst, target);
+        }
+    }
+}

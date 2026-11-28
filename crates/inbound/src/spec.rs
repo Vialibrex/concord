@@ -4,6 +4,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use concord_common::addr::unmap;
+use concord_common::cidr::IpCidrSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cidr {
@@ -157,11 +158,15 @@ impl HostCredential {
 #[derive(Debug)]
 pub(crate) struct Policy {
     auth: Option<Authenticator>,
-    skip_auth: Vec<Cidr>,
+    skip_auth: IpCidrSet,
     host: Option<HostCredential>,
-    allowed: Vec<Cidr>,
-    disallowed: Vec<Cidr>,
+    allowed: IpCidrSet,
+    disallowed: IpCidrSet,
     pub(crate) keepalive: Option<Keepalive>,
+}
+
+fn cidr_set(items: &[Cidr]) -> IpCidrSet {
+    items.iter().map(|cidr| (cidr.addr, cidr.len)).collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,14 +189,14 @@ impl Policy {
     pub(crate) fn from_spec(spec: &ListenSpec) -> Self {
         Policy {
             auth: Authenticator::new(&spec.authentication),
-            skip_auth: spec.skip_auth.clone(),
+            skip_auth: cidr_set(&spec.skip_auth),
             host: spec
                 .host_credential
                 .clone()
                 .filter(|(user, pass)| !user.is_empty() && !pass.is_empty())
                 .map(|(user, pass)| HostCredential { user, pass }),
-            allowed: spec.lan_allowed_ips.clone(),
-            disallowed: spec.lan_disallowed_ips.clone(),
+            allowed: cidr_set(&spec.lan_allowed_ips),
+            disallowed: cidr_set(&spec.lan_disallowed_ips),
             keepalive: spec.tcp_keepalive.then(|| Keepalive {
                 idle: keepalive_secs(spec.keepalive_idle_secs),
                 interval: keepalive_secs(spec.keepalive_interval_secs),
@@ -200,12 +205,12 @@ impl Policy {
     }
 
     pub(crate) fn admits(&self, ip: IpAddr) -> bool {
-        self.allowed.iter().any(|net| net.contains(ip))
-            && !self.disallowed.iter().any(|net| net.contains(ip))
+        let ip = unmap(ip);
+        self.allowed.contains(ip) && !self.disallowed.contains(ip)
     }
 
     pub(crate) fn authenticator(&self, ip: IpAddr) -> Option<&Authenticator> {
-        if self.skip_auth.iter().any(|net| net.contains(ip)) {
+        if self.skip_auth.contains(unmap(ip)) {
             return None;
         }
         self.auth.as_ref()
@@ -343,6 +348,73 @@ mod tests {
                 policy.host(std::net::Ipv4Addr::LOCALHOST.into()).is_none(),
                 "{user:?}:{pass:?}"
             );
+        }
+    }
+
+    #[test]
+    fn policy_agrees_with_linear_cidr_scan() {
+        let probes: Vec<IpAddr> = [
+            "0.0.0.0",
+            "10.0.0.1",
+            "10.0.0.2",
+            "192.168.1.1",
+            "192.168.1.2",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "::ffff:192.168.1.1",
+            "::ffff:10.0.0.1",
+            "fd00::1",
+            "fd00::2",
+            "2001:db8::1",
+        ]
+        .into_iter()
+        .map(|text| text.parse().unwrap())
+        .collect();
+
+        let cases: &[(&[&str], &[&str], &[&str])] = &[
+            (&[], &[], &[]),
+            (&["0.0.0.0/0"], &["192.168.1.1/32"], &["10.0.0.0/8"]),
+            (&["::/0"], &["fd00::1/128"], &["::1/128"]),
+            (
+                &["0.0.0.0/0", "::/0"],
+                &["10.0.0.0/24", "192.168.1.0/24", "fd00::/8"],
+                &["192.168.1.1/32", "fd00::2/128"],
+            ),
+            (
+                &["192.168.1.0/24", "192.168.1.1/32", "fd00::1/128"],
+                &["192.168.1.1/32"],
+                &["0.0.0.0/0"],
+            ),
+        ];
+
+        for &(allow, deny, skip) in cases {
+            let allowed: Vec<Cidr> = allow.iter().map(|s| cidr(s)).collect();
+            let disallowed: Vec<Cidr> = deny.iter().map(|s| cidr(s)).collect();
+            let skip_auth: Vec<Cidr> = skip.iter().map(|s| cidr(s)).collect();
+            let spec = ListenSpec {
+                authentication: vec![("u".into(), "p".into())],
+                lan_allowed_ips: allowed.clone(),
+                lan_disallowed_ips: disallowed.clone(),
+                skip_auth: skip_auth.clone(),
+                ..Default::default()
+            };
+            let policy = Policy::from_spec(&spec);
+            for &ip in &probes {
+                let linear_admit = allowed.iter().any(|net| net.contains(ip))
+                    && !disallowed.iter().any(|net| net.contains(ip));
+                assert_eq!(
+                    policy.admits(ip),
+                    linear_admit,
+                    "admits {allow:?}/{deny:?} {ip}"
+                );
+                let linear_auth = !skip_auth.iter().any(|net| net.contains(ip));
+                assert_eq!(
+                    policy.authenticator(ip).is_some(),
+                    linear_auth,
+                    "auth {skip:?} {ip}"
+                );
+            }
         }
     }
 }

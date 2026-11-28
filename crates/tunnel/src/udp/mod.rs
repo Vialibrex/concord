@@ -1367,4 +1367,90 @@ mod tests {
         let _outer = BatchRound::begin(&inner);
         let _inner = BatchRound::begin(&inner);
     }
+
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "loopback test fixture for DIRECT UDP port tracking"
+    )]
+    #[tokio::test]
+    async fn tcp_carried_udp_ignores_direct_udp_port_collision() {
+        let guard = LoopbackGuard::new(true);
+        let direct = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let port = direct.local_addr().unwrap().port();
+        let _ticket = guard.track_udp(&direct);
+        let src: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+
+        for kind in [
+            InboundKind::Shadowsocks,
+            InboundKind::Vmess,
+            InboundKind::Vless,
+            InboundKind::Trojan,
+            InboundKind::AnyTls,
+        ] {
+            let meta = FlowMeta {
+                dscp: 0,
+                network: Network::Udp,
+                inbound: InboundInfo::new(kind).over_tcp(),
+                src,
+                dst: target(),
+            };
+            assert!(
+                session::check_loopback(&guard, |_| false, &meta).is_ok(),
+                "{kind:?} over TCP must not match DIRECT udp_ports"
+            );
+        }
+
+        for kind in [InboundKind::Shadowsocks, InboundKind::Socks5] {
+            let native = FlowMeta {
+                dscp: 0,
+                network: Network::Udp,
+                inbound: InboundInfo::new(kind),
+                src,
+                dst: target(),
+            };
+            let err = session::check_loopback(&guard, |_| false, &native).unwrap_err();
+            assert!(
+                matches!(
+                    concord_common::CoreError::of(&err),
+                    Some(concord_common::CoreError::Loopback(_))
+                ),
+                "UDP-carried {kind:?} must still match DIRECT udp_ports"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_carried_udp_still_rejects_true_tcp_loopback() {
+        let guard = LoopbackGuard::new(true);
+        let (client, _server) = concord_test_support::tcp_pair().await;
+        let src = client.local_addr().unwrap();
+        let arrived = client.peer_addr().unwrap();
+        let _tracked = guard.track_tcp(client);
+
+        for kind in [
+            InboundKind::Shadowsocks,
+            InboundKind::Vmess,
+            InboundKind::Vless,
+            InboundKind::Trojan,
+            InboundKind::AnyTls,
+        ] {
+            let mut inbound = InboundInfo::new(kind).over_tcp();
+            inbound.addr = Some(arrived);
+            let meta = FlowMeta {
+                dscp: 0,
+                network: Network::Udp,
+                inbound,
+                src,
+                dst: target(),
+            };
+            let err = session::check_loopback(&guard, |_| false, &meta).unwrap_err();
+            assert!(
+                matches!(
+                    concord_common::CoreError::of(&err),
+                    Some(concord_common::CoreError::Loopback(_))
+                ),
+                "{kind:?} over TCP must still reject a true TCP loopback"
+            );
+        }
+    }
 }

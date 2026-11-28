@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use concord_common::cidr::IpCidrSet;
 use concord_common::{
     BoxStream, FlowHandler, FlowMeta, IcmpAnswer, Initiator, SockOpts, Tasks, UdpFlow, UdpPayload,
     UdpReply,
@@ -80,7 +81,14 @@ struct TunFlows {
     tunnel: Tunnel,
     tasks: Tasks,
     sockets: Arc<Sockets>,
-    device: Vec<Prefix>,
+    device: IpCidrSet,
+}
+
+fn device_set(prefixes: impl IntoIterator<Item = Prefix>) -> IpCidrSet {
+    prefixes
+        .into_iter()
+        .map(|prefix| (prefix.addr(), prefix.len()))
+        .collect()
 }
 
 impl FlowHandler for TunFlows {
@@ -102,7 +110,7 @@ impl FlowHandler for TunFlows {
             .tunnel
             .runtime()
             .is_none_or(|runtime| runtime.dns.is_fake_ip(dst));
-        if fake || self.device.iter().any(|prefix| prefix.contains(dst)) {
+        if fake || self.device.contains(dst) {
             return false;
         }
         let sockets = Arc::clone(&self.sockets);
@@ -237,12 +245,13 @@ pub(crate) async fn start_runner(
         tunnel: tunnel.clone(),
         tasks: tasks.clone(),
         sockets: Arc::clone(sockets),
-        device: options
-            .inet4_address
-            .iter()
-            .chain(&options.inet6_address)
-            .copied()
-            .collect(),
+        device: device_set(
+            options
+                .inet4_address
+                .iter()
+                .chain(&options.inet6_address)
+                .copied(),
+        ),
     });
     let runner = TunRunner::start(
         options,
@@ -442,6 +451,47 @@ mod tests {
                 congestion_controller: None,
             };
             assert_eq!(vpn_options(&tun).unwrap().0.mtu, DEFAULT_MTU);
+        }
+    }
+
+    #[test]
+    fn device_set_agrees_with_linear_prefix_scan() {
+        let probes: Vec<IpAddr> = [
+            "0.0.0.0",
+            "198.18.0.0",
+            "198.18.0.1",
+            "198.18.0.3",
+            "198.18.0.4",
+            "10.0.0.1",
+            "::",
+            "::1",
+            "::ffff:198.18.0.1",
+            "fdfe:dcba:9876::1",
+            "fdfe:dcba:9876::3",
+            "fdfe:dcba:9876::4",
+        ]
+        .into_iter()
+        .map(|text| text.parse().unwrap())
+        .collect();
+
+        let cases: &[&[&str]] = &[
+            &[],
+            &["198.18.0.1/30", "fdfe:dcba:9876::1/126"],
+            &["0.0.0.0/0", "::/0"],
+            &["10.0.0.1/32", "fdfe:dcba:9876::1/128"],
+            &["198.18.0.1/30", "198.18.0.1/32", "198.18.0.0/24"],
+        ];
+
+        for entries in cases {
+            let list: Vec<Prefix> = entries
+                .iter()
+                .map(|text| Prefix::parse(text).unwrap())
+                .collect();
+            let set = device_set(list.iter().copied());
+            for &ip in &probes {
+                let linear = list.iter().any(|prefix| prefix.contains(ip));
+                assert_eq!(set.contains(ip), linear, "case={entries:?} ip={ip}");
+            }
         }
     }
 }

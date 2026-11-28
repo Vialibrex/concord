@@ -1,5 +1,7 @@
 use std::pin::pin;
 
+use concord_net::LoopbackGuard;
+
 use super::*;
 
 pub(super) async fn session_for(
@@ -111,6 +113,18 @@ pub(super) async fn new_session(
     Ok(session)
 }
 
+pub(super) fn check_loopback(
+    loopback: &LoopbackGuard,
+    is_local_ip: impl FnOnce(IpAddr) -> bool,
+    meta: &FlowMeta,
+) -> io::Result<()> {
+    if meta.inbound.tcp_carried {
+        loopback.check_flow(meta.src, meta.arrived_at())
+    } else {
+        loopback.check_udp_source(meta.src, is_local_ip)
+    }
+}
+
 pub(super) async fn associate(
     inner: &Arc<Inner>,
     runtime: &Runtime,
@@ -122,9 +136,11 @@ pub(super) async fn associate(
     let kind = leaf.info().kind;
     let deadline = Instant::now() + ASSOCIATE_TIMEOUT;
     if kind.is_direct()
-        && let Err(err) = inner
-            .loopback
-            .check_udp_source(state.meta.src, |ip| runtime.platform.is_local_ip(ip))
+        && let Err(err) = check_loopback(
+            &inner.loopback,
+            |ip| runtime.platform.is_local_ip(ip),
+            &state.meta,
+        )
     {
         return Err(err);
     }

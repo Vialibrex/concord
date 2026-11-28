@@ -524,7 +524,7 @@ async fn start_concord(
     }
     config.push_str("rules:\n  - MATCH,DIRECT\n");
     std::fs::write(home.join("config.yaml"), config).unwrap();
-    let engine = Engine::new(EngineConfig {
+    let engine = Engine::without_loopback_guard(EngineConfig {
         sink: Arc::new(Quiet),
         android: false,
         platform: Arc::new(NativePlatform::new()),

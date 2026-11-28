@@ -156,10 +156,22 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 impl Engine {
     /// Call inside the runtime that should carry the flows.
     pub fn new(config: EngineConfig) -> Arc<Self> {
+        let loopback_enabled = !config.android;
+        Self::build(config, loopback_enabled)
+    }
+
+    /// For integration tests only: like [`Engine::new`], with the loopback guard off for
+    /// localhost harness setups where unrelated local sockets share a port number with DIRECT.
+    #[doc(hidden)]
+    pub fn without_loopback_guard(config: EngineConfig) -> Arc<Self> {
+        Self::build(config, false)
+    }
+
+    fn build(config: EngineConfig, loopback_enabled: bool) -> Arc<Self> {
         let events = config.sink;
         let route = Arc::new(RouteCounters::new(events.clone()));
-        let loopback_guard = LoopbackGuard::new(!config.android);
-        let loopback = (!config.android).then(|| loopback_guard.clone());
+        let loopback_guard = LoopbackGuard::new(loopback_enabled);
+        let loopback = loopback_enabled.then(|| loopback_guard.clone());
         let sockets = Arc::new(Sockets::new(config.platform.clone()));
         let tasks = TaskTracker::new();
         let own = Tasks::current(tasks.clone(), CancellationToken::new());

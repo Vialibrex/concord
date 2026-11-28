@@ -78,7 +78,6 @@ const LAYERS: &[(&str, Opt, &[&str])] = &[
         &[
             "concord-common",
             "concord-config",
-            "concord-rules",
             "concord-tls",
             "concord-quic",
             "concord-platform",
