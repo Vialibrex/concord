@@ -1663,3 +1663,216 @@ fn url_set_fallback_matches_when_regex_set_cannot_be_built() {
     assert!(!set.matches(0, &http, &mut cache));
     assert!(set.matches(1, &http, &mut cache));
 }
+
+#[test]
+fn chunked_url_set_scans_buckets_lazily_and_handles_oversized_single_pattern() {
+    let patterns = [
+        r"^https?://([a-z0-9-]+\.)*b0\.example\.com/p0",
+        r"/api/v\d+/bucket0/item1",
+        r"^https?://([a-z0-9-]+\.)*b1\.example\.com/p2",
+        r"/api/v\d+/bucket1/item3",
+        r"^https?://([a-z0-9-]+\.)*b2\.example\.com/p4",
+        r"/api/v\d+/bucket2/item5",
+        r"/shared/both",
+    ];
+    let sources: Vec<String> = patterns
+        .iter()
+        .map(|p| concord_config::mitm::delegatable_regex(p).unwrap())
+        .collect();
+    let regexes: Vec<fancy_regex::Regex> = patterns
+        .iter()
+        .map(|p| fancy_regex::Regex::new(p).unwrap())
+        .collect();
+
+    // Small NFA cap forces multiple buckets while still fitting individual patterns.
+    let set = crate::runs::UrlSet::build_with_limit(sources.clone(), regexes.clone(), 4096);
+    assert!(set.is_set());
+    assert!(
+        set.bucket_count() >= 3,
+        "expected >= 3 buckets, got {}",
+        set.bucket_count()
+    );
+
+    let make_http = |url: &str| {
+        std::sync::Arc::new(concord_common::HttpFacts {
+            url: url.into(),
+            host: "b0.example.com".into(),
+            user_agent: None,
+        })
+    };
+
+    // Hit in bucket 0 scans only bucket 0 (1 scan, not all buckets).
+    let mut cache = None;
+    let hit0 = make_http("https://b0.example.com/p0");
+    assert!(set.matches(0, &hit0, &mut cache));
+    assert_eq!(set.scans(), 1);
+    assert!(!set.matches(1, &hit0, &mut cache));
+    assert_eq!(set.scans(), 1);
+
+    let mut cache = None;
+    let scans_before_last = set.scans();
+    let hit_last = make_http("https://x.test/shared/both");
+    assert!(!set.matches(0, &hit_last, &mut cache));
+    assert_eq!(set.scans(), scans_before_last + 1);
+    assert!(set.matches(6, &hit_last, &mut cache));
+    assert_eq!(set.scans(), scans_before_last + 2);
+
+    let mut cache = None;
+    let scans_before = set.scans();
+    let hit_both = make_http("https://b0.example.com/p0/shared/both");
+    assert!(set.matches(0, &hit_both, &mut cache));
+    assert_eq!(set.scans(), scans_before + 1);
+    assert!(set.matches(6, &hit_both, &mut cache));
+    assert_eq!(set.scans(), scans_before + 2);
+    assert!(set.matches(0, &hit_both, &mut cache));
+    assert_eq!(set.scans(), scans_before + 2);
+
+    let mixed = [r"/alpha/", r"/api/v\d+/big", r"/beta/", r"/gamma/"];
+    let m_src: Vec<String> = mixed
+        .iter()
+        .map(|p| concord_config::mitm::delegatable_regex(p).unwrap())
+        .collect();
+    let m_re: Vec<fancy_regex::Regex> = mixed
+        .iter()
+        .map(|p| fancy_regex::Regex::new(p).unwrap())
+        .collect();
+    let degraded = crate::runs::UrlSet::build_with_limit(m_src, m_re, 1024);
+    assert!(degraded.is_set());
+    assert!(
+        degraded.fancy_bucket_count() >= 1,
+        "expected oversized Unicode pattern to degrade to Fancy"
+    );
+    let mut cache = None;
+    assert!(degraded.matches(0, &make_http("https://x.test/alpha/"), &mut cache));
+    assert!(degraded.matches(1, &make_http("https://x.test/api/v9/big"), &mut cache));
+    assert!(!degraded.matches(1, &make_http("https://x.test/api/nope"), &mut cache));
+    assert!(degraded.matches(3, &make_http("https://x.test/gamma/"), &mut cache));
+}
+
+#[test]
+fn chunked_url_set_recovers_step_after_heavy_prefix() {
+    let mut sources = Vec::new();
+    let mut regexes = Vec::new();
+    for i in 0..8 {
+        let pat = format!("/heavy/segment_alpha_beta_gamma_delta_epsilon_{i}/");
+        sources.push(concord_config::mitm::delegatable_regex(&pat).unwrap());
+        regexes.push(fancy_regex::Regex::new(&pat).unwrap());
+    }
+    for i in 0..80 {
+        let pat = format!("/p{i}/");
+        sources.push(concord_config::mitm::delegatable_regex(&pat).unwrap());
+        regexes.push(fancy_regex::Regex::new(&pat).unwrap());
+    }
+    // Long ASCII prefix fits in small Set buckets (no Fancy degradation) and pulls step down,
+    // while the 80 short ASCII patterns must recover step upward rather than staying pinned.
+    let set = crate::runs::UrlSet::build_with_limit(sources, regexes, 4096);
+    assert!(set.is_set());
+    assert_eq!(
+        set.fancy_bucket_count(),
+        0,
+        "prefix must fit in Set buckets so step actually shrinks"
+    );
+    assert!(
+        set.bucket_count() < 20,
+        "expected step recovery on light suffix, got {} buckets",
+        set.bucket_count()
+    );
+}
+
+#[test]
+fn single_set_fast_path_keeps_n1000_and_within_limit_unchunked() {
+    let make = |n: usize| {
+        let mut sources = Vec::with_capacity(n);
+        let mut regexes = Vec::with_capacity(n);
+        let mut items = Vec::with_capacity(n);
+        for i in 0..n {
+            let pat = format!("/api/item{i}/");
+            let cooked = concord_config::mitm::delegatable_regex(&pat).unwrap();
+            let re = fancy_regex::Regex::new(&pat).unwrap();
+            sources.push(cooked);
+            regexes.push(re.clone());
+            items.push((i as u32, re));
+        }
+        (sources, regexes, items)
+    };
+
+    // Synthetic fast-path check: 16 patterns exceed bucket=2 KiB yet fit inside single=16 KiB.
+    let (s_fit, r_fit, i_fit) = make(16);
+    let fit_set = crate::runs::UrlSet::build_with_limits(s_fit.clone(), r_fit.clone(), 16384, 2048);
+    assert_eq!(fit_set.bucket_count(), 1);
+    let fit_run = crate::runs::UrlRun::build_with_limits(0, 16, i_fit, Some(16384), 2048);
+    assert_eq!(fit_run.bucket_count(), 1);
+
+    let (s_big, r_big, i_big) = make(60);
+    let big_set = crate::runs::UrlSet::build_with_limits(s_big, r_big, 16384, 2048);
+    assert!(big_set.bucket_count() >= 2);
+    let big_run = crate::runs::UrlRun::build_with_limits(0, 60, i_big, Some(16384), 2048);
+    assert!(big_run.bucket_count() >= 2);
+
+    let mut prod_sources = Vec::new();
+    let mut prod_regexes = Vec::new();
+    let mut prod_items = Vec::new();
+    for i in 0..1000usize {
+        let pat = match i % 5 {
+            0 => format!(r"^https?://([a-z0-9-]+\.)*ads{i}\.example\.com/"),
+            1 => format!(r"/api/v\d+/track{i}\?"),
+            2 => format!(r"(?i)\.example{i}\.net/.*\.(gif|png)$"),
+            3 => format!(r"^https://cdn{i}\.test/(?!static/)"),
+            _ => format!(r"/collect{i}/"),
+        };
+        let re = fancy_regex::Regex::new(&pat).unwrap();
+        if let Some(cooked) = concord_config::mitm::delegatable_regex(&pat) {
+            prod_sources.push(cooked);
+            prod_regexes.push(re.clone());
+        }
+        prod_items.push((i as u32, re));
+    }
+    let prod_set = crate::runs::UrlSet::build(prod_sources, prod_regexes);
+    assert_eq!(
+        prod_set.bucket_count(),
+        1,
+        "n=1000 UrlSet must stay single-bucket"
+    );
+    let prod_run = crate::runs::UrlRun::build(0, 1000, prod_items);
+    assert_eq!(
+        prod_run.bucket_count(),
+        1,
+        "n=1000 UrlRun must stay single-bucket"
+    );
+}
+
+#[test]
+fn chunked_url_run_preserves_rule_order_across_buckets_and_fancy() {
+    let entries: &[(u32, &str)] = &[
+        (0, r"^https?://([a-z0-9-]+\.)*b0\.example\.com/hit"),
+        (1, r"/api/v\d+/b0/one"),
+        (2, r"^https?://([a-z0-9-]+\.)*b1\.example\.com/hit"),
+        (3, r"/fancy/(?!skip)"),
+        (4, r"/api/v\d+/b1/two"),
+        (5, r"^https?://([a-z0-9-]+\.)*b2\.example\.com/hit"),
+        (6, r"/api/v\d+/b2/three"),
+        (7, r"/shared/tail"),
+    ];
+    let items: Vec<(u32, fancy_regex::Regex)> = entries
+        .iter()
+        .map(|(idx, pat)| (*idx, fancy_regex::Regex::new(pat).unwrap()))
+        .collect();
+    let run = crate::runs::UrlRun::build_with_limit(0, 8, items, 4096);
+    assert!(
+        run.bucket_count() >= 3,
+        "expected >= 3 UrlRun buckets, got {}",
+        run.bucket_count()
+    );
+
+    // Hit only in last bucket.
+    assert_eq!(run.next_from("https://x.test/shared/tail", 0), Some(7));
+    // Hit only in bucket 0.
+    assert_eq!(run.next_from("https://b0.example.com/hit", 0), Some(0));
+    // Simultaneous hits in bucket 0 (0), intervening fancy (3), and last bucket (7):
+    // early-stop across buckets must return strictly increasing rule indices.
+    let multi = "https://b0.example.com/hit/fancy/ok/shared/tail";
+    assert_eq!(run.next_from(multi, 0), Some(0));
+    assert_eq!(run.next_from(multi, 1), Some(3));
+    assert_eq!(run.next_from(multi, 4), Some(7));
+    assert_eq!(run.next_from(multi, 8), None);
+}

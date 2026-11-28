@@ -1,19 +1,19 @@
 //! Indexes over a run of adjacent same-family rules. Each answers "the first
 //! rule at or after `from` that matches", so a linear scan and the index agree.
 
+mod url;
+
 use std::net::IpAddr;
-use std::sync::Arc;
 
 use aho_corasick::{AhoCorasick, AhoCorasickKind, MatchKind};
-use concord_common::HttpFacts;
 use concord_config::filter::Matcher;
-use concord_config::mitm::delegatable_regex;
-use regex::{RegexSet, SetMatches};
 
 use crate::eval::Ev;
 use crate::index::{HashIdx, SuffixHash, hash_key};
 use crate::table::{RuleTable, TableBuilder};
 use crate::text::wildcard_match;
+
+pub(crate) use url::{UrlCache, UrlNode, UrlRun, UrlSet, UrlSlots};
 
 pub(crate) enum DomainItem {
     Exact,
@@ -309,199 +309,5 @@ impl IpRun {
             }
         }
         (best != u32::MAX).then_some(best)
-    }
-}
-
-/// A run of `URL-REGEX` rules. Patterns fancy-regex hands whole to the `regex` engine are
-/// matched together in one set; the rest are tried one at a time, in list order.
-pub(crate) struct UrlRun {
-    pub(crate) start: u32,
-    pub(crate) end: u32,
-    set: Option<(RegexSet, Box<[u32]>)>,
-    fancy: Box<[(u32, fancy_regex::Regex)]>,
-}
-
-impl UrlRun {
-    pub(crate) fn build(start: u32, end: u32, items: Vec<(u32, fancy_regex::Regex)>) -> UrlRun {
-        let mut sources = Vec::new();
-        let mut owners = Vec::new();
-        let mut delegated = Vec::new();
-        let mut fancy = Vec::new();
-        for (idx, regex) in items {
-            match delegatable_regex(regex.as_str()) {
-                Some(cooked) => {
-                    sources.push(cooked);
-                    owners.push(idx);
-                    delegated.push((idx, regex));
-                }
-                None => fancy.push((idx, regex)),
-            }
-        }
-        let set = match RegexSet::new(&sources) {
-            Ok(set) if !sources.is_empty() => Some((set, owners.into_boxed_slice())),
-            _ => {
-                fancy.append(&mut delegated);
-                fancy.sort_unstable_by_key(|(idx, _)| *idx);
-                None
-            }
-        };
-        UrlRun {
-            start,
-            end,
-            set,
-            fancy: fancy.into_boxed_slice(),
-        }
-    }
-
-    pub(crate) fn heap_bytes(&self) -> usize {
-        self.set.as_ref().map_or(0, |(_, owners)| owners.len() * 4)
-            + self.fancy.len() * std::mem::size_of::<(u32, fancy_regex::Regex)>()
-    }
-
-    /// The smallest rule index in `from..end` whose pattern matches `url`.
-    pub(crate) fn next_from(&self, url: &str, from: u32) -> Option<u32> {
-        let from = from.max(self.start);
-        let best = self.set.as_ref().and_then(|(set, owners)| {
-            set.matches(url)
-                .iter()
-                .filter_map(|at| owners.get(at).copied())
-                .find(|idx| *idx >= from)
-        });
-        for (idx, regex) in self.fancy.iter() {
-            if *idx < from {
-                continue;
-            }
-            if best.is_some_and(|best| *idx >= best) {
-                break;
-            }
-            if regex.is_match(url).unwrap_or(false) {
-                return Some(*idx);
-            }
-        }
-        best
-    }
-}
-
-pub(crate) enum UrlNode {
-    Slot(u32),
-    Fancy(Box<fancy_regex::Regex>),
-}
-
-pub(crate) struct UrlCache {
-    http: Arc<HttpFacts>,
-    hits: SetMatches,
-}
-
-/// Slot allocator owned only by full `RouteProgram` compilation; classical
-/// rule-sets hold no allocator and keep every `URL-REGEX` leaf self-contained.
-#[derive(Default)]
-pub(crate) struct UrlSlots {
-    sources: Vec<String>,
-    regexes: Vec<fancy_regex::Regex>,
-}
-
-impl UrlSlots {
-    pub(crate) fn alloc(&mut self, regex: fancy_regex::Regex) -> UrlNode {
-        if let Some(cooked) = delegatable_regex(regex.as_str()) {
-            let slot = self.sources.len() as u32;
-            self.sources.push(cooked);
-            self.regexes.push(regex);
-            return UrlNode::Slot(slot);
-        }
-        UrlNode::Fancy(Box::new(regex))
-    }
-
-    pub(crate) fn build(self) -> UrlSet {
-        UrlSet::build(self.sources, self.regexes)
-    }
-}
-
-/// Program-wide pre-matcher for lone and nested `URL-REGEX` leaves across a
-/// `RouteProgram`'s main list and sub-rule lists.
-#[derive(Default)]
-pub(crate) struct UrlSet {
-    inner: UrlSetInner,
-    #[cfg(test)]
-    scans: std::sync::atomic::AtomicUsize,
-}
-
-#[derive(Default)]
-enum UrlSetInner {
-    #[default]
-    Empty,
-    Set(RegexSet),
-    Fallback(Box<[fancy_regex::Regex]>),
-}
-
-impl UrlSet {
-    pub(crate) const fn empty() -> UrlSet {
-        UrlSet {
-            inner: UrlSetInner::Empty,
-            #[cfg(test)]
-            scans: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-
-    pub(crate) fn build(sources: Vec<String>, regexes: Vec<fancy_regex::Regex>) -> UrlSet {
-        let inner = match regexes.len() {
-            0 => UrlSetInner::Empty,
-            1 => UrlSetInner::Fallback(regexes.into_boxed_slice()),
-            _ => match RegexSet::new(&sources) {
-                Ok(set) => UrlSetInner::Set(set),
-                Err(_) => UrlSetInner::Fallback(regexes.into_boxed_slice()),
-            },
-        };
-        UrlSet {
-            inner,
-            #[cfg(test)]
-            scans: std::sync::atomic::AtomicUsize::new(0),
-        }
-    }
-
-    pub(crate) fn heap_bytes(&self) -> usize {
-        match &self.inner {
-            UrlSetInner::Fallback(list) => list.len() * std::mem::size_of::<fancy_regex::Regex>(),
-            UrlSetInner::Empty | UrlSetInner::Set(_) => 0,
-        }
-    }
-
-    pub(crate) fn matches(
-        &self,
-        slot: u32,
-        http: &Arc<HttpFacts>,
-        cache: &mut Option<Box<UrlCache>>,
-    ) -> bool {
-        match &self.inner {
-            UrlSetInner::Empty => false,
-            UrlSetInner::Set(set) => {
-                let hits = match cache {
-                    Some(cached) if Arc::ptr_eq(&cached.http, http) => &cached.hits,
-                    slot_cache => {
-                        #[cfg(test)]
-                        self.scans
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let cached = slot_cache.insert(Box::new(UrlCache {
-                            http: Arc::clone(http),
-                            hits: set.matches(&http.url),
-                        }));
-                        &cached.hits
-                    }
-                };
-                hits.matched(slot as usize)
-            }
-            UrlSetInner::Fallback(list) => list
-                .get(slot as usize)
-                .is_some_and(|regex| regex.is_match(&*http.url).unwrap_or(false)),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_set(&self) -> bool {
-        matches!(self.inner, UrlSetInner::Set(_))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn scans(&self) -> usize {
-        self.scans.load(std::sync::atomic::Ordering::Relaxed)
     }
 }

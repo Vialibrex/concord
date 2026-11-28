@@ -819,3 +819,105 @@ fn interleaved_url_leaves_agree_with_linear_evaluator() {
     assert!(set_programs > 100, "expected UrlSet::Set to be exercised");
     assert!(hits > 1000);
 }
+
+#[test]
+fn chunked_url_run_and_set_agree_with_linear_oracle() {
+    let mut rng = StdRng::seed_from_u64(99);
+    let patterns = [
+        r"^https?://([a-z0-9-]+\.)*a\.com/p",
+        r"/api/v\d+/alpha",
+        r"(?i)\.b\.com/.*\.png$",
+        r"^https://c\.org/(?!static/)",
+        r"/collect/\d+/",
+        r"/ad/",
+        r"/track/(?!ignore)",
+        r"(?i)/promo/[a-z]+",
+        r"/tail/end$",
+    ];
+    let urls = [
+        "https://a.com/p/api/v1/alpha",
+        "https://sub.b.com/img/x.PNG",
+        "https://c.org/dyn/ad/tail/end",
+        "https://c.org/static/collect/42/",
+        "https://x.test/track/ok/PROMO/sale/tail/end",
+        "https://x.test/track/ignore/nothing",
+        "https://unlisted.test/plain",
+    ];
+    let mut multi_set_cases = 0usize;
+    let mut multi_run_cases = 0usize;
+
+    for _ in 0..40 {
+        let len = rng.random_range(8..24);
+        let chosen: Vec<&str> = (0..len).map(|_| choose(&mut rng, &patterns)).collect();
+        let compiled: Vec<fancy_regex::Regex> = chosen
+            .iter()
+            .map(|p| fancy_regex::Regex::new(p).unwrap())
+            .collect();
+
+        for limit in [1024usize, 2048, 4096] {
+            let run_items: Vec<(u32, fancy_regex::Regex)> = compiled
+                .iter()
+                .enumerate()
+                .map(|(i, re)| (i as u32, re.clone()))
+                .collect();
+            let run = crate::runs::UrlRun::build_with_limit(0, len as u32, run_items, limit);
+            if run.bucket_count() >= 2 {
+                multi_run_cases += 1;
+            }
+
+            let mut del_sources = Vec::new();
+            let mut del_regexes = Vec::new();
+            let mut del_indices = Vec::new();
+            for (i, (pat, re)) in chosen.iter().zip(&compiled).enumerate() {
+                if let Some(cooked) = concord_config::mitm::delegatable_regex(pat) {
+                    del_sources.push(cooked);
+                    del_regexes.push(re.clone());
+                    del_indices.push(i);
+                }
+            }
+            let set = crate::runs::UrlSet::build_with_limit(del_sources, del_regexes, limit);
+            if set.bucket_count() >= 2 {
+                multi_set_cases += 1;
+            }
+
+            for url in urls {
+                let mut want_run = Vec::new();
+                for (i, re) in compiled.iter().enumerate() {
+                    if re.is_match(url).unwrap_or(false) {
+                        want_run.push(i as u32);
+                    }
+                }
+                let mut got_run = Vec::new();
+                let mut from = 0u32;
+                while let Some(hit) = run.next_from(url, from) {
+                    got_run.push(hit);
+                    from = hit + 1;
+                }
+                assert_eq!(want_run, got_run, "UrlRun mismatch limit={limit} url={url}");
+
+                let http = std::sync::Arc::new(concord_common::HttpFacts {
+                    url: url.into(),
+                    host: "a.com".into(),
+                    user_agent: None,
+                });
+                let mut order: Vec<usize> = (0..del_indices.len()).collect();
+                for i in (1..order.len()).rev() {
+                    let j = rng.random_range(0..=i);
+                    order.swap(i, j);
+                }
+                let mut cache = None;
+                for &slot in order.iter().chain(order.iter().rev()) {
+                    let orig_idx = del_indices[slot];
+                    let want = compiled[orig_idx].is_match(url).unwrap_or(false);
+                    let got = set.matches(slot as u32, &http, &mut cache);
+                    assert_eq!(
+                        want, got,
+                        "UrlSet mismatch limit={limit} slot={slot} url={url}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(multi_run_cases > 20, "expected multi-bucket UrlRun cases");
+    assert!(multi_set_cases > 20, "expected multi-bucket UrlSet cases");
+}
