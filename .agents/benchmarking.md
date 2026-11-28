@@ -292,9 +292,13 @@ and a drift of at most 1.61%. The same case on the second machine is a separate 
 | `http-rr` | `mitm` cases: `mitm-rr` over plain HTTP/1.1 |
 | `page-load` | pages of `--page-conns` (default 16) HTTPS connections opened at once, one GET of 10 to 200 KiB each, 250 ms apart: page p50/p95 to the last byte, response-head p50/p95, the same pages fetched without the core before each trial (`bare_page_*`), CPU-µs per page; on every case, in no tier |
 
-Upload rates come from the origin's receive counter, which it reports every 100 ms, not from the client's send
-calls, so socket buffers cannot inflate them. `interval_cv` and `interval_p10_gbps` show how steady the 100 ms rates
-were.
+Upload rates come from the origin's receive counter, which it stamps with its own monotonic clock and reports
+every 100 ms as `(elapsed_ns, total_bytes)`, not from the client's send calls, so socket buffers cannot inflate
+them. `interval_cv` and `interval_p10_gbps` are computed from those origin-side 100 ms intervals rather than
+client-side timer ticks, so reverse-path report delay or frame coalescing does not read as an upload stall; a
+record whose `env.bench_rev` predates the commit that introduced `origin::REPORT_BYTES` (when the origin sent bare
+8-byte totals sampled on the client's timer) is not directly comparable on `tcp-up`'s `interval_cv` and
+`interval_p10_gbps` columns, while headline `gbps` keeps the same definition.
 
 The `mitm-*` cases are tiers of Concord's MITM, all DIRECT, for Concord cores only (mihomo has no MITM): `mitm-off`
 (no section), `mitm-pass` (on, the origin not listed), `mitm` (the origin decrypted, no rule acting on requests),
@@ -529,12 +533,15 @@ Through its VPN, which adds the TUN reads and writes, the user-space stack and `
 take. This needs root (an emulator's `google_apis` image, or `adb root` on a userdebug build):
 
 ```sh
-# On another machine the device reaches, off its own subnet:
+# On another machine the device reaches, off its own subnet (build from the same commit as the harness;
+# upload progress reports carry a format header and a mismatched remote origin is rejected):
 concord-bench origin --bind 172.20.10.2 --base-port 47000
 # On the device, as root:
 ./concord-bench run --attach rs=pkg:<package> --via tun --origin 172.20.10.2:47000 \
   --load-uid pkg:com.google.android.inputmethod.latin
 ```
+
+Build the remote `concord-bench origin` from the same commit as the harness: upload progress reports carry a format header (`origin::SINK_MAGIC`) and a mismatched remote origin is rejected.
 
 Four things have to line up, and the run checks the first before it starts:
 

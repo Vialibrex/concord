@@ -2,7 +2,7 @@
 //! core's. It exits when its standard input closes, so it never outlives the harness.
 
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -12,6 +12,21 @@ use crate::mitm;
 
 pub const CHUNK: usize = 64 * 1024;
 pub const REPORT_EVERY: Duration = Duration::from_millis(100);
+pub const SINK_MAGIC: [u8; 8] = *b"CBSINK02";
+pub const REPORT_BYTES: usize = 16;
+
+pub fn encode_report(elapsed_ns: u64, total: u64) -> [u8; REPORT_BYTES] {
+    let mut out = [0u8; REPORT_BYTES];
+    out[..8].copy_from_slice(&elapsed_ns.to_le_bytes());
+    out[8..].copy_from_slice(&total.to_le_bytes());
+    out
+}
+
+pub fn decode_report(raw: [u8; REPORT_BYTES]) -> (u64, u64) {
+    let elapsed_ns = u64::from_le_bytes(raw[..8].try_into().unwrap_or_default());
+    let total = u64::from_le_bytes(raw[8..].try_into().unwrap_or_default());
+    (elapsed_ns, total)
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Ports {
@@ -101,23 +116,32 @@ async fn source_flow(mut stream: TcpStream, rate_mbit: Option<f64>) -> std::io::
     crate::pace::send_chunks(&mut stream, 0x5a, rate_mbit).await
 }
 
-/// Reports the running total so the uploader learns the receiver's rate, not its own buffers'.
-async fn sink_flow(stream: TcpStream) -> std::io::Result<()> {
+/// Reports `(elapsed_ns, total)` on its own clock every `REPORT_EVERY`, so upload rates
+/// and interval steadiness reflect what the origin received rather than client buffers or
+/// return-path report bunching.
+pub(crate) async fn sink_flow(stream: TcpStream) -> std::io::Result<()> {
     let (mut read, mut write) = stream.into_split();
+    write.write_all(&SINK_MAGIC).await?;
     let mut buf = vec![0u8; CHUNK];
     let mut total = 0u64;
-    let mut tick = tokio::time::interval(REPORT_EVERY);
+    let started = Instant::now();
+    let mut tick =
+        tokio::time::interval_at(tokio::time::Instant::now() + REPORT_EVERY, REPORT_EVERY);
     loop {
         tokio::select! {
             read = read.read(&mut buf) => {
                 let n = read?;
                 if n == 0 {
-                    write.write_all(&total.to_le_bytes()).await?;
+                    let report = encode_report(started.elapsed().as_nanos() as u64, total);
+                    write.write_all(&report).await?;
                     return Ok(());
                 }
                 total += n as u64;
             }
-            _ = tick.tick() => write.write_all(&total.to_le_bytes()).await?,
+            _ = tick.tick() => {
+                let report = encode_report(started.elapsed().as_nanos() as u64, total);
+                write.write_all(&report).await?;
+            }
         }
     }
 }

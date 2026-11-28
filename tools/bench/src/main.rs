@@ -35,6 +35,7 @@ mod runner;
 mod sockets;
 mod socks;
 mod stats;
+mod stream;
 mod syscalls;
 mod tailscale;
 

@@ -5,18 +5,18 @@ use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::mitm::{self, Wire};
-use crate::origin::{CHUNK, Ports};
+use crate::origin::Ports;
 use crate::probe::{self, Delta, Window};
-use crate::sockets;
 use crate::socks::{self, Entry, Udp};
 use crate::stats;
+use crate::stream::{self, Direction};
 use crate::syscalls;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -207,7 +207,7 @@ pub(crate) struct Windows {
 }
 
 pub(crate) struct Closed {
-    core: Delta,
+    pub(crate) core: Delta,
     server: Option<Delta>,
     origin: Option<Delta>,
     client: Delta,
@@ -248,7 +248,12 @@ impl Windows {
 pub(crate) const MIB: f64 = 1024.0 * 1024.0;
 
 /// Cost of the window per `unit_count` units of work, named `per`.
-fn costs(m: &mut Metrics, closed: &Closed, bytes: Option<u64>, per: Option<(&str, f64, f64)>) {
+pub(crate) fn costs(
+    m: &mut Metrics,
+    closed: &Closed,
+    bytes: Option<u64>,
+    per: Option<(&str, f64, f64)>,
+) {
     let core = &closed.core;
     let cpu = core.cpu_ns() as f64;
     m.insert("cores".into(), core.cores());
@@ -388,9 +393,9 @@ pub(crate) fn io(what: &str) -> impl FnOnce(std::io::Error) -> String + '_ {
 
 pub async fn run(workload: Workload, ctx: &Ctx) -> Io<Metrics> {
     match workload {
-        Workload::TcpDown => stream(ctx, Direction::Down, 1).await,
-        Workload::TcpUp => stream(ctx, Direction::Up, 1).await,
-        Workload::TcpMulti => stream(ctx, Direction::Down, ctx.flows).await,
+        Workload::TcpDown => stream::run(ctx, Direction::Down, 1).await,
+        Workload::TcpUp => stream::run(ctx, Direction::Up, 1).await,
+        Workload::TcpMulti => stream::run(ctx, Direction::Down, ctx.flows).await,
         Workload::TcpRr => rr(ctx).await,
         Workload::TcpCrr => crr(ctx).await,
         Workload::UdpStream => udp(ctx, ctx.udp_size, ctx.udp_window, 1).await,
@@ -411,192 +416,6 @@ pub async fn run(workload: Workload, ctx: &Ctx) -> Io<Metrics> {
         Workload::Idle | Workload::Quiet | Workload::Startup | Workload::Large => {
             Err(format!("{} runs on a fresh core", workload.name()))
         }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Direction {
-    Down,
-    Up,
-}
-
-/// Bulk transfer over `flows` connections. Down counts what the client reads, up
-/// what the origin reports it received, so neither side's buffering inflates a rate.
-async fn stream(ctx: &Ctx, direction: Direction, flows: usize) -> Io<Metrics> {
-    let counters: Arc<Vec<AtomicU64>> = Arc::new((0..flows).map(|_| AtomicU64::new(0)).collect());
-    let stop = Arc::new(AtomicBool::new(false));
-    let failed = Arc::new(std::sync::Mutex::new(None::<String>));
-    let target = ctx.at(match direction {
-        Direction::Down => ctx.ports.source,
-        Direction::Up => ctx.ports.sink,
-    });
-    let rate = ctx.client_rate;
-    let mut tasks = Vec::new();
-    for flow in 0..flows {
-        let stream = socks::connect(ctx.entry, target)
-            .await
-            .map_err(io("connect"))?;
-        let (counters, stop, failed) = (counters.clone(), stop.clone(), failed.clone());
-        tasks.push(tokio::spawn(async move {
-            let result = match direction {
-                Direction::Down => drain(stream, &counters[flow], &stop).await,
-                Direction::Up => fill(stream, rate, &counters[flow], &stop).await,
-            };
-            if let Err(err) = result
-                && !stop.load(Ordering::Relaxed)
-            {
-                *failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
-            }
-        }));
-    }
-    let total = || {
-        counters
-            .iter()
-            .map(|c| c.load(Ordering::Relaxed))
-            .sum::<u64>()
-    };
-    tokio::time::sleep(ctx.warmup).await;
-    let mixed_port = match ctx.entry {
-        Entry::Socks(proxy) => Some(proxy.port()),
-        Entry::Tun => None,
-    };
-    let tcp_before = sockets::snapshot(ctx.pids.core, mixed_port);
-    let net_before = ctx.net_counters.then(|| NetEdge::read(ctx));
-    let per_flow_start: Vec<u64> = counters.iter().map(|c| c.load(Ordering::Relaxed)).collect();
-    let windows = Windows::open(ctx.pids);
-    let started = Instant::now();
-    let start_bytes = total();
-    let mut intervals = Vec::new();
-    let mut last = (started, start_bytes);
-    let mut tick = tokio::time::interval_at(
-        tokio::time::Instant::now() + crate::origin::REPORT_EVERY,
-        crate::origin::REPORT_EVERY,
-    );
-    while started.elapsed() < ctx.duration {
-        tick.tick().await;
-        let now = (Instant::now(), total());
-        intervals
-            .push((now.1 - last.1) as f64 * 8.0 / 1e9 / now.0.duration_since(last.0).as_secs_f64());
-        last = now;
-    }
-    let elapsed = started.elapsed().as_secs_f64();
-    let bytes = total() - start_bytes;
-    let per_flow: Vec<f64> = counters
-        .iter()
-        .zip(&per_flow_start)
-        .map(|(c, s)| (c.load(Ordering::Relaxed) - s) as f64 * 8.0 / 1e9 / elapsed)
-        .collect();
-    let closed = windows.close();
-    let tcp_after = sockets::snapshot(ctx.pids.core, mixed_port);
-    let net_after = ctx.net_counters.then(|| NetEdge::read(ctx));
-    stop.store(true, Ordering::Relaxed);
-    for task in tasks {
-        task.abort();
-    }
-    if let Some(err) = failed.lock().unwrap_or_else(|e| e.into_inner()).take() {
-        return Err(err);
-    }
-    if bytes == 0 {
-        return Err("no bytes moved".into());
-    }
-    let mut m = Metrics::new();
-    m.insert("gbps".into(), bytes as f64 * 8.0 / 1e9 / elapsed);
-    m.insert("interval_cv".into(), stats::cv(&intervals));
-    let mut sorted = intervals.clone();
-    sorted.sort_by(f64::total_cmp);
-    m.insert("interval_p10_gbps".into(), stats::quantile(&sorted, 0.1));
-    if flows > 1 {
-        m.insert("jain".into(), stats::jain(&per_flow));
-        m.insert(
-            "min_flow_gbps".into(),
-            per_flow.iter().copied().fold(f64::INFINITY, f64::min),
-        );
-        if ctx.net_counters {
-            for (flow, rate) in per_flow.iter().enumerate() {
-                m.insert(format!("flow_{flow}_gbps"), *rate);
-            }
-        }
-    }
-    costs(&mut m, &closed, Some(bytes), None);
-    if let (Some(before), Some(after)) = (&tcp_before, &tcp_after) {
-        let (received, sent) = sockets::metrics(before, after, &mut m);
-        if let Some(counts) = closed.core.syscall_counts.filter(|c| c.get("splice") == 0) {
-            let per_call =
-                |bytes: u64, calls: u64| (calls > 0).then(|| bytes as f64 / calls as f64);
-            if let Some(v) = per_call(received, counts.sum(&syscalls::RECV)) {
-                m.insert("socket_bytes_per_recv_call".into(), v);
-            }
-            if let Some(v) = per_call(sent, counts.sum(&syscalls::SEND)) {
-                m.insert("socket_bytes_per_send_call".into(), v);
-            }
-        }
-        if net_after.is_some() {
-            sockets::receive_state(before, after, &mut m);
-        }
-    }
-    if let (Some(before), Some(after)) = (&net_before, &net_after) {
-        crate::netstat::metrics(&before.counters, &after.counters, bytes, &mut m);
-        if let (Some(before), Some(after)) = (&before.server, &after.server) {
-            sockets::link_metrics(before, after, elapsed, &mut m);
-        }
-    }
-    Ok(m)
-}
-
-/// What `--net-counters` reads at one edge of a window.
-struct NetEdge {
-    counters: crate::netstat::Edge,
-    server: Option<sockets::Snapshot>,
-}
-
-impl NetEdge {
-    fn read(ctx: &Ctx) -> NetEdge {
-        let far = ctx.far_netns.as_deref();
-        NetEdge {
-            counters: crate::netstat::edge(far),
-            server: far
-                .zip(ctx.pids.server)
-                .and_then(|(netns, server)| sockets::snapshot_link(server, netns)),
-        }
-    }
-}
-
-async fn drain(
-    mut stream: tokio::net::TcpStream,
-    counter: &AtomicU64,
-    stop: &AtomicBool,
-) -> std::io::Result<()> {
-    let mut buf = vec![0u8; 4 * CHUNK];
-    while !stop.load(Ordering::Relaxed) {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            return Err(std::io::Error::other("origin closed the download"));
-        }
-        counter.fetch_add(n as u64, Ordering::Relaxed);
-    }
-    socks::abort(stream);
-    Ok(())
-}
-
-async fn fill(
-    stream: tokio::net::TcpStream,
-    rate_mbit: Option<f64>,
-    counter: &AtomicU64,
-    stop: &AtomicBool,
-) -> std::io::Result<()> {
-    let (mut read, mut write) = stream.into_split();
-    let writer = crate::pace::send_chunks(&mut write, 0xa5, rate_mbit);
-    let reports = async {
-        let mut report = [0u8; 8];
-        while !stop.load(Ordering::Relaxed) {
-            read.read_exact(&mut report).await?;
-            counter.store(u64::from_le_bytes(report), Ordering::Relaxed);
-        }
-        Ok::<(), std::io::Error>(())
-    };
-    tokio::select! {
-        result = writer => result,
-        result = reports => result,
     }
 }
 

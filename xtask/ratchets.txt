@@ -2,7 +2,6 @@
 # A number may go up only with `raised from <old>: <reason>`; see `.agents/rules.md`.
 file-lines crates/config/src/proxy/parse.rs 938 raised from 933: registering the naive outbound takes its module, its T1 type entry and its parse arm; tailscale moves from the quarantined types to the supported ones and takes its parse arm
 file-lines crates/config/src/share_link/decode.rs 917
-file-lines tools/bench/src/load.rs 979
 file-lines tools/bench/src/runner.rs 877 raised from 870: the sing-box client arm is handed the bench server certificate, which its naive outbound needs in place of skipping verification; the rig carries the Tailscale tools and the embedded core's log level, and starts the Tailscale peers
 fn-lines crates/config/src/profile.rs::load_raw 174
 fn-lines crates/config/src/profile.rs::resolve_groups 144 raised from 142: a group in `use` and GLOBAL as a member are refused at load, as mihomo does
