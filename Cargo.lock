@@ -1000,7 +1000,7 @@ dependencies = [
 name = "concord-api"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "concord-common",
  "concord-engine",
  "concord-platform",
@@ -1037,7 +1037,7 @@ name = "concord-config"
 version = "0.1.0"
 dependencies = [
  "age",
- "base64 0.22.1",
+ "base64 0.23.1",
  "concord-common",
  "fancy-regex",
  "granit-parser",
@@ -1109,7 +1109,7 @@ name = "concord-dns"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "concord-common",
  "concord-config",
@@ -1236,7 +1236,7 @@ dependencies = [
 name = "concord-inbound"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "concord-common",
  "concord-platform",
@@ -1275,7 +1275,7 @@ dependencies = [
  "aho-corasick",
  "arc-swap",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "brotli-decompressor",
  "bytes",
  "concord-common",
@@ -1381,7 +1381,7 @@ dependencies = [
  "argon2 0.5.3",
  "async-trait",
  "aws-lc-rs",
- "base64 0.22.1",
+ "base64 0.23.1",
  "blake2 0.10.6",
  "blake3",
  "bytes",
@@ -1510,7 +1510,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "aws-lc-rs",
- "base64 0.22.1",
+ "base64 0.23.1",
  "boring",
  "boring-sys",
  "brotli-decompressor",
@@ -1543,7 +1543,7 @@ name = "concord-transport"
 version = "0.1.0"
 dependencies = [
  "aws-lc-rs",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "concord-common",
  "concord-test-support",
