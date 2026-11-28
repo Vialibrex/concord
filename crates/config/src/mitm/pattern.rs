@@ -4,20 +4,141 @@ use std::fmt::Write as _;
 use fancy_regex::{Assertion, Expr, Regex};
 use regex_syntax::ast::{self, Ast, ClassSetItem, Flag, FlagsItemKind, GroupKind, Visitor};
 use regex_syntax::hir::translate::Translator;
+use regex_syntax::hir::{Class, Hir, HirKind};
+use regex_syntax::utf8::Utf8Sequences;
 
 use super::issue::{IssueKind, LineError};
+
+const DELEGATE_NFA_SIZE_LIMIT: usize = 10 * 1024 * 1024;
+#[cfg(target_pointer_width = "64")]
+const BUILDER_STATE_BYTES: usize = 32;
+#[cfg(not(target_pointer_width = "64"))]
+const BUILDER_STATE_BYTES: usize = 16;
+const TRANSITION_BYTES: usize = 8;
+const STATE_ID_BYTES: usize = 4;
 
 /// Returns the cooked `regex`-crate pattern iff `fancy-regex` delegates `source` wholly to
 /// `regex-automata` with identical semantics (no lookaround, backreference, atomic group, etc.).
 pub fn delegatable_regex(source: &str) -> Option<String> {
+    parse_delegatable(source, false).map(|(cooked, _)| cooked)
+}
+
+/// Like [delegatable_regex], and additionally guarantees that `fancy_regex::Regex::new(source)`
+/// stays within `regex-automata`'s default 10 MiB NFA size limit on both forward and reverse
+/// Thompson NFAs so callers can skip eager `fancy_regex::Regex::new` validation without changing
+/// compile-time error behavior.
+pub fn delegatable_within_nfa_limit(source: &str) -> Option<String> {
+    let (cooked, hir) = parse_delegatable(source, true)?;
+    (nfa_memory_upper_bound(&hir) <= DELEGATE_NFA_SIZE_LIMIT).then_some(cooked)
+}
+
+fn parse_delegatable(source: &str, reject_zero_repeat: bool) -> Option<(String, Hir)> {
     let tree = Expr::parse_tree(source).ok()?;
-    if !is_pure_regex(&tree.expr) {
+    if !is_pure_regex(&tree.expr) || (reject_zero_repeat && has_zero_repeat(&tree.expr)) {
         return None;
     }
     let mut cooked = String::with_capacity(source.len());
     tree.expr.to_str(&mut cooked, 0);
-    regex_syntax::parse(&cooked).ok()?;
-    Some(cooked)
+    let hir = regex_syntax::parse(&cooked).ok()?;
+    Some((cooked, hir))
+}
+
+/// Necessary for the HIR upper bound: `regex-syntax` folds `{0}` to `Hir::empty()` (`B` bytes),
+/// whereas `fancy-regex` enables `enable_preserve_zero_rep_captures` (`Capture(Empty)` = `3*B`).
+fn has_zero_repeat(expr: &Expr) -> bool {
+    match expr {
+        Expr::Repeat { hi: 0, .. } => true,
+        Expr::Repeat { child, .. } => has_zero_repeat(child),
+        Expr::Group(child) => has_zero_repeat(child),
+        Expr::Concat(parts) | Expr::Alt(parts) => parts.iter().any(has_zero_repeat),
+        _ => false,
+    }
+}
+
+/// Strict upper bound on `regex_automata::nfa::thompson::Builder::memory_usage()` for compiling a
+/// single pattern (covering both forward and non-shrunk reverse NFAs, `LiteralTrie`, and outer
+/// unanchored prefix / implicit capture / match states).
+fn nfa_memory_upper_bound(hir: &Hir) -> usize {
+    hir_nfa_upper_bound(hir).saturating_add(8 * BUILDER_STATE_BYTES + 4 * STATE_ID_BYTES)
+}
+
+fn hir_nfa_upper_bound(hir: &Hir) -> usize {
+    match hir.kind() {
+        HirKind::Empty | HirKind::Look(_) => BUILDER_STATE_BYTES,
+        HirKind::Literal(lit) => lit
+            .0
+            .len()
+            .max(1)
+            .saturating_mul(2 * BUILDER_STATE_BYTES + TRANSITION_BYTES + STATE_ID_BYTES),
+        HirKind::Class(Class::Bytes(cls)) => (2 * BUILDER_STATE_BYTES)
+            .saturating_add(cls.ranges().len().saturating_mul(TRANSITION_BYTES)),
+        HirKind::Class(Class::Unicode(cls)) => {
+            if cls.is_ascii() {
+                return (2 * BUILDER_STATE_BYTES)
+                    .saturating_add(cls.ranges().len().saturating_mul(TRANSITION_BYTES));
+            }
+            let mut bytes = 2 * BUILDER_STATE_BYTES;
+            for range in cls.iter() {
+                for seq in Utf8Sequences::new(range.start(), range.end()) {
+                    bytes = bytes.saturating_add(
+                        seq.len()
+                            .saturating_mul(BUILDER_STATE_BYTES + TRANSITION_BYTES)
+                            .saturating_add(STATE_ID_BYTES),
+                    );
+                }
+            }
+            bytes
+        }
+        HirKind::Capture(cap) => {
+            (2 * BUILDER_STATE_BYTES).saturating_add(hir_nfa_upper_bound(&cap.sub))
+        }
+        HirKind::Concat(parts) => {
+            if parts.is_empty() {
+                return BUILDER_STATE_BYTES;
+            }
+            parts.iter().fold(0usize, |acc, part| {
+                acc.saturating_add(hir_nfa_upper_bound(part))
+            })
+        }
+        HirKind::Alternation(parts) => match parts.len() {
+            0 => BUILDER_STATE_BYTES,
+            1 => parts
+                .first()
+                .map_or(BUILDER_STATE_BYTES, hir_nfa_upper_bound),
+            k => parts.iter().fold(
+                (2 * BUILDER_STATE_BYTES).saturating_add(k.saturating_mul(STATE_ID_BYTES)),
+                |acc, part| acc.saturating_add(hir_nfa_upper_bound(part)),
+            ),
+        },
+        HirKind::Repetition(rep) => {
+            let sub = hir_nfa_upper_bound(&rep.sub);
+            match (rep.min, rep.max) {
+                (0, Some(1)) => sub
+                    .saturating_add(2 * BUILDER_STATE_BYTES)
+                    .saturating_add(2 * STATE_ID_BYTES),
+                (0, None) => sub
+                    .saturating_add(3 * BUILDER_STATE_BYTES)
+                    .saturating_add(4 * STATE_ID_BYTES),
+                (1, None) => sub
+                    .saturating_add(BUILDER_STATE_BYTES)
+                    .saturating_add(2 * STATE_ID_BYTES),
+                (min, None) => (min as usize)
+                    .saturating_mul(sub)
+                    .saturating_add(BUILDER_STATE_BYTES)
+                    .saturating_add(2 * STATE_ID_BYTES),
+                (min, Some(max)) if min == max => (min as usize).saturating_mul(sub),
+                (min, Some(max)) => {
+                    let opt = (max - min) as usize;
+                    (max as usize)
+                        .saturating_mul(sub)
+                        .saturating_add(
+                            opt.saturating_mul(BUILDER_STATE_BYTES + 2 * STATE_ID_BYTES),
+                        )
+                        .saturating_add(2 * BUILDER_STATE_BYTES)
+                }
+            }
+        }
+    }
 }
 
 fn is_pure_regex(expr: &Expr) -> bool {
@@ -297,6 +418,123 @@ mod tests {
             let want = regex_syntax::parse(source).is_ok();
             assert_eq!(syntax_parses(source), want, "{source}");
         }
+    }
+
+    #[test]
+    fn nfa_upper_bound_is_a_true_upper_bound_and_never_accepts_failing_fancy_regex() {
+        let fixed = [
+            r"^https?://([a-z0-9-]+\.)*ads0\.example\.com/",
+            r"/api/v\d+/track42\?",
+            r"(?i)\.example\.net/.*\.(gif|png)$",
+            r"(?i)\p{Lu}+",
+            r"\p{Greek}{2,5}",
+            r"(?:\w{3,6}){2,4}",
+            r"(foo|bar|baz|qux|quux){1,4}",
+            r"[^\n\r]{1,20}",
+            r"(?-u:[\x80-\xFF]+)",
+            r"[ab]*[cd]*[ab]*",
+            r"a*[bc]{0,3}a*",
+            r"(?i)[ab]*[cd]*[ab]*",
+            r"(?:a|ab|abc)",
+            r"(?:foo|foobar|food)",
+            r"(?:http|https|https://a|https://ab)",
+            r"(a){0}",
+            r"(?:\w{500}){500}",
+            r"(?:a{1000}){1000}",
+            r"^https://cdn\.test/(?!static/)",
+            r"(",
+            r"\p{Nope}",
+        ];
+        assert!(delegatable_within_nfa_limit(r"(?:\w{500}){500}").is_none());
+        assert!(delegatable_within_nfa_limit(r"(?:a{1000}){1000}").is_none());
+        assert!(delegatable_within_nfa_limit(r"(a){0}").is_none());
+        assert!(delegatable_within_nfa_limit(r"^https://cdn\.test/(?!static/)").is_none());
+        assert!(delegatable_within_nfa_limit("(").is_none());
+
+        let atoms = [
+            "a",
+            "abc",
+            "/",
+            r"\.",
+            r"\d",
+            r"\w",
+            r"\s",
+            r"[a-z0-9-]",
+            r"[^\n]",
+            r"\p{Greek}",
+            r"(?i)ab",
+            r"(?i)\p{Lu}",
+            r"(?-u:[a-z\x80-\xFF])",
+            r"(foo|bar|baz)",
+            r"(?:x|yy|zzz)",
+            r"\b",
+            "^",
+            "$",
+        ];
+        let quantifiers = ["", "?", "*", "+", "{2}", "{1,4}", "{2,5}", "{3,8}"];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || -> usize {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as usize
+        };
+
+        let mut generated: Vec<String> = fixed.iter().map(|s| (*s).to_string()).collect();
+        for _ in 0..320 {
+            let parts = 1 + next() % 4;
+            let mut pat = String::new();
+            for _ in 0..parts {
+                let atom = atoms[next() % atoms.len()];
+                let q = quantifiers[next() % quantifiers.len()];
+                if q.is_empty() || matches!(atom, r"\b" | "^" | "$") {
+                    pat.push_str(atom);
+                } else {
+                    pat.push_str("(?:");
+                    pat.push_str(atom);
+                    pat.push(')');
+                    pat.push_str(q);
+                }
+            }
+            if next() % 5 == 0 {
+                let outer_q = ["{2,3}", "{3,5}", "{1,4}", "*"][next() % 4];
+                pat = format!("(?:{pat}){outer_q}");
+            }
+            generated.push(pat);
+        }
+
+        let mut accepted = 0usize;
+        for source in &generated {
+            let Some(cooked) = delegatable_within_nfa_limit(source) else {
+                continue;
+            };
+            accepted += 1;
+            assert!(
+                Regex::new(source).is_ok(),
+                "delegatable_within_nfa_limit accepted pattern rejected by fancy_regex: {source}"
+            );
+            let hir = regex_syntax::parse(&cooked).unwrap();
+            let bound = nfa_memory_upper_bound(&hir);
+            assert!(bound <= DELEGATE_NFA_SIZE_LIMIT);
+            assert!(
+                fancy_regex::RegexBuilder::new(source)
+                    .delegate_size_limit(bound)
+                    .build()
+                    .is_ok(),
+                "nfa_memory_upper_bound ({bound} B) underestimated fancy-regex delegate NFA for {source}"
+            );
+            assert!(
+                regex::RegexBuilder::new(&cooked)
+                    .size_limit(bound)
+                    .build()
+                    .is_ok(),
+                "nfa_memory_upper_bound ({bound} B) underestimated actual NFA for {source}"
+            );
+        }
+        assert!(
+            accepted >= 250,
+            "expected >= 250 accepted patterns, got {accepted}"
+        );
     }
 
     /// Case folding and the Perl classes skip translation only while regex-syntax's

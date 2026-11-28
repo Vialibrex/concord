@@ -1650,9 +1650,11 @@ fn program_url_set_handles_logic_rules_single_leaf_and_classical_sets() {
 
 #[test]
 fn url_set_fallback_matches_when_regex_set_cannot_be_built() {
-    let re0 = fancy_regex::Regex::new("/alpha").unwrap();
-    let re1 = fancy_regex::Regex::new("/beta").unwrap();
-    let set = crate::runs::UrlSet::build(vec!["(".into(), "(".into()], vec![re0, re1]);
+    let set = crate::runs::UrlSet::build(
+        vec!["(".into(), "(".into()],
+        vec!["/alpha".into(), "/beta".into()],
+    )
+    .unwrap();
     assert!(!set.is_set());
     let mut cache = None;
     let http = std::sync::Arc::new(concord_common::HttpFacts {
@@ -1662,6 +1664,14 @@ fn url_set_fallback_matches_when_regex_set_cannot_be_built() {
     });
     assert!(!set.matches(0, &http, &mut cache));
     assert!(set.matches(1, &http, &mut cache));
+
+    assert!(
+        crate::runs::UrlSet::build(
+            vec!["(".into(), "(".into()],
+            vec!["(".into(), "/beta".into()]
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -1675,17 +1685,14 @@ fn chunked_url_set_scans_buckets_lazily_and_handles_oversized_single_pattern() {
         r"/api/v\d+/bucket2/item5",
         r"/shared/both",
     ];
-    let sources: Vec<String> = patterns
+    let cooked: Vec<String> = patterns
         .iter()
-        .map(|p| concord_config::mitm::delegatable_regex(p).unwrap())
+        .map(|p| concord_config::mitm::delegatable_within_nfa_limit(p).unwrap())
         .collect();
-    let regexes: Vec<fancy_regex::Regex> = patterns
-        .iter()
-        .map(|p| fancy_regex::Regex::new(p).unwrap())
-        .collect();
+    let sources: Vec<String> = patterns.iter().map(|p| (*p).to_string()).collect();
 
     // Small NFA cap forces multiple buckets while still fitting individual patterns.
-    let set = crate::runs::UrlSet::build_with_limit(sources.clone(), regexes.clone(), 4096);
+    let set = crate::runs::UrlSet::build_with_limit(cooked.clone(), sources.clone(), 4096).unwrap();
     assert!(set.is_set());
     assert!(
         set.bucket_count() >= 3,
@@ -1728,15 +1735,12 @@ fn chunked_url_set_scans_buckets_lazily_and_handles_oversized_single_pattern() {
     assert_eq!(set.scans(), scans_before + 2);
 
     let mixed = [r"/alpha/", r"/api/v\d+/big", r"/beta/", r"/gamma/"];
-    let m_src: Vec<String> = mixed
+    let m_cooked: Vec<String> = mixed
         .iter()
-        .map(|p| concord_config::mitm::delegatable_regex(p).unwrap())
+        .map(|p| concord_config::mitm::delegatable_within_nfa_limit(p).unwrap())
         .collect();
-    let m_re: Vec<fancy_regex::Regex> = mixed
-        .iter()
-        .map(|p| fancy_regex::Regex::new(p).unwrap())
-        .collect();
-    let degraded = crate::runs::UrlSet::build_with_limit(m_src, m_re, 1024);
+    let m_src: Vec<String> = mixed.iter().map(|p| (*p).to_string()).collect();
+    let degraded = crate::runs::UrlSet::build_with_limit(m_cooked, m_src, 1024).unwrap();
     assert!(degraded.is_set());
     assert!(
         degraded.fancy_bucket_count() >= 1,
@@ -1751,21 +1755,21 @@ fn chunked_url_set_scans_buckets_lazily_and_handles_oversized_single_pattern() {
 
 #[test]
 fn chunked_url_set_recovers_step_after_heavy_prefix() {
+    let mut cooked = Vec::new();
     let mut sources = Vec::new();
-    let mut regexes = Vec::new();
     for i in 0..8 {
         let pat = format!("/heavy/segment_alpha_beta_gamma_delta_epsilon_{i}/");
-        sources.push(concord_config::mitm::delegatable_regex(&pat).unwrap());
-        regexes.push(fancy_regex::Regex::new(&pat).unwrap());
+        cooked.push(concord_config::mitm::delegatable_within_nfa_limit(&pat).unwrap());
+        sources.push(pat);
     }
     for i in 0..80 {
         let pat = format!("/p{i}/");
-        sources.push(concord_config::mitm::delegatable_regex(&pat).unwrap());
-        regexes.push(fancy_regex::Regex::new(&pat).unwrap());
+        cooked.push(concord_config::mitm::delegatable_within_nfa_limit(&pat).unwrap());
+        sources.push(pat);
     }
     // Long ASCII prefix fits in small Set buckets (no Fancy degradation) and pulls step down,
     // while the 80 short ASCII patterns must recover step upward rather than staying pinned.
-    let set = crate::runs::UrlSet::build_with_limit(sources, regexes, 4096);
+    let set = crate::runs::UrlSet::build_with_limit(cooked, sources, 4096).unwrap();
     assert!(set.is_set());
     assert_eq!(
         set.fancy_bucket_count(),
@@ -1782,35 +1786,40 @@ fn chunked_url_set_recovers_step_after_heavy_prefix() {
 #[test]
 fn single_set_fast_path_keeps_n1000_and_within_limit_unchunked() {
     let make = |n: usize| {
+        let mut cooked_list = Vec::with_capacity(n);
         let mut sources = Vec::with_capacity(n);
-        let mut regexes = Vec::with_capacity(n);
         let mut items = Vec::with_capacity(n);
         for i in 0..n {
             let pat = format!("/api/item{i}/");
-            let cooked = concord_config::mitm::delegatable_regex(&pat).unwrap();
-            let re = fancy_regex::Regex::new(&pat).unwrap();
-            sources.push(cooked);
-            regexes.push(re.clone());
-            items.push((i as u32, re));
+            let cooked = concord_config::mitm::delegatable_within_nfa_limit(&pat).unwrap();
+            cooked_list.push(cooked.clone());
+            sources.push(pat.clone());
+            items.push((
+                i as u32,
+                crate::runs::CompiledUrl::Delegated {
+                    cooked,
+                    source: pat,
+                },
+            ));
         }
-        (sources, regexes, items)
+        (cooked_list, sources, items)
     };
 
     // Synthetic fast-path check: 16 patterns exceed bucket=2 KiB yet fit inside single=16 KiB.
-    let (s_fit, r_fit, i_fit) = make(16);
-    let fit_set = crate::runs::UrlSet::build_with_limits(s_fit.clone(), r_fit.clone(), 16384, 2048);
+    let (c_fit, s_fit, i_fit) = make(16);
+    let fit_set = crate::runs::UrlSet::build_with_limits(c_fit, s_fit, 16384, 2048).unwrap();
     assert_eq!(fit_set.bucket_count(), 1);
-    let fit_run = crate::runs::UrlRun::build_with_limits(0, 16, i_fit, Some(16384), 2048);
+    let fit_run = crate::runs::UrlRun::build_with_limits(0, 16, i_fit, Some(16384), 2048).unwrap();
     assert_eq!(fit_run.bucket_count(), 1);
 
-    let (s_big, r_big, i_big) = make(60);
-    let big_set = crate::runs::UrlSet::build_with_limits(s_big, r_big, 16384, 2048);
+    let (c_big, s_big, i_big) = make(60);
+    let big_set = crate::runs::UrlSet::build_with_limits(c_big, s_big, 16384, 2048).unwrap();
     assert!(big_set.bucket_count() >= 2);
-    let big_run = crate::runs::UrlRun::build_with_limits(0, 60, i_big, Some(16384), 2048);
+    let big_run = crate::runs::UrlRun::build_with_limits(0, 60, i_big, Some(16384), 2048).unwrap();
     assert!(big_run.bucket_count() >= 2);
 
+    let mut prod_cooked = Vec::new();
     let mut prod_sources = Vec::new();
-    let mut prod_regexes = Vec::new();
     let mut prod_items = Vec::new();
     for i in 0..1000usize {
         let pat = match i % 5 {
@@ -1820,20 +1829,30 @@ fn single_set_fast_path_keeps_n1000_and_within_limit_unchunked() {
             3 => format!(r"^https://cdn{i}\.test/(?!static/)"),
             _ => format!(r"/collect{i}/"),
         };
-        let re = fancy_regex::Regex::new(&pat).unwrap();
-        if let Some(cooked) = concord_config::mitm::delegatable_regex(&pat) {
-            prod_sources.push(cooked);
-            prod_regexes.push(re.clone());
+        if let Some(cooked) = concord_config::mitm::delegatable_within_nfa_limit(&pat) {
+            prod_cooked.push(cooked.clone());
+            prod_sources.push(pat.clone());
+            prod_items.push((
+                i as u32,
+                crate::runs::CompiledUrl::Delegated {
+                    cooked,
+                    source: pat,
+                },
+            ));
+        } else {
+            prod_items.push((
+                i as u32,
+                crate::runs::CompiledUrl::Fancy(fancy_regex::Regex::new(&pat).unwrap()),
+            ));
         }
-        prod_items.push((i as u32, re));
     }
-    let prod_set = crate::runs::UrlSet::build(prod_sources, prod_regexes);
+    let prod_set = crate::runs::UrlSet::build(prod_cooked, prod_sources).unwrap();
     assert_eq!(
         prod_set.bucket_count(),
         1,
         "n=1000 UrlSet must stay single-bucket"
     );
-    let prod_run = crate::runs::UrlRun::build(0, 1000, prod_items);
+    let prod_run = crate::runs::UrlRun::build(0, 1000, prod_items).unwrap();
     assert_eq!(
         prod_run.bucket_count(),
         1,
@@ -1853,11 +1872,20 @@ fn chunked_url_run_preserves_rule_order_across_buckets_and_fancy() {
         (6, r"/api/v\d+/b2/three"),
         (7, r"/shared/tail"),
     ];
-    let items: Vec<(u32, fancy_regex::Regex)> = entries
+    let items: Vec<(u32, crate::runs::CompiledUrl)> = entries
         .iter()
-        .map(|(idx, pat)| (*idx, fancy_regex::Regex::new(pat).unwrap()))
+        .map(|(idx, pat)| {
+            let item = match concord_config::mitm::delegatable_within_nfa_limit(pat) {
+                Some(cooked) => crate::runs::CompiledUrl::Delegated {
+                    cooked,
+                    source: (*pat).to_string(),
+                },
+                None => crate::runs::CompiledUrl::Fancy(fancy_regex::Regex::new(pat).unwrap()),
+            };
+            (*idx, item)
+        })
         .collect();
-    let run = crate::runs::UrlRun::build_with_limit(0, 8, items, 4096);
+    let run = crate::runs::UrlRun::build_with_limit(0, 8, items, 4096).unwrap();
     assert!(
         run.bucket_count() >= 3,
         "expected >= 3 UrlRun buckets, got {}",
@@ -1875,4 +1903,82 @@ fn chunked_url_run_preserves_rule_order_across_buckets_and_fancy() {
     assert_eq!(run.next_from(multi, 1), Some(3));
     assert_eq!(run.next_from(multi, 4), Some(7));
     assert_eq!(run.next_from(multi, 8), None);
+
+    let degraded_items = vec![
+        (
+            0,
+            crate::runs::CompiledUrl::Delegated {
+                cooked: concord_config::mitm::delegatable_within_nfa_limit(r"/alpha/").unwrap(),
+                source: r"/alpha/".into(),
+            },
+        ),
+        (
+            1,
+            crate::runs::CompiledUrl::Delegated {
+                cooked: concord_config::mitm::delegatable_within_nfa_limit(r"/api/v\d+/big")
+                    .unwrap(),
+                source: r"/api/v\d+/big".into(),
+            },
+        ),
+        (
+            2,
+            crate::runs::CompiledUrl::Delegated {
+                cooked: concord_config::mitm::delegatable_within_nfa_limit(r"/gamma/").unwrap(),
+                source: r"/gamma/".into(),
+            },
+        ),
+    ];
+    let degraded = crate::runs::UrlRun::build_with_limit(0, 3, degraded_items, 1024).unwrap();
+    assert_eq!(degraded.next_from("https://x.test/api/v9/big", 0), Some(1));
+    assert_eq!(
+        degraded.next_from("https://x.test/alpha/api/v9/big/gamma/", 0),
+        Some(0)
+    );
+    assert_eq!(
+        degraded.next_from("https://x.test/alpha/api/v9/big/gamma/", 1),
+        Some(1)
+    );
+    assert_eq!(
+        degraded.next_from("https://x.test/alpha/api/v9/big/gamma/", 2),
+        Some(2)
+    );
+
+    let broken_fallback = vec![(
+        5,
+        crate::runs::CompiledUrl::Delegated {
+            cooked: "(".into(),
+            source: "(".into(),
+        },
+    )];
+    let err = crate::runs::UrlRun::build_with_limit(5, 6, broken_fallback, 1024)
+        .err()
+        .expect("broken fallback must fail at build time");
+    assert_eq!(err.index, 5);
+
+    let mut slots = crate::runs::UrlSlots::default();
+    slots.alloc(
+        crate::runs::CompiledUrl::Delegated {
+            cooked: "/ok".into(),
+            source: "/ok".into(),
+        },
+        "rules",
+        3,
+        "URL-REGEX,/ok,A",
+    );
+    slots.alloc(
+        crate::runs::CompiledUrl::Delegated {
+            cooked: "(".into(),
+            source: "(".into(),
+        },
+        "sub-rules[s]",
+        7,
+        "URL-REGEX,(,B",
+    );
+    let slot_err = slots
+        .build()
+        .err()
+        .expect("broken slot fallback must preserve section/index/line");
+    assert_eq!(slot_err.section, "sub-rules[s]");
+    assert_eq!(slot_err.index, 7);
+    assert_eq!(slot_err.line, "URL-REGEX,(,B");
 }

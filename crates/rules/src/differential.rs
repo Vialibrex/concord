@@ -855,27 +855,39 @@ fn chunked_url_run_and_set_agree_with_linear_oracle() {
             .collect();
 
         for limit in [1024usize, 2048, 4096] {
-            let run_items: Vec<(u32, fancy_regex::Regex)> = compiled
+            let run_items: Vec<(u32, crate::runs::CompiledUrl)> = chosen
                 .iter()
+                .zip(&compiled)
                 .enumerate()
-                .map(|(i, re)| (i as u32, re.clone()))
+                .map(|(i, (pat, re))| {
+                    let item = match concord_config::mitm::delegatable_within_nfa_limit(pat) {
+                        Some(cooked) => crate::runs::CompiledUrl::Delegated {
+                            cooked,
+                            source: (*pat).to_string(),
+                        },
+                        None => crate::runs::CompiledUrl::Fancy(re.clone()),
+                    };
+                    (i as u32, item)
+                })
                 .collect();
-            let run = crate::runs::UrlRun::build_with_limit(0, len as u32, run_items, limit);
+            let run =
+                crate::runs::UrlRun::build_with_limit(0, len as u32, run_items, limit).unwrap();
             if run.bucket_count() >= 2 {
                 multi_run_cases += 1;
             }
 
+            let mut del_cooked = Vec::new();
             let mut del_sources = Vec::new();
-            let mut del_regexes = Vec::new();
             let mut del_indices = Vec::new();
-            for (i, (pat, re)) in chosen.iter().zip(&compiled).enumerate() {
-                if let Some(cooked) = concord_config::mitm::delegatable_regex(pat) {
-                    del_sources.push(cooked);
-                    del_regexes.push(re.clone());
+            for (i, pat) in chosen.iter().enumerate() {
+                if let Some(cooked) = concord_config::mitm::delegatable_within_nfa_limit(pat) {
+                    del_cooked.push(cooked);
+                    del_sources.push((*pat).to_string());
                     del_indices.push(i);
                 }
             }
-            let set = crate::runs::UrlSet::build_with_limit(del_sources, del_regexes, limit);
+            let set =
+                crate::runs::UrlSet::build_with_limit(del_cooked, del_sources, limit).unwrap();
             if set.bucket_count() >= 2 {
                 multi_set_cases += 1;
             }

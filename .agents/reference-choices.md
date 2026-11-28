@@ -41,6 +41,11 @@ commit. xtask's
   uses Tokio 1.53.1 and aws-lc-rs 1.18.0; the source build keeps the upstream full features and release profile.
 - Go 1.27.3, the toolchain of the reference builds; Rust 1.100.0 (`rust-toolchain.toml`) and Tokio 1.54.1
   (`Cargo.lock`), Concord's own; Linux v7.0.
+- `fancy-regex 0.20.0`, `regex 1.13.1`, and `regex-automata 0.4.18` (`Cargo.lock`): when upgrading any of these
+  crates, re-verify `crates/config/src/mitm/pattern.rs` (`hir_nfa_upper_bound`, `BUILDER_STATE_BYTES`,
+  `TRANSITION_BYTES`, `STATE_ID_BYTES`, `DELEGATE_NFA_SIZE_LIMIT`) and `crates/rules/src/runs/url.rs`
+  (`single_set_nfa_limit`, `URL_SET_HYBRID_CACHE`, `URL_SET_BUILDER_STATE_BYTES`) against the new Thompson NFA
+  `Builder::memory_usage()`, `meta::Config::get_nfa_size_limit()`, and `hybrid::dfa::minimum_cache_capacity()`.
 - apernet/hysteria `master` (`7040c167`), the Hysteria 2 server's own defaults where Concord's QUIC servers need a
   bound that Go's do not.
 - A clean mihomo source archive and the sing-box build provenance are kept with the bench reference builds.
@@ -558,6 +563,10 @@ MiB, GiB, ns, µs, ms, s, min, h), or as the source text in backticks; `cfg` var
 | `common::stream_buffer::COPY_BUFFER_SIZE` | 32768 | B | sing BufferSize = 32 * 1024 (`common/buf/buffer_standard.go:6`), the relay copy fallback; mihomo pool also 32 KiB. Same value. |
 | `common::stream_buffer::FIRST_CLASS` | 6 | B | sing's smallest pooled class is 1<<6 = 64 bytes (`common/buf/alloc.go:25`, index -= 6 at `:53`); same value. |
 | `common::stream_buffer::LOCAL_LIMIT` | 8 | C | A thread keeps what one relay write can release at once, its batch of 8 buffers (`crates/net/src/relay.rs::TCP_BATCH_BUFFERS`, itself Linux UIO_FASTIOV); the shared overflow holds one batch per Tokio worker (tokio `RuntimeMetrics::num_workers`). Go's sync.Pool has no count, so no reference value exists. |
+| `config::mitm::pattern::BUILDER_STATE_BYTES` | 32 / 16 | C | `size_of::<thompson::builder::State>()` in `regex-automata 0.4.18` (`src/nfa/thompson/builder.rs:1330-1335`: 32 B on 64-bit, 16 B on 32-bit), used in `hir_nfa_upper_bound` to upper-bound `thompson::Builder::memory_usage()` (`src/nfa/thompson/builder.rs:1299-1301`). |
+| `config::mitm::pattern::DELEGATE_NFA_SIZE_LIMIT` | 10 MiB | B | Default `nfa_size_limit = 10 * (1 << 20)` of the Rust libraries `fancy-regex 0.20.0` (`src/lib.rs:596`, `src/compile.rs:1252-1255`) and `regex-automata 0.4.18` (`meta::Config::get_nfa_size_limit`, `src/meta/regex.rs:3158-3160`); patterns whose strict `hir_nfa_upper_bound` stays within this limit cannot fail `fancy_regex::Regex::new` on NFA size. |
+| `config::mitm::pattern::STATE_ID_BYTES` | 4 | C | `size_of::<StateID>()` = 4 B in `regex-automata 0.4.18`, charged per alternate arm in `thompson::builder::State::memory_usage()` (`src/nfa/thompson/builder.rs:161-166`). |
+| `config::mitm::pattern::TRANSITION_BYTES` | 8 | C | `size_of::<thompson::Transition>()` = 8 B (`start: u8, end: u8, next: StateID`, `regex-automata 0.4.18` `src/nfa/thompson/nfa.rs:1965-1972`), charged per transition in `State::Sparse` (`src/nfa/thompson/builder.rs:158-160`). |
 | `config::yaml::ALIAS_RATIO_HIGH` | 4000000 | B | go.yaml.in/yaml/v3 v3.0.5, as mihomo uses it: from alias_ratio_range_high = 4000000 decodes the aliased share may be 10%, falling linearly from 99% between the two counts (`decode.go:462`, `:473-480`). |
 | `config::yaml::ALIAS_RATIO_LOW` | 400000 | B | mihomo decodes profiles with go.yaml.in/yaml/v3 v3.0.5 (mihomo `go.mod:63`), which allows 99% of decoded nodes to come from aliases up to alias_ratio_range_low = 400000 decodes (`decode.go:458`, `:469-472`), checked once 100 aliased and 1000 decoded nodes are passed (`decode.go:539-541`). |
 | `controller::FIRST_ACCEPT_BACKOFF` | 5 ms | B | mihomo's and sing-box's controllers run Go's `http.Server` (mihomo `hub/route/server.go:180-184`, sing-box `experimental/clashapi/server.go:85-88`), whose `Serve` waits 5 ms after the first accept error (Go `net/http/server.go:3580-3581`). |

@@ -13,7 +13,7 @@ use crate::index::{HashIdx, SuffixHash, hash_key};
 use crate::table::{RuleTable, TableBuilder};
 use crate::text::wildcard_match;
 
-pub(crate) use url::{UrlCache, UrlNode, UrlRun, UrlSet, UrlSlots};
+pub(crate) use url::{CompiledUrl, UrlCache, UrlNode, UrlRun, UrlSet, UrlSlots};
 
 pub(crate) enum DomainItem {
     Exact,

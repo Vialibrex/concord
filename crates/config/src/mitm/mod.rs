@@ -24,7 +24,8 @@ pub use hosts::{
 };
 pub use issue::{IssueKind, LineError};
 pub use pattern::{
-    MULTILINE, check_multiline, check_pattern, delegatable_regex, multiline, parses, regex_source,
+    MULTILINE, check_multiline, check_pattern, delegatable_regex, delegatable_within_nfa_limit,
+    multiline, parses, regex_source,
 };
 pub use relax::relax;
 pub use rules::{
