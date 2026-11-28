@@ -300,6 +300,21 @@ record whose `env.bench_rev` predates the commit that introduced `origin::REPORT
 8-byte totals sampled on the client's timer) is not directly comparable on `tcp-up`'s `interval_cv` and
 `interval_p10_gbps` columns, while headline `gbps` keeps the same definition.
 
+Bulk TCP trials (`tcp-down`, `tcp-up`, `tcp-multi`) wait for every flow's first payload byte (on uploads, the
+origin's first non-zero progress confirmation) up to `--first-byte-timeout` (default 30 s, chosen above the
+longest observed lossy H2 queue-drain stall of about 12 s; `0` disables waiting) before opening `warmup`. The
+slowest flow's connect-to-first-byte latency is always recorded as `first_byte_ms` (omitted when `--first-byte-timeout
+0` leaves a flow without bytes) so startup or queue-drain stalls stay visible rather than being hidden by waiting;
+on uploads, rebuild any remote `concord-bench origin` from the same commit so it emits an immediate first-byte
+report instead of waiting up to 100 ms for the periodic tick. Records predating this wait (whose `results.json`
+lacks `plan.first_byte_timeout`) are not directly comparable on `gbps`, interval metrics or error rate on links
+where the first byte arrives noticeably after connect; pass `--first-byte-timeout 0` to reproduce the older
+behavior. A first-byte timeout error reports `connect_ms`, ready flow count and `bytes`; an empty-window
+(`no bytes moved`) error reports `connect_ms`, `first_byte_ms`, `warmup_ms`, `warmup_bytes` and `window_ms`. When
+probing a broken core or case that accepts connections without moving payload bytes, each trial (including the
+warmup trial) waits up to `--first-byte-timeout`; lower the flag or pass `0` to keep full runs short. Background
+loads under `--background` run with `first_byte_timeout = 0` so a stalled background load still fails the trial.
+
 The `mitm-*` cases are tiers of Concord's MITM, all DIRECT, for Concord cores only (mihomo has no MITM): `mitm-off`
 (no section), `mitm-pass` (on, the origin not listed), `mitm` (the origin decrypted, no rule acting on requests),
 `mitm-route` and `mitm-rewrite` (`--mitm-rules N`, default 100, URL-REGEX routing rules or url-rewrite lines that never
@@ -533,8 +548,7 @@ Through its VPN, which adds the TUN reads and writes, the user-space stack and `
 take. This needs root (an emulator's `google_apis` image, or `adb root` on a userdebug build):
 
 ```sh
-# On another machine the device reaches, off its own subnet (build from the same commit as the harness;
-# upload progress reports carry a format header and a mismatched remote origin is rejected):
+# On another machine the device reaches, off its own subnet:
 concord-bench origin --bind 172.20.10.2 --base-port 47000
 # On the device, as root:
 ./concord-bench run --attach rs=pkg:<package> --via tun --origin 172.20.10.2:47000 \

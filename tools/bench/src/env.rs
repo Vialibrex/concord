@@ -214,6 +214,64 @@ pub fn is_root() -> bool {
     false
 }
 
+const INTERRUPTED: &str = "interrupted; partial results kept";
+#[cfg(unix)]
+const TERMINATED: &str = "terminated; partial results kept";
+
+#[cfg(unix)]
+static SIGTERM_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn record_sigterm(_: libc::c_int) {
+    SIGTERM_SEEN.store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// Installs an async-signal-safe SIGTERM handler before `Netns::create` so a signal arriving
+/// before `runtime.block_on` is recorded instead of killing the process and leaking namespaces.
+#[cfg(unix)]
+pub fn arm_sigterm() {
+    #[allow(
+        unsafe_code,
+        reason = "sigaction installs an async-signal-safe AtomicBool store for SIGTERM"
+    )]
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        action.sa_sigaction = record_sigterm as *const () as libc::sighandler_t;
+        action.sa_flags = libc::SA_RESTART;
+        libc::sigemptyset(&mut action.sa_mask);
+        let _ = libc::sigaction(libc::SIGTERM, &action, std::ptr::null_mut());
+    }
+}
+
+#[cfg(not(unix))]
+pub fn arm_sigterm() {}
+
+/// Waits for Ctrl-C (SIGINT) or, on Unix, SIGTERM so `run` exits gracefully, saves partial
+/// results and runs its post-loop drop teardown.
+#[cfg(unix)]
+pub async fn shutdown_signal() -> &'static str {
+    let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+    if SIGTERM_SEEN.load(std::sync::atomic::Ordering::Acquire) {
+        return TERMINATED;
+    }
+    match terminate {
+        Ok(mut terminate) => tokio::select! {
+            _ = tokio::signal::ctrl_c() => INTERRUPTED,
+            _ = terminate.recv() => TERMINATED,
+        },
+        Err(_) => {
+            let _ = tokio::signal::ctrl_c().await;
+            INTERRUPTED
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub async fn shutdown_signal() -> &'static str {
+    let _ = tokio::signal::ctrl_c().await;
+    INTERRUPTED
+}
+
 #[cfg(windows)]
 fn memory_bytes() -> Option<u64> {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};

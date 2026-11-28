@@ -8,6 +8,10 @@ use serde::Serialize;
 use crate::cases::{self, Spec};
 use crate::load::Workload;
 
+/// Default wait for every bulk TCP flow's first payload byte before opening warmup: 30 s clears
+/// the longest observed lossy H2 queue-drain stall (~12 s) with headroom.
+pub const DEFAULT_FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Tier {
@@ -25,6 +29,8 @@ pub struct Plan {
     pub workloads: Vec<Workload>,
     pub rounds: usize,
     pub warmup: Duration,
+    /// Maximum wait for every flow's first payload byte before opening `warmup` (0 disables waiting).
+    pub first_byte_timeout: Duration,
     pub duration: Duration,
     /// Pause after each trial, so one trial's TIME_WAIT and GC tail stay out of the next.
     pub gap: Duration,
@@ -73,6 +79,7 @@ impl Plan {
                 workloads: vec![TcpDown, TcpUp, TcpRr, TcpCrr, UdpStream, Startup],
                 rounds: 5,
                 warmup: Duration::from_millis(700),
+                first_byte_timeout: DEFAULT_FIRST_BYTE_TIMEOUT,
                 duration: Duration::from_secs(3),
                 gap: Duration::from_millis(200),
                 flows: 4,
@@ -116,6 +123,7 @@ impl Plan {
                     .collect(),
                 rounds: 5,
                 warmup: Duration::from_secs(1),
+                first_byte_timeout: DEFAULT_FIRST_BYTE_TIMEOUT,
                 duration: Duration::from_secs(5),
                 gap: Duration::from_millis(300),
                 flows: 8,

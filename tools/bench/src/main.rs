@@ -155,6 +155,11 @@ struct RunArgs {
     #[arg(help = "Seconds of traffic before each window opens.")]
     #[arg(long)]
     warmup: Option<f64>,
+    #[arg(
+        help = "Seconds to wait for every flow's first payload byte before opening warmup; 0 disables waiting. Defaults to 30 s."
+    )]
+    #[arg(long)]
+    first_byte_timeout: Option<f64>,
     #[arg(help = "Connections each tcp-crr window opens, in place of the tier's count.")]
     #[arg(long)]
     crr_conns: Option<usize>,
@@ -283,7 +288,10 @@ struct CompareArgs {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Command::Run(args) => run(*args),
+        Command::Run(args) => {
+            env::arm_sigterm();
+            run(*args)
+        }
         #[cfg(target_os = "linux")]
         Command::GroupFaults(args) => groupfault::run(*args),
         Command::MasqueServer { listen } => masque::serve(listen),
@@ -463,6 +471,37 @@ fn seconds(value: f64) -> Duration {
     Duration::from_secs_f64(value.max(0.0))
 }
 
+fn apply_plan_options(plan: &mut Plan, args: &RunArgs) {
+    if let Some(rounds) = args.rounds {
+        plan.rounds = rounds.max(1);
+    }
+    if let Some(d) = args.duration {
+        plan.duration = seconds(d);
+    }
+    if let Some(w) = args.warmup {
+        plan.warmup = seconds(w);
+    }
+    if let Some(t) = args.first_byte_timeout {
+        plan.first_byte_timeout = seconds(t);
+    }
+    if let Some(ms) = args.rr_slow_ms {
+        plan.rr_slow = Some(seconds(ms / 1e3));
+    }
+    if let Some(count) = args.mitm_rules {
+        plan.mitm_rules = count;
+    }
+    if let Some(bytes) = args.mitm_resource_bytes {
+        plan.mitm_resource_bytes = bytes;
+    }
+    plan.tun = args.tun;
+    plan.tun_stack = args.tun_stack.clone();
+    plan.tun_mtu = args.tun_mtu;
+    plan.tun_congestion = args.tun_congestion.clone();
+    plan.fresh_cores = args.fresh_cores;
+    plan.count_syscalls = args.count_syscalls;
+    plan.net_counters = args.net_counters;
+}
+
 fn run(args: RunArgs) -> Result<bool, String> {
     let mut plan = Plan::tier(args.tier);
     if !args.cases.is_empty() {
@@ -481,23 +520,12 @@ fn run(args: RunArgs) -> Result<bool, String> {
             })
             .collect::<Result<_, _>>()?;
     }
-    if let Some(rounds) = args.rounds {
-        plan.rounds = rounds.max(1);
-    }
-    if let Some(d) = args.duration {
-        plan.duration = seconds(d);
-    }
-    if let Some(w) = args.warmup {
-        plan.warmup = seconds(w);
-    }
+    apply_plan_options(&mut plan, &args);
     if let Some(count) = args.crr_conns {
         if count == 0 {
             return Err("--crr-conns must be positive".into());
         }
         plan.crr_conns = count;
-    }
-    if let Some(ms) = args.rr_slow_ms {
-        plan.rr_slow = Some(seconds(ms / 1e3));
     }
     if let Some(count) = args.page_conns {
         if count == 0 {
@@ -505,22 +533,9 @@ fn run(args: RunArgs) -> Result<bool, String> {
         }
         plan.page_conns = count;
     }
-    if let Some(count) = args.mitm_rules {
-        plan.mitm_rules = count;
-    }
-    if let Some(bytes) = args.mitm_resource_bytes {
-        plan.mitm_resource_bytes = bytes;
-    }
-    plan.tun = args.tun;
-    plan.tun_stack = args.tun_stack.clone();
-    plan.tun_mtu = args.tun_mtu;
-    plan.tun_congestion = args.tun_congestion.clone();
-    plan.fresh_cores = args.fresh_cores;
     if args.count_syscalls {
         syscalls::enable()?;
     }
-    plan.count_syscalls = args.count_syscalls;
-    plan.net_counters = args.net_counters;
     plan.origin_rate = positive_rate("--origin-rate", args.origin_rate)?;
     if args.origin_rate.is_some() && args.origin.is_some() {
         return Err("--origin-rate: start the remote origin with --rate-mbit instead".into());
@@ -745,7 +760,7 @@ fn run(args: RunArgs) -> Result<bool, String> {
                     None => rig.run(&mut results, &out).await,
                 }
             } => r,
-            _ = tokio::signal::ctrl_c() => Err("interrupted; partial results kept".to_string()),
+            reason = env::shutdown_signal() => Err(reason.to_string()),
         }
     });
     if let Some(awake) = awake {

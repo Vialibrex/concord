@@ -215,6 +215,10 @@ pub fn meta(key: &str) -> Meta {
         "fds_per_conn" => ("fds/held connection", Lower),
         "open_ms" => ("ms to open all", Lower),
         "ready_ms" => ("ms to ready", Lower),
+        "first_byte_ms" => (
+            "ms from connect to first payload byte (uploads: origin confirmation)",
+            Lower,
+        ),
         "stop_ms" => ("ms to exit", Lower),
         "ready_cpu_ms" => ("CPU-ms at first byte", Lower),
         "startup_cpu_ms" => ("CPU-ms after settling", Lower),

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::io::AsyncReadExt;
+use tokio::sync::Notify;
 
 use crate::load::{Ctx, Io, Metrics, Windows, costs, io};
 use crate::origin::{self, CHUNK, REPORT_BYTES, REPORT_EVERY, SINK_MAGIC};
@@ -32,8 +33,28 @@ struct WindowEdges {
     net_after: Option<NetEdge>,
 }
 
+struct FirstByte<'a> {
+    slot: &'a AtomicU64,
+    connected: Instant,
+    ready: &'a Notify,
+}
+
+impl FirstByte<'_> {
+    fn record(&self) {
+        let elapsed_ns = self
+            .connected
+            .elapsed()
+            .as_nanos()
+            .clamp(1, u64::MAX as u128) as u64;
+        self.slot.store(elapsed_ns, Ordering::Relaxed);
+        self.ready.notify_waiters();
+    }
+}
+
 struct Flows {
     counters: Arc<Vec<AtomicU64>>,
+    first_byte_ns: Arc<Vec<AtomicU64>>,
+    ready: Arc<Notify>,
     origin_samples: OriginSamples,
     stop: Arc<AtomicBool>,
     failed: Arc<Mutex<Option<String>>>,
@@ -44,6 +65,9 @@ impl Flows {
     async fn spawn(ctx: &Ctx, direction: Direction, flows: usize) -> Io<Flows> {
         let counters: Arc<Vec<AtomicU64>> =
             Arc::new((0..flows).map(|_| AtomicU64::new(0)).collect());
+        let first_byte_ns: Arc<Vec<AtomicU64>> =
+            Arc::new((0..flows).map(|_| AtomicU64::new(0)).collect());
+        let ready = Arc::new(Notify::new());
         let origin_samples: OriginSamples = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(Mutex::new(None::<String>));
@@ -57,24 +81,43 @@ impl Flows {
             let stream = socks::connect(ctx.entry, target)
                 .await
                 .map_err(io("connect"))?;
-            let (counters, stop, failed) = (counters.clone(), stop.clone(), failed.clone());
+            let connected = Instant::now();
+            let (counters, first_byte_ns, ready) =
+                (counters.clone(), first_byte_ns.clone(), ready.clone());
+            let (stop, failed) = (stop.clone(), failed.clone());
             let samples = (direction == Direction::Up && flow == 0).then(|| origin_samples.clone());
             tasks.push(tokio::spawn(async move {
+                let first = FirstByte {
+                    slot: &first_byte_ns[flow],
+                    connected,
+                    ready: &ready,
+                };
                 let result = match direction {
-                    Direction::Down => drain(stream, &counters[flow], &stop).await,
+                    Direction::Down => drain(stream, &counters[flow], &first, &stop).await,
                     Direction::Up => {
-                        fill(stream, rate, &counters[flow], samples.as_deref(), &stop).await
+                        fill(
+                            stream,
+                            rate,
+                            &counters[flow],
+                            &first,
+                            samples.as_deref(),
+                            &stop,
+                        )
+                        .await
                     }
                 };
                 if let Err(err) = result
                     && !stop.load(Ordering::Relaxed)
                 {
                     *failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(err.to_string());
+                    ready.notify_waiters();
                 }
             }));
         }
         Ok(Flows {
             counters,
+            first_byte_ns,
+            ready,
             origin_samples,
             stop,
             failed,
@@ -105,6 +148,56 @@ impl Flows {
             .to_vec()
     }
 
+    fn ready_count(&self) -> usize {
+        self.first_byte_ns
+            .iter()
+            .filter(|ns| ns.load(Ordering::Relaxed) > 0)
+            .count()
+    }
+
+    fn first_byte_ms(&self) -> Option<f64> {
+        if self.ready_count() < self.counters.len() {
+            return None;
+        }
+        self.first_byte_ns
+            .iter()
+            .map(|ns| ns.load(Ordering::Relaxed))
+            .max()
+            .map(|ns| ns as f64 / 1e6)
+    }
+
+    async fn wait_first_byte(&self, timeout: Duration, connect_ms: f64) -> Io<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(err) = self
+                .failed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                return Err(err);
+            }
+            if self.ready_count() == self.counters.len() {
+                return Ok(());
+            }
+            tokio::select! {
+                _ = &mut notified => {}
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(format!(
+                        "first byte timed out after {:.0} ms ({}/{} flows ready, connect_ms={connect_ms:.1}, bytes={})",
+                        timeout.as_secs_f64() * 1e3,
+                        self.ready_count(),
+                        self.counters.len(),
+                        self.total(),
+                    ));
+                }
+            }
+        }
+    }
+
     fn finish(self) -> Option<String> {
         self.stop.store(true, Ordering::Relaxed);
         for task in self.tasks {
@@ -116,7 +209,17 @@ impl Flows {
 
 /// Bulk transfer over `flows` connections.
 pub(crate) async fn run(ctx: &Ctx, direction: Direction, flows: usize) -> Io<Metrics> {
+    let connect_started = Instant::now();
     let active = Flows::spawn(ctx, direction, flows).await?;
+    let connect_ms = connect_started.elapsed().as_secs_f64() * 1e3;
+    if !ctx.first_byte_timeout.is_zero()
+        && let Err(err) = active
+            .wait_first_byte(ctx.first_byte_timeout, connect_ms)
+            .await
+    {
+        let task_err = active.finish();
+        return Err(task_err.unwrap_or(err));
+    }
     tokio::time::sleep(ctx.warmup).await;
     let mixed_port = match ctx.entry {
         Entry::Socks(proxy) => Some(proxy.port()),
@@ -144,6 +247,7 @@ pub(crate) async fn run(ctx: &Ctx, direction: Direction, flows: usize) -> Io<Met
         .collect();
     let closed = windows.close();
     let up_samples = (direction == Direction::Up).then(|| active.samples_from(sample_start));
+    let first_byte_ms = active.first_byte_ms();
     let edges = WindowEdges {
         tcp_before,
         tcp_after: sockets::snapshot(ctx.pids.core, mixed_port),
@@ -154,7 +258,12 @@ pub(crate) async fn run(ctx: &Ctx, direction: Direction, flows: usize) -> Io<Met
         return Err(err);
     }
     if bytes == 0 {
-        return Err("no bytes moved".into());
+        let first = first_byte_ms.map_or_else(|| "none".into(), |ms| format!("{ms:.1}"));
+        return Err(format!(
+            "no bytes moved (connect_ms={connect_ms:.1}, first_byte_ms={first}, warmup_ms={:.0}, warmup_bytes={start_bytes}, window_ms={:.0})",
+            ctx.warmup.as_secs_f64() * 1e3,
+            elapsed * 1e3,
+        ));
     }
     if let Some(samples) = up_samples {
         intervals = origin_intervals(&samples);
@@ -168,6 +277,9 @@ pub(crate) async fn run(ctx: &Ctx, direction: Direction, flows: usize) -> Io<Met
     }
     let mut m = Metrics::new();
     m.insert("gbps".into(), bytes as f64 * 8.0 / 1e9 / elapsed);
+    if let Some(ms) = first_byte_ms {
+        m.insert("first_byte_ms".into(), ms);
+    }
     record_intervals(&mut m, &intervals);
     record_multi_flow(&mut m, &per_flow, ctx.net_counters);
     costs(&mut m, &closed, Some(bytes), None);
@@ -296,15 +408,21 @@ impl NetEdge {
 async fn drain(
     mut stream: tokio::net::TcpStream,
     counter: &AtomicU64,
+    first: &FirstByte<'_>,
     stop: &AtomicBool,
 ) -> std::io::Result<()> {
     let mut buf = vec![0u8; 4 * CHUNK];
+    let mut saw_first = false;
     while !stop.load(Ordering::Relaxed) {
         let n = stream.read(&mut buf).await?;
         if n == 0 {
             return Err(std::io::Error::other("origin closed the download"));
         }
         counter.fetch_add(n as u64, Ordering::Relaxed);
+        if !saw_first {
+            saw_first = true;
+            first.record();
+        }
     }
     socks::abort(stream);
     Ok(())
@@ -314,6 +432,7 @@ async fn fill(
     stream: tokio::net::TcpStream,
     rate_mbit: Option<f64>,
     counter: &AtomicU64,
+    first: &FirstByte<'_>,
     samples: Option<&Mutex<Vec<(u64, u64)>>>,
     stop: &AtomicBool,
 ) -> std::io::Result<()> {
@@ -328,6 +447,7 @@ async fn fill(
             ));
         }
         let mut report = [0u8; REPORT_BYTES];
+        let mut saw_first = false;
         while !stop.load(Ordering::Relaxed) {
             read.read_exact(&mut report).await?;
             let (origin_ns, total) = origin::decode_report(report);
@@ -337,6 +457,10 @@ async fn fill(
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push((origin_ns, total));
+            }
+            if !saw_first && total > 0 {
+                saw_first = true;
+                first.record();
             }
         }
         Ok::<(), std::io::Error>(())
@@ -350,7 +474,48 @@ async fn fill(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
     use tokio::io::AsyncWriteExt;
+
+    use crate::load::Pids;
+    use crate::origin::Ports;
+
+    fn test_ctx(source_port: u16, warmup: Duration, first_byte_timeout: Duration) -> Ctx {
+        Ctx {
+            entry: Entry::Tun,
+            origin: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            ports: Ports {
+                source: source_port,
+                sink: source_port,
+                echo: 0,
+                crr: 0,
+                udp: 0,
+                https: 0,
+                http: 0,
+            },
+            warmup,
+            first_byte_timeout,
+            duration: Duration::from_millis(250),
+            pids: Pids {
+                core: std::process::id(),
+                server: None,
+                origin: None,
+            },
+            flows: 1,
+            crr_conns: 1,
+            rr_slow: None,
+            crr_concurrency: 1,
+            page_conns: 1,
+            udp_size: 1200,
+            udp_window: 1,
+            idle_conns: 1,
+            net_counters: false,
+            client_rate: None,
+            far_netns: None,
+            tls: None,
+            origin_tls: None,
+        }
+    }
 
     #[test]
     fn origin_intervals_ignore_delivery_coalescing_and_short_intervals() {
@@ -398,10 +563,25 @@ mod tests {
         });
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let counter = Arc::new(AtomicU64::new(0));
+        let first_slot = Arc::new(AtomicU64::new(0));
+        let ready = Arc::new(Notify::new());
         let samples = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
-        let (c, s, st) = (counter.clone(), samples.clone(), stop.clone());
-        let task = tokio::spawn(async move { fill(client, Some(200.0), &c, Some(&s), &st).await });
+        let (c, f, r, s, st) = (
+            counter.clone(),
+            first_slot.clone(),
+            ready.clone(),
+            samples.clone(),
+            stop.clone(),
+        );
+        let task = tokio::spawn(async move {
+            let first = FirstByte {
+                slot: &f,
+                connected: Instant::now(),
+                ready: &r,
+            };
+            fill(client, Some(200.0), &c, &first, Some(&s), &st).await
+        });
         tokio::time::sleep(Duration::from_millis(550)).await;
         stop.store(true, Ordering::Relaxed);
         task.abort();
@@ -414,6 +594,7 @@ mod tests {
             recorded.windows(2).all(|w| w[1].0 > w[0].0),
             "origin timestamps must be strictly increasing: {recorded:?}"
         );
+        assert!(first_slot.load(Ordering::Relaxed) > 0);
         let mut rates = origin_intervals(&recorded);
         assert!(!rates.is_empty());
         rates.sort_by(f64::total_cmp);
@@ -438,8 +619,15 @@ mod tests {
         });
         let client = tokio::net::TcpStream::connect(addr).await.unwrap();
         let counter = AtomicU64::new(0);
+        let first_slot = AtomicU64::new(0);
+        let ready = Notify::new();
+        let first = FirstByte {
+            slot: &first_slot,
+            connected: Instant::now(),
+            ready: &ready,
+        };
         let stop = AtomicBool::new(false);
-        let err = fill(client, Some(200.0), &counter, None, &stop)
+        let err = fill(client, Some(200.0), &counter, &first, None, &stop)
             .await
             .unwrap_err();
         assert!(
@@ -447,5 +635,59 @@ mod tests {
                 .contains("older or incompatible upload report"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn delayed_first_byte_waits_before_warmup_and_reports_latency() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut server, _) = listener.accept().await.unwrap();
+            // Longer than warmup + duration (100 ms + 250 ms) so without waiting it would fail.
+            tokio::time::sleep(Duration::from_millis(450)).await;
+            let chunk = vec![0x5au8; CHUNK];
+            while server.write_all(&chunk).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        let ctx = test_ctx(port, Duration::from_millis(100), Duration::from_secs(2));
+        let metrics = run(&ctx, Direction::Down, 1).await.unwrap();
+        assert!(metrics["gbps"] > 0.0);
+        assert!(
+            metrics["first_byte_ms"] >= 400.0,
+            "expected first_byte_ms >= 400, got {}",
+            metrics["first_byte_ms"]
+        );
+    }
+
+    #[tokio::test]
+    async fn stalled_peer_hits_first_byte_timeout_with_diagnostics() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _hold = tokio::spawn(async move {
+            let (_server, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let ctx = test_ctx(port, Duration::from_millis(50), Duration::from_millis(150));
+        let err = run(&ctx, Direction::Down, 1).await.unwrap_err();
+        assert!(err.contains("first byte timed out"), "got: {err}");
+        assert!(err.contains("0/1 flows ready"), "got: {err}");
+        assert!(err.contains("connect_ms="), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn zero_first_byte_timeout_reports_timing_on_no_bytes_moved() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _hold = tokio::spawn(async move {
+            let (_server, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let ctx = test_ctx(port, Duration::from_millis(50), Duration::ZERO);
+        let err = run(&ctx, Direction::Down, 1).await.unwrap_err();
+        assert!(err.contains("no bytes moved"), "got: {err}");
+        assert!(err.contains("first_byte_ms=none"), "got: {err}");
+        assert!(err.contains("warmup_bytes=0"), "got: {err}");
+        assert!(err.contains("window_ms="), "got: {err}");
     }
 }

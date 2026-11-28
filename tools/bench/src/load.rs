@@ -171,6 +171,7 @@ pub struct Ctx {
     pub origin: std::net::IpAddr,
     pub ports: Ports,
     pub warmup: Duration,
+    pub first_byte_timeout: Duration,
     pub duration: Duration,
     pub pids: Pids,
     pub flows: usize,

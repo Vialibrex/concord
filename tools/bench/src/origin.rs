@@ -136,7 +136,12 @@ pub(crate) async fn sink_flow(stream: TcpStream) -> std::io::Result<()> {
                     write.write_all(&report).await?;
                     return Ok(());
                 }
+                let first = total == 0;
                 total += n as u64;
+                if first {
+                    let report = encode_report(started.elapsed().as_nanos() as u64, total);
+                    write.write_all(&report).await?;
+                }
             }
             _ = tick.tick() => {
                 let report = encode_report(started.elapsed().as_nanos() as u64, total);

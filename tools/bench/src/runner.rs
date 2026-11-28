@@ -514,6 +514,7 @@ impl Rig {
             origin,
             ports,
             warmup: self.plan.warmup,
+            first_byte_timeout: self.plan.first_byte_timeout,
             duration: self.plan.duration,
             pids,
             flows: self.plan.flows,
@@ -545,8 +546,7 @@ impl Rig {
         let mixed = free_port(IpAddr::V4(Ipv4Addr::LOCALHOST));
         let home = self
             .dir
-            .join("homes")
-            .join(format!("{}-{}-{tag}", spec.name, case.name()));
+            .join(format!("homes/{}-{}-{tag}", spec.name, case.name()));
         let _ = std::fs::remove_dir_all(&home);
         let entry = if tun.is_some() {
             Entry::Tun
@@ -582,8 +582,7 @@ impl Rig {
             placement: self.placement(Role::Core),
             log: self
                 .dir
-                .join("logs")
-                .join(format!("{}-{}-{tag}.log", spec.name, case.name())),
+                .join(format!("logs/{}-{}-{tag}.log", spec.name, case.name())),
             probe: SocketAddr::new(far.ip, far.ports.echo),
             entry,
             log_level: &self.core_log,
@@ -701,14 +700,12 @@ impl Rig {
         let Some(background) = self.plan.background else {
             return load::run(workload, ctx).await;
         };
-        let (outcome, beside) = tokio::join!(load::run(workload, ctx), load::run(background, ctx));
+        let mut bg = ctx.clone();
+        bg.first_byte_timeout = Duration::ZERO;
+        let (outcome, beside) = tokio::join!(load::run(workload, ctx), load::run(background, &bg));
         let mut metrics = outcome?;
         let beside = beside.map_err(|err| format!("background {}: {err}", background.name()))?;
-        metrics.extend(
-            beside
-                .into_iter()
-                .map(|(name, value)| (format!("bg_{name}"), value)),
-        );
+        metrics.extend(beside.into_iter().map(|(k, v)| (format!("bg_{k}"), v)));
         Ok(metrics)
     }
 
@@ -867,9 +864,9 @@ fn free_port_from(next: &mut u16, ip: IpAddr) -> u16 {
         if !ip.is_loopback() {
             return port;
         }
-        let tcp = std::net::TcpListener::bind((ip, port)).is_ok();
-        let udp = std::net::UdpSocket::bind((ip, port)).is_ok();
-        if tcp && udp {
+        if std::net::TcpListener::bind((ip, port)).is_ok()
+            && std::net::UdpSocket::bind((ip, port)).is_ok()
+        {
             return port;
         }
     }
