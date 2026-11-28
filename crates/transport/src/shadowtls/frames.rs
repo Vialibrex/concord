@@ -8,6 +8,7 @@ use crate::http1::invalid;
 
 pub(super) const HEADER: usize = 5;
 pub(super) const MAX_PLAINTEXT: usize = 16384;
+pub(super) const CHANGE_CIPHER_SPEC: u8 = 20;
 pub(super) const ALERT: u8 = 21;
 pub(super) const HANDSHAKE: u8 = 22;
 pub(super) const APPLICATION_DATA: u8 = 23;

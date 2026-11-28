@@ -5,8 +5,10 @@ use indexmap::IndexMap;
 use serde_json::Value;
 
 mod masquerade;
+mod shadow_tls;
 
 use self::masquerade::masquerade;
+use self::shadow_tls::shadow_tls;
 use super::tunnel::{bind_addr, parse_networks, parse_tunnel};
 use super::*;
 use crate::Map;
@@ -233,6 +235,7 @@ fn global_ss(cipher: String, password: String) -> ListenerKind {
         password,
         users: IndexMap::new(),
         udp: true,
+        shadow_tls: None,
         mux: MuxServer::default(),
     })
 }
@@ -246,6 +249,7 @@ fn global_vmess(username: String, uuid: String) -> ListenerKind {
             alter_id: 1,
         }],
         tls: None,
+        shadow_tls: None,
         carriers: HttpCarriers::default(),
         mux: MuxServer::default(),
     })
@@ -378,13 +382,17 @@ fn asks_for(f: &Fields<'_>, key: &str) -> bool {
     }
 }
 
-/// `securityModes`: at most one layer besides plain TLS, and the one this core serves today
-/// is plain TLS (`sing_vmess/server.go:138-163`).
-fn security(f: &mut Fields<'_>, tls: &Option<ServerTls>) -> R<()> {
+/// `securityModes` (`sing_vmess/server.go:138-163`): ShadowTLS is the one served besides TLS.
+fn security(f: &mut Fields<'_>, tls: &Option<ServerTls>) -> R<Option<ShadowTlsServer>> {
     security_among(f, tls, SECURITY_KEYS)
 }
 
-fn security_among(f: &mut Fields<'_>, tls: &Option<ServerTls>, keys: &[&str]) -> R<()> {
+fn security_among(
+    f: &mut Fields<'_>,
+    tls: &Option<ServerTls>,
+    keys: &[&str],
+) -> R<Option<ShadowTlsServer>> {
+    let shadow_tls = shadow_tls(f)?;
     let mut chosen: Vec<&str> = keys
         .iter()
         .copied()
@@ -401,8 +409,9 @@ fn security_among(f: &mut Fields<'_>, tls: &Option<ServerTls>, keys: &[&str]) ->
         .into());
     }
     match chosen.first() {
+        Some(&"shadow-tls") => shadow_tls.transpose(),
         Some(&key) if key != "certificate" => skip(format!("option '{key}' is not served yet")),
-        _ => Ok(()),
+        _ => Ok(None),
     }
 }
 
@@ -584,13 +593,14 @@ fn ss_server(f: &mut Fields<'_>) -> R<SsServer> {
     if asks_for(f, "simple-obfs") {
         return skip("option 'simple-obfs' is not served yet");
     }
-    security(f, &None)?;
+    let shadow_tls = security(f, &None)?;
     let mux = mux_option(f)?;
     Ok(SsServer {
         cipher,
         password,
         users,
         udp,
+        shadow_tls,
         mux,
     })
 }
@@ -616,11 +626,12 @@ fn vmess_server(f: &mut Fields<'_>) -> R<VmessServer> {
         })
         .collect::<Result<Vec<_>>>()?;
     let tls = server_tls(f)?;
-    security(f, &tls)?;
+    let shadow_tls = security(f, &tls)?;
     let mux = mux_option(f)?;
     Ok(VmessServer {
         users,
         tls,
+        shadow_tls,
         carriers: carriers(f)?,
         mux,
     })
@@ -644,8 +655,8 @@ fn vless_server(f: &mut Fields<'_>) -> R<VlessServer> {
         return skip("option 'xhttp-config' is not served yet");
     }
     let tls = server_tls(f)?;
-    security(f, &tls)?;
-    if tls.is_none() && !f.boolean("allow-insecure")? {
+    let shadow_tls = security(f, &tls)?;
+    if tls.is_none() && shadow_tls.is_none() && !f.boolean("allow-insecure")? {
         return skip(
             "disallow using Vless without any certificates/shadow-tls/res-tls/jls/reality/decryption/allow-insecure config",
         );
@@ -654,6 +665,7 @@ fn vless_server(f: &mut Fields<'_>) -> R<VlessServer> {
     Ok(VlessServer {
         users,
         tls,
+        shadow_tls,
         carriers: carriers(f)?,
         mux,
     })
@@ -672,8 +684,8 @@ fn trojan_server(f: &mut Fields<'_>) -> R<TrojanServer> {
         return skip("option 'ss-option' is not served yet");
     }
     let tls = server_tls(f)?;
-    security(f, &tls)?;
-    if tls.is_none() && !f.boolean("allow-insecure")? {
+    let shadow_tls = security(f, &tls)?;
+    if tls.is_none() && shadow_tls.is_none() && !f.boolean("allow-insecure")? {
         return skip(
             "disallow using Trojan without any certificates/shadow-tls/res-tls/jls/reality/ss/allow-insecure config",
         );
@@ -682,6 +694,7 @@ fn trojan_server(f: &mut Fields<'_>) -> R<TrojanServer> {
     Ok(TrojanServer {
         users,
         tls,
+        shadow_tls,
         carriers: carriers(f)?,
         mux,
     })
@@ -693,8 +706,8 @@ fn anytls_server(f: &mut Fields<'_>) -> R<AnyTlsServer> {
     let users = f.string_map("users")?;
     let padding_scheme = f.string("padding-scheme")?;
     let tls = server_tls(f)?;
-    security_among(f, &tls, ANYTLS_SECURITY_KEYS)?;
-    if tls.is_none() && !f.boolean("allow-insecure")? {
+    let shadow_tls = security_among(f, &tls, ANYTLS_SECURITY_KEYS)?;
+    if tls.is_none() && shadow_tls.is_none() && !f.boolean("allow-insecure")? {
         return skip(
             "disallow using AnyTLS without certificates/shadow-tls/res-tls/jls/allow-insecure config",
         );
@@ -703,6 +716,7 @@ fn anytls_server(f: &mut Fields<'_>) -> R<AnyTlsServer> {
         users,
         padding_scheme,
         tls,
+        shadow_tls,
     })
 }
 

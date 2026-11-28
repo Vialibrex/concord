@@ -30,6 +30,8 @@ const PATIENCE: Duration = Duration::from_secs(10);
 const UUID: &str = "b831381d-6324-4d53-ad4f-8cda48b30811";
 const KEY: &str = "AAECAwQFBgcICQoLDA0ODw==";
 const USER_KEY: &str = "EBESExQVFhcYGRobHB0eHw==";
+/// Stands in a listener for the address of the handshake server ShadowTLS dials.
+const HANDSHAKE: &str = "HANDSHAKE_SERVER";
 
 struct Quiet;
 
@@ -241,6 +243,7 @@ fn cases() -> Vec<Case> {
         ),
     ];
     all.extend(mux_cases());
+    all.extend(shadow_tls_cases());
     all.push(Case {
         udp: false,
         ..case(
@@ -257,6 +260,64 @@ fn cases() -> Vec<Case> {
             .collect(),
         Err(_) => all,
     }
+}
+
+/// ShadowTLS v2 and v3 in front of a protocol that names its users and one that does not.
+/// A shadowsocks listener's UDP has no ShadowTLS in front and no user, so its case is TCP.
+fn shadow_tls_cases() -> Vec<Case> {
+    let handshake = format!("handshake: {{dest: '{HANDSHAKE}', proxy: DIRECT}}");
+    let v3 = format!(
+        "shadow-tls: {{enable: true, version: 3, users: [{{name: sam, password: st}}], {handshake}}}"
+    );
+    let v2 = format!("shadow-tls: {{enable: true, version: 2, password: st, {handshake}}}");
+    let decoy = "sni: inner.test, servername: inner.test, skip-cert-verify: true";
+    let plugin = |version| {
+        format!(
+            "plugin: shadow-tls, plugin-opts: {{host: inner.test, password: st, version: {version}, skip-cert-verify: true}}"
+        )
+    };
+    vec![
+        case(
+            "trojan-shadowtls-v3",
+            &format!("type: trojan, users: [{{username: tina, password: pw}}], {v3}"),
+            &format!(
+                "type: trojan, password: pw, {decoy}, udp: true, shadow-tls-opts: {{password: st, version: 3}}"
+            ),
+            Some("tina"),
+        ),
+        case(
+            "vmess-shadowtls-v2",
+            &format!("type: vmess, users: [{{uuid: {UUID}, alterId: 0}}], {v2}"),
+            &format!(
+                "type: vmess, uuid: {UUID}, alterId: 0, cipher: auto, udp: true, tls: true, {decoy}, shadow-tls-opts: {{password: st, version: 2}}"
+            ),
+            None,
+        ),
+        Case {
+            udp: false,
+            ..case(
+                "ss-shadowtls-v3",
+                &format!("type: shadowsocks, cipher: aes-128-gcm, password: secret, {v3}"),
+                &format!(
+                    "type: ss, cipher: aes-128-gcm, password: secret, {}",
+                    plugin(3)
+                ),
+                Some("sam"),
+            )
+        },
+        Case {
+            udp: false,
+            ..case(
+                "ss-shadowtls-v2",
+                &format!("type: shadowsocks, cipher: aes-128-gcm, password: secret, {v2}"),
+                &format!(
+                    "type: ss, cipher: aes-128-gcm, password: secret, {}",
+                    plugin(2)
+                ),
+                None,
+            )
+        },
+    ]
 }
 
 /// sing-mux on the listeners that take `mux-option`: each protocol, with padding and
@@ -446,13 +507,19 @@ fn write_certificate(home: &Path) {
     std::fs::write(home.join("server.key"), made.signing_key.serialize_pem()).unwrap();
 }
 
-async fn start_concord(home: &Path, cases: &[Case], ports: &[(u16, u16)]) -> Arc<Engine> {
+async fn start_concord(
+    home: &Path,
+    cases: &[Case],
+    ports: &[(u16, u16)],
+    handshake: SocketAddr,
+) -> Arc<Engine> {
     let mut config = format!("mixed-port: {}\nlisteners:\n", port_to_bind_later());
     for (case, (server, _)) in cases.iter().zip(ports) {
         let _ = writeln!(
             config,
             "  - {{name: {}, listen: 127.0.0.1, port: {server}, {}}}",
-            case.name, case.server
+            case.name,
+            case.server.replace(HANDSHAKE, &handshake.to_string())
         );
     }
     config.push_str("rules:\n  - MATCH,DIRECT\n");
@@ -734,7 +801,8 @@ async fn mihomo_clients_reach_every_concord_server() {
     let client_dir = tempfile::tempdir().unwrap();
     write_certificate(home.path());
     let logged = Logged::install();
-    let engine = start_concord(home.path(), &cases, &ports).await;
+    let (handshake, _, _) = tls13_echo().await;
+    let engine = start_concord(home.path(), &cases, &ports, handshake).await;
     assert_eq!(engine.faults(), []);
     let started = logged.text();
     assert!(

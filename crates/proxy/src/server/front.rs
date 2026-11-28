@@ -8,12 +8,14 @@ use concord_transport::server::{self, HttpCarriers, OnStream};
 
 use super::certs::ServerCerts;
 use super::mux::{Mux, MuxServe};
+use super::shadowtls::ShadowFront;
 use tokio::net::TcpStream;
 
-/// What lies between an accepted connection and the protocol: TLS, then a websocket or
-/// gun streams, as the listener's options ask.
+/// What lies between an accepted connection and the protocol: TLS or ShadowTLS, then a
+/// websocket or gun streams, as the listener's options ask.
 pub(super) struct Front {
     pub(super) tls: Option<(TlsServer, ServerCerts)>,
+    pub(super) shadow_tls: Option<Arc<ShadowFront>>,
     pub(super) carriers: HttpCarriers,
 }
 
@@ -65,6 +67,17 @@ impl<C: Conn> Fronted<C> {
 impl<C: Conn> StreamService for Fronted<C> {
     fn serve(self: Arc<Self>, stream: TcpStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture {
         Box::pin(async move {
+            if let Some(shadow) = self.front.shadow_tls.clone() {
+                let mux = if self.front.carriers.is_empty() {
+                    Mux::over(self.conn.mux(), &stream)
+                } else {
+                    Mux::new(self.conn.mux())
+                };
+                shadow.serve(stream, peer.src, cx, move |stream, _, cx| {
+                    self.carry(stream, peer, cx, mux)
+                });
+                return;
+            }
             let bare = self.front.tls.is_none() && self.front.carriers.is_empty();
             let mux = if bare {
                 Mux::over(self.conn.mux(), &stream)
@@ -84,22 +97,26 @@ impl<C: Conn> StreamService for Fronted<C> {
                 },
                 None => Box::new(stream),
             };
-            if self.front.carriers.is_empty() {
-                self.conn.clone().handle(stream, peer, cx, mux).await;
-                return;
-            }
-            let conn = self.conn.clone();
-            let carried = cx.clone();
-            let on_stream: OnStream = Arc::new(move |stream| {
-                carried.tasks.spawn(conn.clone().handle(
-                    stream,
-                    peer,
-                    carried.clone(),
-                    mux.clone(),
-                ));
-            });
-            let _ = server::accept(stream, &self.front.carriers, &cx.tasks, on_stream).await;
+            self.carry(stream, peer, cx, mux).await;
         })
+    }
+}
+
+impl<C: Conn> Fronted<C> {
+    async fn carry(self: Arc<Self>, stream: BoxStream, peer: Peer, cx: Arc<InboundCx>, mux: Mux) {
+        if self.front.carriers.is_empty() {
+            self.conn.clone().handle(stream, peer, cx, mux).await;
+            return;
+        }
+        let conn = self.conn.clone();
+        let carried = cx.clone();
+        let on_stream: OnStream = Arc::new(move |stream| {
+            carried.tasks.spawn(
+                conn.clone()
+                    .handle(stream, peer, carried.clone(), mux.clone()),
+            );
+        });
+        let _ = server::accept(stream, &self.front.carriers, &cx.tasks, on_stream).await;
     }
 }
 
@@ -112,7 +129,14 @@ mod tests {
     use concord_test_support::tcp_pair;
     use concord_tls::server::{Certs, ClientAuth, ServerOptions};
 
-    use super::super::quic_testing::Flows;
+    use concord_config::listener::{
+        ShadowTlsHandshake, ShadowTlsServer as ShadowTlsDef, WildcardSni,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use super::super::quic_testing::{Flows, SHADOW_TLS_V1_RECORDS};
+    use super::super::shadowtls::ShadowFront;
     use super::*;
     use crate::util::lock;
 
@@ -194,17 +218,36 @@ mod tests {
 
     /// What a listener with Brutal on hands its protocol for one connection, and whether the
     /// mux it hands with it may run Brutal.
-    async fn handed(tls: bool, records: bool) -> Vec<(Handed, bool)> {
-        let got = Arc::new(Mutex::new(Vec::new()));
-        let brutal = MuxServer {
+    fn brutal() -> Arc<MuxServe> {
+        MuxServe::new(&MuxServer {
             brutal: Some(MuxBrutal {
                 up: "10 Mbps".into(),
                 down: "10 Mbps".into(),
             }),
             ..MuxServer::default()
-        };
+        })
+    }
+
+    fn peer_of(served: &TcpStream) -> Peer {
+        Peer {
+            src: served.peer_addr().unwrap(),
+            local: served.local_addr().unwrap(),
+        }
+    }
+
+    fn inbound(handler: Arc<Flows>) -> Arc<InboundCx> {
+        Arc::new(InboundCx {
+            name: "in".into(),
+            special: None,
+            handler,
+            tasks: Tasks::default(),
+        })
+    }
+
+    async fn handed(tls: bool, records: bool) -> Vec<(Handed, bool)> {
+        let got = Arc::new(Mutex::new(Vec::new()));
         let conn = Seen {
-            serve: MuxServe::new(&brutal),
+            serve: brutal(),
             records,
             got: got.clone(),
         };
@@ -216,20 +259,13 @@ mod tests {
         };
         let front = Front {
             tls: front_tls,
+            shadow_tls: None,
             carriers: HttpCarriers::default(),
         };
         let service = Fronted::service(front, conn);
         let (client, served) = tcp_pair().await;
-        let peer = Peer {
-            src: served.peer_addr().unwrap(),
-            local: served.local_addr().unwrap(),
-        };
-        let cx = Arc::new(InboundCx {
-            name: "in".into(),
-            special: None,
-            handler: Arc::new(Flows::default()),
-            tasks: Tasks::default(),
-        });
+        let peer = peer_of(&served);
+        let cx = inbound(Arc::new(Flows::default()));
         let secure = async move {
             let connector = connector?;
             let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
@@ -250,5 +286,48 @@ mod tests {
     async fn a_protocol_that_takes_records_gets_the_listeners_tls_as_records() {
         assert_eq!(handed(true, true).await, [(Handed::Records, false)]);
         assert_eq!(handed(false, true).await, [(Handed::Stream, cfg!(unix))]);
+    }
+
+    #[tokio::test]
+    async fn a_connection_past_shadow_tls_hands_a_mux_that_may_run_brutal() {
+        let decoy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let shadow_tls = ShadowFront::new(&ShadowTlsDef {
+            version: 1,
+            password: String::new(),
+            users: Vec::new(),
+            handshake: ShadowTlsHandshake {
+                dest: decoy.local_addr().unwrap().to_string(),
+                proxy: String::new(),
+            },
+            handshake_for_server_name: Default::default(),
+            strict_mode: false,
+            wildcard_sni: WildcardSni::Off,
+        });
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let conn = Seen {
+            serve: brutal(),
+            records: false,
+            got: got.clone(),
+        };
+        let front = Front {
+            tls: None,
+            shadow_tls: Some(shadow_tls),
+            carriers: HttpCarriers::default(),
+        };
+        let flows = Arc::new(Flows::default());
+        flows.forward();
+        let (mut client, served) = tcp_pair().await;
+        let peer = peer_of(&served);
+        Fronted::service(front, conn)
+            .serve(served, peer, inbound(flows))
+            .await;
+        client.write_all(&SHADOW_TLS_V1_RECORDS).await.unwrap();
+        let (mut upstream, _) = decoy.accept().await.unwrap();
+        let mut relayed = [0; SHADOW_TLS_V1_RECORDS.len()];
+        upstream.read_exact(&mut relayed).await.unwrap();
+        upstream.write_all(&SHADOW_TLS_V1_RECORDS).await.unwrap();
+        client.read_exact(&mut relayed).await.unwrap();
+        assert!(concord_test_support::eventually(|| !lock(&got).is_empty()).await);
+        assert_eq!(*lock(&got), [(Handed::Stream, cfg!(unix))]);
     }
 }

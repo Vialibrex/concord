@@ -56,6 +56,7 @@ fn server(offset: Duration) -> Protocol {
         password: PASSWORD.into(),
         users: Default::default(),
         udp: true,
+        shadow_tls: None,
         mux: Default::default(),
     });
     let env = ServerEnv {

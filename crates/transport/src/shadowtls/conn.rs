@@ -14,7 +14,7 @@ use crate::http1::invalid;
 use crate::outgoing::Outgoing;
 
 pub(super) const HMAC_SIZE: usize = 4;
-const HMAC_HEADER: usize = HEADER + HMAC_SIZE;
+pub(super) const HMAC_HEADER: usize = HEADER + HMAC_SIZE;
 const ALERT_RECORD: usize = 31;
 const SHA1_LEN: usize = 20;
 
@@ -66,14 +66,15 @@ struct V2Write {
     out: Outgoing,
 }
 
-pub(super) fn v2_conn(inner: BoxStream, prefix: [u8; 8]) -> BoxStream {
+/// `prefix` is the client's hash before its first record; the server writes none.
+pub(super) fn v2_conn(inner: BoxStream, prefix: Option<[u8; 8]>) -> BoxStream {
     let read = V2Read {
         head: [0; HEADER],
         head_have: 0,
         remaining: 0,
     };
     let write = V2Write {
-        prefix: Some(prefix),
+        prefix,
         out: Outgoing::new(),
     };
     Box::new(Layered::new(inner, read, write))
@@ -350,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn v2_halves_move_data_both_ways_and_shutdown_keeps_reading() {
         let (near, far) = duplex(8192);
-        let (mut read, mut write) = v2_conn(Box::new(near), [7; 8]).into_split();
+        let (mut read, mut write) = v2_conn(Box::new(near), Some([7; 8])).into_split();
         let (mut far_read, mut far_write) = tokio::io::split(far);
         let writer = tokio::spawn(async move {
             write.write_all(b"hi").await.unwrap();

@@ -172,7 +172,7 @@ async fn protocol_listeners_serve_concord_clients_over_tcp_and_udp() {
     for (listener, client, user) in protocol_cases(port_to_bind_later()) {
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            serves_a_concord_client(&listener, &client, user, tcp, udp),
+            serves_a_concord_client(&listener, &client, [user, user], tcp, udp),
         )
         .await
         .unwrap_or_else(|_| panic!("{listener}: timed out"));
@@ -180,10 +180,114 @@ async fn protocol_listeners_serve_concord_clients_over_tcp_and_udp() {
 }
 
 #[cfg(feature = "server")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shadow_tls_listeners_serve_concord_clients_past_a_real_handshake() {
+    let tcp = tcp_echo().await;
+    let udp = udp_echo().await;
+    let (decoy, _, _) = tls13_echo().await;
+    let port = port_to_bind_later();
+    let handshake = format!("handshake: {{dest: '{decoy}', proxy: DIRECT}}");
+    let v3 = format!(
+        "shadow-tls: {{enable: true, version: 3, users: [{{name: sam, password: one}}], {handshake}}}"
+    );
+    let decoy_tls = "sni: inner.test, servername: inner.test, skip-cert-verify: true";
+    let cases = [
+        (
+            format!(
+                "{{name: in, type: trojan, listen: 127.0.0.1, port: {port}, users: [{{username: tina, password: secret}}], {v3}}}"
+            ),
+            format!(
+                "{{name: out, type: trojan, server: 127.0.0.1, port: {port}, password: secret, {decoy_tls}, udp: true, shadow-tls-opts: {{password: one, version: 3}}}}"
+            ),
+            [Some("tina"); 2],
+        ),
+        (
+            format!(
+                "{{name: in, type: shadowsocks, listen: 127.0.0.1, port: {port}, cipher: aes-128-gcm, password: secret, {v3}}}"
+            ),
+            format!(
+                "{{name: out, type: ss, server: 127.0.0.1, port: {port}, cipher: aes-128-gcm, password: secret, udp: true, plugin: shadow-tls, plugin-opts: {{host: inner.test, password: one, version: 3, skip-cert-verify: true}}}}"
+            ),
+            // The listener's UDP socket has no ShadowTLS in front, so no user signs it.
+            [Some("sam"), None],
+        ),
+        (
+            format!(
+                "{{name: in, type: vmess, listen: 127.0.0.1, port: {port}, ws-path: /ws, users: [{{uuid: {UUID}, alterId: 0}}], shadow-tls: {{enable: true, version: 2, password: pw, {handshake}}}}}"
+            ),
+            format!(
+                "{{name: out, type: vmess, server: 127.0.0.1, port: {port}, uuid: {UUID}, alterId: 0, cipher: auto, udp: true, tls: true, {decoy_tls}, network: ws, ws-opts: {{path: /ws}}, shadow-tls-opts: {{password: pw, version: 2}}}}"
+            ),
+            [None; 2],
+        ),
+    ];
+    for (listener, client, users) in cases {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            serves_a_concord_client(&listener, &client, users, tcp, udp),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{listener}: timed out"));
+    }
+}
+
+#[cfg(feature = "server")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shadow_tls_handshake_that_comes_back_to_its_listener_goes_no_further() {
+    let port = port_to_bind_later();
+    let rig = Rig::new();
+    rig.apply(&format!(
+        "listeners:\n  - {{name: in, type: trojan, listen: 127.0.0.1, port: {port}, users: [{{username: tina, password: secret}}], shadow-tls: {{enable: true, version: 3, users: [{{name: sam, password: one}}], handshake: {{dest: '127.0.0.1:{port}', proxy: DIRECT}}}}}}\nrules:\n  - MATCH,DIRECT\n"
+    ))
+    .await
+    .unwrap();
+    rig.engine.start_listeners().await;
+    let hello = client_hello("loop.test");
+    let mut stranger = TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    stranger.write_all(&hello).await.unwrap();
+    let mut rest = Vec::new();
+    let _ = timeout(Duration::from_secs(10), stranger.read_to_end(&mut rest))
+        .await
+        .expect("the stranger is still held");
+    let (up, _) = rig.engine.traffic_total(false);
+    let hello = i64::try_from(hello.len()).unwrap();
+    assert!(up <= 2 * hello, "the hello went round {} times", up / hello);
+    rig.engine.shutdown().await;
+}
+
+#[cfg(feature = "server")]
+fn client_hello(sni: &str) -> Vec<u8> {
+    let name = sni.as_bytes();
+    let u16_of = |n: usize| u16::try_from(n).unwrap().to_be_bytes();
+    let mut extension = vec![0, 0];
+    extension.extend(u16_of(name.len() + 5));
+    extension.extend(u16_of(name.len() + 3));
+    extension.push(0);
+    extension.extend(u16_of(name.len()));
+    extension.extend(name);
+    let mut body = vec![3, 3];
+    body.extend([7; 32]);
+    body.push(32);
+    body.extend([9; 32]);
+    body.extend([0, 2, 0x13, 0x01, 1, 0]);
+    body.extend(u16_of(extension.len()));
+    body.extend(extension);
+    let mut record = vec![22, 3, 1];
+    record.extend(u16_of(body.len() + 4));
+    record.push(1);
+    record.extend(&u32::try_from(body.len()).unwrap().to_be_bytes()[1..]);
+    record.extend(body);
+    record
+}
+
+/// `users` are the users of the TCP flows, then of the UDP ones.
+#[cfg(feature = "server")]
 async fn serves_a_concord_client(
     listener: &str,
     client: &str,
-    user: Option<&str>,
+    users: [Option<&str>; 2],
     tcp: std::net::SocketAddr,
     udp: std::net::SocketAddr,
 ) {
@@ -208,9 +312,13 @@ async fn serves_a_concord_client(
         .collect::<Vec<_>>();
     assert!(!served.is_empty(), "{listener}: nothing came in");
     assert!(
-        served
-            .iter()
-            .all(|record| record.meta.inbound.user.as_deref() == user),
+        served.iter().all(|record| {
+            let user = match record.meta.network {
+                concord_common::Network::Tcp => users[0],
+                concord_common::Network::Udp => users[1],
+            };
+            record.meta.inbound.user.as_deref() == user
+        }),
         "{listener}: wrong user"
     );
     rig.engine.shutdown().await;

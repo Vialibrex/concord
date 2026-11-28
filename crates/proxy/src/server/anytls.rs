@@ -107,6 +107,7 @@ mod tests {
             users: IndexMap::from([("alice".to_string(), "pw".to_string())]),
             padding_scheme: String::new(),
             tls: None,
+            shadow_tls: None,
         })
         .unwrap()
     }
@@ -139,6 +140,7 @@ mod tests {
             users: IndexMap::new(),
             padding_scheme: "0=1-2".into(),
             tls: None,
+            shadow_tls: None,
         });
         assert!(matches!(built, Err(ServerError::Invalid(_))));
     }

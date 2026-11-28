@@ -8,15 +8,14 @@ use concord_common::{BoxStream, Stream};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use super::conn::{HmacSha1, new_hmac};
+use super::conn::{HMAC_HEADER, HmacSha1, new_hmac};
 use super::frames::{APPLICATION_DATA, FrameReader, HANDSHAKE, HEADER};
 use crate::http1::invalid;
 
-const SERVER_HELLO: u8 = 2;
-const SERVER_RANDOM_INDEX: usize = HEADER + 1 + 3 + 2;
-const RANDOM_SIZE: usize = 32;
-const SESSION_ID_LENGTH_INDEX: usize = SERVER_RANDOM_INDEX + RANDOM_SIZE;
-const HMAC_HEADER: usize = HEADER + super::conn::HMAC_SIZE;
+pub(super) const SERVER_HELLO: u8 = 2;
+pub(super) const SERVER_RANDOM_INDEX: usize = HEADER + 1 + 3 + 2;
+pub(super) const RANDOM_SIZE: usize = 32;
+pub(super) const SESSION_ID_LENGTH_INDEX: usize = SERVER_RANDOM_INDEX + RANDOM_SIZE;
 
 /// Lets the handshake own a `BoxStream` while the caller keeps a way to take
 /// the transport back once the handshake is over.
@@ -214,7 +213,7 @@ pub(super) fn kdf(password: &[u8], server_random: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn server_hello_is_tls13(frame: &[u8]) -> bool {
+pub(super) fn server_hello_is_tls13(frame: &[u8]) -> bool {
     let Some(&id_len) = frame.get(SESSION_ID_LENGTH_INDEX) else {
         return false;
     };

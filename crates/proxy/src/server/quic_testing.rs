@@ -47,6 +47,11 @@ pub(super) fn tls_setup() -> TlsSetup {
     TlsSetup::new(&unnamed_tls(), Some(&SelfSigned::default()), &env).unwrap()
 }
 
+/// Both sides' ChangeCipherSpec and Finished, which a v1 ShadowTLS server relays before
+/// it hands the connection on.
+pub(super) const SHADOW_TLS_V1_RECORDS: [u8; 18] =
+    [22, 3, 3, 0, 1, 1, 20, 3, 3, 0, 1, 1, 22, 3, 3, 0, 1, 20];
+
 /// The TCP flows the endpoint opened, their destination and `IN-USER`, and the connection
 /// key of each datagram it handed on. It keeps each reply, as the tunnel's NAT does for its
 /// idle time. A flow to an IP is connected there once `forward` is set, and dropped before.

@@ -1,5 +1,7 @@
 mod conn;
 mod frames;
+mod hello;
+mod server;
 mod tap;
 
 use std::io;
@@ -14,6 +16,10 @@ use rand::RngExt;
 use tokio::io::{AsyncRead, ReadBuf};
 
 use self::conn::{HMAC_SIZE, new_hmac, v2_conn, v3_conn};
+pub use self::server::{
+    Accepted, Dial, HandshakeTarget, ShadowTlsServer, ShadowTlsServerOptions, ShadowTlsUser,
+    ShadowTlsVersion, WildcardSni,
+};
 use self::tap::{HashingRead, Lent, V3State, V3Tap};
 use crate::http1::invalid;
 
@@ -103,7 +109,7 @@ impl ShadowTlsClient {
                         .get(..8)
                         .ok_or_else(|| invalid("shadow-tls: short digest"))?,
                 );
-                Ok(v2_conn(lent.take()?, prefix))
+                Ok(v2_conn(lent.take()?, Some(prefix)))
             }
             (Handshake::Decoy(decoy), _) => {
                 let state = Arc::new(Mutex::new(V3State::default()));

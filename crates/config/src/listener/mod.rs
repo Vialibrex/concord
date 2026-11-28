@@ -166,12 +166,39 @@ pub struct MuxBrutal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShadowTlsServer {
+    pub version: u8,
+    pub password: String,
+    pub users: Vec<(String, String)>,
+    pub handshake: ShadowTlsHandshake,
+    pub handshake_for_server_name: IndexMap<String, ShadowTlsHandshake>,
+    pub strict_mode: bool,
+    pub wildcard_sni: WildcardSni,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShadowTlsHandshake {
+    pub dest: String,
+    pub proxy: String,
+}
+
+/// `wildcard-sni`; a value other than `authed` or `all` is off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WildcardSni {
+    #[default]
+    Off,
+    Authed,
+    All,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SsServer {
     pub cipher: String,
     pub password: String,
     /// By user name, the password (AEAD) or the user PSK (2022).
     pub users: IndexMap<String, String>,
     pub udp: bool,
+    pub shadow_tls: Option<ShadowTlsServer>,
     pub mux: MuxServer,
 }
 
@@ -186,6 +213,7 @@ pub struct VmessUser {
 pub struct VmessServer {
     pub users: Vec<VmessUser>,
     pub tls: Option<ServerTls>,
+    pub shadow_tls: Option<ShadowTlsServer>,
     pub carriers: HttpCarriers,
     pub mux: MuxServer,
 }
@@ -201,6 +229,7 @@ pub struct VlessUser {
 pub struct VlessServer {
     pub users: Vec<VlessUser>,
     pub tls: Option<ServerTls>,
+    pub shadow_tls: Option<ShadowTlsServer>,
     pub carriers: HttpCarriers,
     pub mux: MuxServer,
 }
@@ -215,6 +244,7 @@ pub struct TrojanUser {
 pub struct TrojanServer {
     pub users: Vec<TrojanUser>,
     pub tls: Option<ServerTls>,
+    pub shadow_tls: Option<ShadowTlsServer>,
     pub carriers: HttpCarriers,
     pub mux: MuxServer,
 }
@@ -227,6 +257,7 @@ pub struct AnyTlsServer {
     /// As written; empty for the default scheme.
     pub padding_scheme: String,
     pub tls: Option<ServerTls>,
+    pub shadow_tls: Option<ShadowTlsServer>,
 }
 
 /// mihomo's `listener/config/tuic.go`. The numbers are as written, 0 where absent: the

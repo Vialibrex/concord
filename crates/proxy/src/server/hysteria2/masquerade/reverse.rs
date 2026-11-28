@@ -2,14 +2,13 @@
 //! `inner.HandleTcp` does (`listener/sing_hysteria2/server.go:129-153`), over HTTP/1.1 only.
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use concord_common::serve::InboundCx;
-use concord_common::{Address, BoxStream, FlowMeta, InboundInfo, InboundKind, Network};
+use concord_common::{Address, BoxStream};
 use concord_tls::{TlsConnector, TlsOptions, TrustStore};
 use h3::server::RequestStream;
 use http::header::{self, HeaderName};
@@ -21,11 +20,10 @@ use hyper_util::rt::TokioIo;
 
 use super::gunzip::Gunzip;
 use super::{H3Stream, Reply, stamp_date};
-use crate::server::ServerError;
+use crate::server::{ServerError, inner};
 
 /// `http.Transport.TLSHandshakeTimeout` as mihomo sets it.
 const TLS_HANDSHAKE: Duration = Duration::from_secs(10);
-const PIPE: usize = 1 << 16;
 
 /// Go's `hopHeaders`, which the proxy drops both ways.
 const HOP_HEADERS: [&str; 9] = [
@@ -119,7 +117,7 @@ impl Reverse {
         cx: &Arc<InboundCx>,
         send: &mut RequestStream<S, Bytes>,
     ) -> io::Result<()> {
-        let io = dial(cx, Address::new(&self.host, self.port));
+        let io = inner::dial(cx, Address::new(&self.host, self.port), None, None);
         let io: BoxStream = match &self.tls {
             None => io,
             Some(tls) => Box::new(handshake(tls.clone(), io, &self.host, cx).await?),
@@ -209,22 +207,6 @@ async fn handshake(
         Ok(Some(Err(_))) => Err(io::Error::new(io::ErrorKind::TimedOut, "tls handshake")),
         Ok(None) | Err(_) => Err(io::Error::other("tls handshake stopped")),
     }
-}
-
-/// A flow the tunnel routes as it routes mihomo's `inner.HandleTcp`.
-fn dial(cx: &InboundCx, dst: Address) -> BoxStream {
-    let (near, far) = tokio::io::duplex(PIPE);
-    cx.handler.handle_tcp(
-        FlowMeta {
-            dscp: 0,
-            network: Network::Tcp,
-            inbound: InboundInfo::new(InboundKind::Inner),
-            src: SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
-            dst,
-        },
-        Box::new(far),
-    );
-    Box::new(near)
 }
 
 /// The client's body as it arrives. Go probes a bodiless method's body for 200 ms before it

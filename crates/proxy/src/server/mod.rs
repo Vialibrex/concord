@@ -5,12 +5,14 @@ mod certs;
 mod flows;
 mod front;
 mod hysteria2;
+mod inner;
 mod mux;
 mod muxcool;
 mod packets;
 mod quic;
 #[cfg(test)]
 mod quic_testing;
+mod shadowtls;
 mod ss;
 mod trojan;
 mod tuic;
@@ -22,7 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use concord_common::serve::{HANDSHAKE_TIMEOUT, OnUdp, Protocol, StreamService};
 use concord_common::{BoxStream, ClockOffset, InboundKind, Tasks};
-use concord_config::listener::{ClientAuth, ListenerKind, ServerTls};
+use concord_config::listener::{ClientAuth, ListenerKind, ServerTls, ShadowTlsServer};
 use concord_platform::HomeDir;
 use concord_tls::server::{ClientAuth as TlsClientAuth, ServerOptions, ServerTlsError, TlsServer};
 
@@ -32,6 +34,7 @@ use tokio::io::BufReader;
 
 use self::front::{Front, Fronted};
 use self::mux::MuxServe;
+use self::shadowtls::ShadowFront;
 use crate::BuildError;
 use crate::util::lock;
 
@@ -97,24 +100,44 @@ impl Carried {
 pub fn build(kind: &ListenerKind, env: &ServerEnv<'_>) -> Result<Option<Protocol>, ServerError> {
     let (kind, stream) = match kind {
         ListenerKind::Trojan(server) => {
-            let front = front(server.tls.as_ref(), &server.carriers, env)?;
+            let front = front(
+                server.tls.as_ref(),
+                server.shadow_tls.as_ref(),
+                &server.carriers,
+                env,
+            )?;
             let conn = trojan::Trojan::new(&server.users).with_mux(MuxServe::new(&server.mux));
             (InboundKind::Trojan, Fronted::service(front, conn))
         }
         ListenerKind::Vless(server) => {
-            let front = front(server.tls.as_ref(), &server.carriers, env)?;
+            let front = front(
+                server.tls.as_ref(),
+                server.shadow_tls.as_ref(),
+                &server.carriers,
+                env,
+            )?;
             let conn = vless::Vless::new(&server.users).with_mux(MuxServe::new(&server.mux));
             (InboundKind::Vless, Fronted::service(front, conn))
         }
         ListenerKind::AnyTls(server) => {
-            let front = front(server.tls.as_ref(), &Default::default(), env)?;
+            let front = front(
+                server.tls.as_ref(),
+                server.shadow_tls.as_ref(),
+                &Default::default(),
+                env,
+            )?;
             (
                 InboundKind::AnyTls,
                 Fronted::service(front, anytls::AnyTls::new(server)?),
             )
         }
         ListenerKind::Vmess(server) => {
-            let front = front(server.tls.as_ref(), &server.carriers, env)?;
+            let front = front(
+                server.tls.as_ref(),
+                server.shadow_tls.as_ref(),
+                &server.carriers,
+                env,
+            )?;
             let conn = vmess::Vmess::new(
                 &server.users,
                 env.carried.of(env.keep).vmess.clone(),
@@ -128,9 +151,13 @@ pub fn build(kind: &ListenerKind, env: &ServerEnv<'_>) -> Result<Option<Protocol
             let udp = server
                 .udp
                 .then(|| OnUdp::Datagram(Arc::new(ss::SsDatagrams(service.clone()))));
+            let stream: Arc<dyn StreamService> = match &server.shadow_tls {
+                Some(shadow) => Arc::new(ss::Shadowed(ShadowFront::new(shadow), service)),
+                None => service,
+            };
             return Ok(Some(Protocol {
                 kind: InboundKind::Shadowsocks,
-                stream: Some(service as Arc<dyn StreamService>),
+                stream: Some(stream),
                 udp,
             }));
         }
@@ -165,6 +192,7 @@ pub fn build(kind: &ListenerKind, env: &ServerEnv<'_>) -> Result<Option<Protocol
 
 fn front(
     tls: Option<&ServerTls>,
+    shadow_tls: Option<&ShadowTlsServer>,
     carriers: &concord_config::listener::HttpCarriers,
     env: &ServerEnv<'_>,
 ) -> Result<Front, ServerError> {
@@ -172,9 +200,11 @@ fn front(
         ws_path: carriers.ws_path.clone(),
         grpc_service_name: carriers.grpc_service_name.clone(),
     };
+    let shadow_tls = shadow_tls.map(ShadowFront::new);
     let Some(tls) = tls else {
         return Ok(Front {
             tls: None,
+            shadow_tls,
             carriers,
         });
     };
@@ -182,6 +212,7 @@ fn front(
     let server = TlsServer::new(&setup.options(carriers.alpn()))?;
     Ok(Front {
         tls: Some((server, setup.certs)),
+        shadow_tls,
         carriers,
     })
 }

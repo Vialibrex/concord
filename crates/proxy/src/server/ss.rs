@@ -29,6 +29,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
 use super::mux::{Mux, MuxServe};
+use super::shadowtls::ShadowFront;
 use super::{ServerError, bounded, flows, user};
 use crate::ss::crypto::{SsKey, parse_method};
 use crate::ss::window::SlidingWindow;
@@ -225,14 +226,41 @@ fn to_ss(addr: &Address) -> SsAddress {
 
 impl StreamService for Ss {
     fn serve(self: Arc<Self>, stream: TcpStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture {
-        Box::pin(async move {
-            let mux = Mux::over(&self.mux, &stream);
-            let Some((stream, dst, named)) = bounded(self.handshake(Box::new(stream))).await else {
-                return;
-            };
-            let inbound = cx.inbound(InboundKind::Shadowsocks, peer.local, named);
-            flows::tcp(Box::new(stream), dst, inbound, peer, &cx, &mux);
-        })
+        let mux = Mux::over(&self.mux, &stream);
+        Box::pin(self.serve_stream(Box::new(stream), None, peer, cx, mux))
+    }
+}
+
+impl Ss {
+    /// A request's own user wins over `signed` (`listener/sing_shadowsocks/server.go:320-330`).
+    async fn serve_stream(
+        self: Arc<Self>,
+        stream: BoxStream,
+        signed: Option<Arc<str>>,
+        peer: Peer,
+        cx: Arc<InboundCx>,
+        mux: Mux,
+    ) {
+        let Some((stream, dst, named)) = bounded(self.handshake(stream)).await else {
+            return;
+        };
+        let inbound = cx.inbound(InboundKind::Shadowsocks, peer.local, named.or(signed));
+        flows::tcp(Box::new(stream), dst, inbound, peer, &cx, &mux);
+    }
+}
+
+pub(super) struct Shadowed(pub(super) Arc<ShadowFront>, pub(super) Arc<Ss>);
+
+impl StreamService for Shadowed {
+    fn serve(self: Arc<Self>, stream: TcpStream, peer: Peer, cx: Arc<InboundCx>) -> ServeFuture {
+        let ss = self.1.clone();
+        let mux = Mux::over(&ss.mux, &stream);
+        self.0
+            .clone()
+            .serve(stream, peer.src, cx, move |stream, signed, cx| {
+                ss.serve_stream(stream, signed, peer, cx, mux)
+            });
+        Box::pin(async {})
     }
 }
 
@@ -552,6 +580,7 @@ mod tests {
             password: password.into(),
             users: Default::default(),
             udp: true,
+            shadow_tls: None,
             mux: Default::default(),
         };
         for (name, password) in users {

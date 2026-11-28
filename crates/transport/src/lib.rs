@@ -27,7 +27,11 @@ use futures_util::future::BoxFuture;
 pub use gun::{GrpcOptions, GunClient};
 pub use h2_transport::H2Options;
 pub use http_obfs::HttpOptions;
-pub use shadowtls::{DEFAULT_ALPN, ShadowTlsClient, ShadowTlsOptions, WS_ALPN};
+pub use shadowtls::{
+    Accepted as ShadowTlsAccepted, DEFAULT_ALPN, Dial as ShadowTlsDial, HandshakeTarget,
+    ShadowTlsClient, ShadowTlsOptions, ShadowTlsServer, ShadowTlsServerOptions, ShadowTlsUser,
+    ShadowTlsVersion, WS_ALPN, WildcardSni,
+};
 pub use simple_obfs::{ObfsMode, ObfsOptions};
 pub use singmux::{
     Brutal, MuxDialFn, MuxProtocol, SingMuxClient, SingMuxOptions,

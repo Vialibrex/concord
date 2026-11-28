@@ -154,6 +154,123 @@ fn only_one_security_layer_is_allowed() {
     assert_eq!(off.kind.type_name(), "vmess");
 }
 
+fn shadow_tls(block: Value) -> Value {
+    json!({"name": "v", "type": "vless", "users": [{"uuid": "u"}], "shadow-tls": block})
+}
+
+#[test]
+fn a_shadow_tls_block_is_read_as_mihomo_decodes_it() {
+    let listener = one(shadow_tls(json!({
+        "enable": true, "version": 3, "password": "unused",
+        "users": [{"name": "alice", "password": "one"}, {"password": "two"}],
+        "handshake": {"dest": "a.test:443", "proxy": "out"},
+        "handshake-for-server-name": {"B.test": {"dest": "b.test:8443"}},
+        "strict-mode": true, "wildcard-sni": "authed",
+    })));
+    let ListenerKind::Vless(server) = &listener.kind else {
+        panic!("vless")
+    };
+    let shadow = server.shadow_tls.as_ref().unwrap();
+    assert_eq!(shadow.version, 3);
+    assert_eq!(
+        shadow.users,
+        [
+            ("alice".into(), "one".into()),
+            (String::new(), "two".into())
+        ]
+    );
+    assert_eq!(
+        shadow.handshake,
+        ShadowTlsHandshake {
+            dest: "a.test:443".into(),
+            proxy: "out".into()
+        }
+    );
+    assert_eq!(
+        shadow.handshake_for_server_name["B.test"].dest,
+        "b.test:8443"
+    );
+    assert!(shadow.strict_mode);
+    assert_eq!(shadow.wildcard_sni, WildcardSni::Authed);
+    let all = |block: Value| {
+        let listener = one(shadow_tls(block));
+        let ListenerKind::Vless(server) = listener.kind else {
+            panic!("vless")
+        };
+        server.shadow_tls.unwrap()
+    };
+    let wildcard = all(
+        json!({"enable": true, "version": 3, "users": [{"password": "p"}],
+        "wildcard-sni": "all"}),
+    );
+    assert_eq!(wildcard.wildcard_sni, WildcardSni::All);
+    assert!(wildcard.handshake.dest.is_empty());
+    let v1 = all(
+        json!({"enable": true, "version": "1", "handshake": {"dest": "a.test:443"},
+        "handshake-for-server-name": {"b.test": {"dest": ""}}, "wildcard-sni": "any"}),
+    );
+    assert_eq!(v1.version, 1);
+    assert!(v1.handshake_for_server_name.is_empty());
+    assert_eq!(v1.wildcard_sni, WildcardSni::Off);
+    for listener in [
+        json!({"name": "s", "type": "shadowsocks", "cipher": "aes-128-gcm", "password": "p",
+            "shadow-tls": {"enable": true, "version": 2, "handshake": {"dest": "a.test:443"}}}),
+        json!({"name": "t", "type": "trojan", "users": [{"password": "p"}],
+            "shadow-tls": {"enable": true, "version": 2, "handshake": {"dest": "a.test:443"}}}),
+        json!({"name": "a", "type": "anytls", "users": {"u": "p"},
+            "shadow-tls": {"enable": true, "version": 2, "handshake": {"dest": "a.test:443"}}}),
+    ] {
+        one(listener);
+    }
+}
+
+#[test]
+fn a_shadow_tls_block_mihomo_would_not_start_skips_its_listener() {
+    let v3 = |more: Value| {
+        let mut block = json!({"enable": true, "version": 3, "users": [{"password": "p"}],
+            "handshake": {"dest": "a.test:443"}});
+        for (key, value) in more.as_object().unwrap() {
+            block[key] = value.clone();
+        }
+        block
+    };
+    for (block, reason) in [
+        (
+            json!({"enable": true}),
+            "shadow-tls: unknown protocol version: 0",
+        ),
+        (
+            v3(json!({"version": 4})),
+            "shadow-tls: unknown protocol version: 4",
+        ),
+        (
+            v3(json!({"users": []})),
+            "shadow-tls: at least one user is required",
+        ),
+        (
+            v3(json!({"handshake": {"dest": ""}})),
+            "shadow-tls: missing default handshake information",
+        ),
+        (
+            v3(json!({"version": 2, "handshake": null, "wildcard-sni": "all"})),
+            "shadow-tls: missing default handshake information",
+        ),
+        (
+            v3(json!({"handshake-for-server-name": {"b.test": {"dest": ""}}})),
+            "shadow-tls: invalid handshake for server name \"b.test\"",
+        ),
+    ] {
+        let message = skipped(shadow_tls(block.clone()));
+        assert!(message.contains(reason), "{block}: {message}");
+    }
+    let unset = error(json!([shadow_tls(json!({"version": 3}))]));
+    assert!(unset.contains("unset fields: enable"), "{unset}");
+    let undestined = error(json!([shadow_tls(
+        json!({"enable": false, "handshake": {}})
+    )]));
+    assert!(undestined.contains("unset fields: dest"), "{undestined}");
+}
+
 #[test]
 fn proxy_users_have_three_states() {
     let server = |users: Value| match one(json!({"name": "h", "type": "http", "users": users})).kind
@@ -512,7 +629,7 @@ fn an_anytls_listener_reads_users_padding_and_tls() {
 fn an_anytls_listener_without_a_security_layer_is_skipped() {
     for (listener, reason) in [
         (json!({}), "disallow using AnyTLS"),
-        (json!({"shadow-tls": {"enable": true}}), "shadow-tls"),
+        (json!({"jls-config": {"enable": true}}), "jls-config"),
     ] {
         let mut listener = listener;
         let fields = listener.as_object_mut().unwrap();

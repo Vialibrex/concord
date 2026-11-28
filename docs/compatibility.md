@@ -44,6 +44,9 @@ mihomo; a key that only uses one, such as `copy: *domain`, is still unknown.
 | A name like `CON.txt` under a `hysteria2` `masquerade` directory on Windows | Served on Windows 11, where it names a file, and refused before it | 404 on every Windows, as a name without the extension is in both |
 | A `hysteria2` `masquerade` directory asked for several byte ranges at once | A 206 `multipart/byteranges` answer | The whole file with 200, as when the ranges overlap the file; a single range is still answered with 206 |
 | The `Content-Type` of a file under a `hysteria2` `masquerade` directory | From the extension, by Go's built-in table and the system's `mime.types`, else sniffed by `http.DetectContentType` | From the extension by Go 1.27.3's built-in table only, else sniffed for HTML, XML, PDF, PNG, JPEG, GIF, WebP, gzip and zip, then plain text or `application/octet-stream` |
+| A client of a v2 or v3 `shadow-tls` listener that sends no ClientHello | Waited for | Closed 15 s after it connected, the bound every listener puts on a handshake. Once the hello is in, a client stays with the handshake server as long as it likes, as in mihomo |
+| A `shadow-tls` handshake that comes back to the same server | Relayed on, one hop after another, since the handshake flow has no source for the loopback check | Refused at the second hop: the handshake flow carries the client's address, so `SRC-IP` rules match it too |
+| A server name that is an IP literal under `wildcard-sni` | Dialed on port 443 | The default `handshake`, as for a name the wildcard does not take; RFC 6066 §3 keeps literals out of server names |
 | A `hysteria2` `masquerade` reverse proxy's connections | Kept idle and reused, up to 100 for 90 s | A new connection for each request |
 | Requests on a `hysteria2` connection that has not authenticated | Answered at the same time | Answered one at a time, so a client that has not authenticated holds one header block and one masquerade request at most |
 | A `CONNECT` to a `hysteria2` `masquerade` reverse proxy | Forwarded upstream as `CONNECT /`, and the upstream's answer relayed | 502 without dialling: a request that has not authenticated opens nothing upstream, and a browser sends no `CONNECT` to the site |
@@ -198,15 +201,18 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   `mixed`, `redir`, `tproxy`, `tunnel`, `shadowsocks`, `vmess`, `vless`, `trojan`, `tuic`, `hysteria2` and `anytls` types are served, with `users`, `rule`, `proxy`,
   `routing-mark` and, on the stream protocols, TLS with `client-auth-type`, `ws-path` and `grpc-service-name`.
   `IN-NAME`, `IN-TYPE`, `IN-USER` and `IN-PORT` match their flows as in mihomo. A listener of another type, or one
-  that asks for something not served (`reality-config`, `shadow-tls`, `res-tls`, `jls`, `tlsmirror-config`,
+  that asks for something not served (`reality-config`, `res-tls`, `jls`, `tlsmirror-config`,
   `mkcp-config`, `mekya-config`, `kcp-tun`, `ech-key`, `xhttp-config`, VLESS `decryption`, Trojan `ss-option`,
   Shadowsocks `simple-obfs`, TLS on `http`, `socks` or `mixed`), stays closed with a `listener_skipped` warning while
-  the rest of the profile loads. sing-mux (smux, yamux and h2mux, with `mux-option` padding and Brutal) and Mux.Cool,
+  the rest of the profile loads. `shadow-tls` in front of `shadowsocks`, `vmess`, `vless`, `trojan` and `anytls`
+  is served in v1, v2 and v3 as in mihomo, with `handshake-for-server-name`, `strict-mode` and `wildcard-sni` (`all` lets anyone have the server relay them to port 443 of any host, as in mihomo, so `authed` is the one to use); on
+  `shadowsocks` the v3 user names the flow unless the listener's own `users` name it, and the listener's UDP has no
+  ShadowTLS in front. sing-mux (smux, yamux and h2mux, with `mux-option` padding and Brutal) and Mux.Cool,
   its TCP sessions and XUDP alike, are served as in mihomo. A sing-mux stream whose destination cannot be reached
   closes without the error status mihomo writes first. Brutal is set only on Linux and Android, where the tcp-brutal
   module must be loaded, and only for a session on the accepted TCP connection itself: elsewhere a listener that
   enables it is skipped, and a session inside TLS, a carrier, QUIC or another mux has its exchange refused, as in
-  mihomo. A VLESS user with the `xtls-rprx-vision` flow is served over the listener's own TLS when nothing is carried
+  mihomo; one past `shadow-tls` runs it, as in mihomo. A VLESS user with the `xtls-rprx-vision` flow is served over the listener's own TLS when nothing is carried
   over it: as in mihomo, a request without a flow is still taken from that user, a Vision request needs TLS 1.3 and
   TCP or Mux.Cool, and past an inner TLS 1.3 handshake both directions go to the socket, unless the inner suite is
   `TLS_AES_128_CCM_8_SHA256`. An `anytls` listener takes `users` and `padding-scheme` and needs TLS or
