@@ -2,6 +2,15 @@ mod cert;
 mod handshake;
 mod hello;
 pub(crate) mod schedule;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        unused_imports,
+        reason = "the REALITY listener takes it in a later commit"
+    )
+)]
+pub(crate) mod server;
 mod spider;
 mod stream;
 mod wire;
@@ -11,10 +20,7 @@ pub use handshake::SessionIdSealer;
 #[cfg(test)]
 pub(crate) use hello::{HelloParams, build_client_hello};
 #[cfg(test)]
-pub(crate) use schedule::{
-    CT_APPLICATION_DATA, CT_HANDSHAKE, Hash, RecordKey, Suite, application_secrets, expand,
-    extract, finished_verify_data, handshake_secrets,
-};
+pub(crate) use schedule::{CT_APPLICATION_DATA, CT_HANDSHAKE, RecordKey, Suite};
 pub use stream::RealityStream;
 #[cfg(test)]
-pub(crate) use wire::{Cursor, put_u24};
+pub(crate) use wire::put_u24;

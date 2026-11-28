@@ -50,7 +50,7 @@ fn put_u16(out: &mut Vec<u8>, value: u16) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
-fn put_len16(out: &mut Vec<u8>, len: usize) -> Result<(), TlsError> {
+pub(super) fn put_len16(out: &mut Vec<u8>, len: usize) -> Result<(), TlsError> {
     let len = u16::try_from(len).map_err(|_| TlsError::Config("tls field too long".into()))?;
     put_u16(out, len);
     Ok(())

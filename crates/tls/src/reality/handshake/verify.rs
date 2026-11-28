@@ -3,7 +3,7 @@ use crate::error::invalid_data;
 use rustls_pki_types::{CertificateDer, ServerName};
 use std::io;
 
-pub(super) fn certificate_verify_message(transcript_hash: &[u8]) -> Vec<u8> {
+pub(in crate::reality) fn certificate_verify_message(transcript_hash: &[u8]) -> Vec<u8> {
     let mut message = vec![0x20u8; 64];
     message.extend_from_slice(b"TLS 1.3, server CertificateVerify\0");
     message.extend_from_slice(transcript_hash);

@@ -10,7 +10,7 @@ use rustls_pki_types::ServerName;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod verify;
-use verify::certificate_verify_message;
+pub(super) use verify::certificate_verify_message;
 
 use super::cert::{hmac_matches, parse_ed25519_cert};
 use super::hello::{HelloParams, SESSION_ID_LEN, SESSION_ID_OFFSET, build_client_hello};
@@ -31,12 +31,12 @@ use crate::record_io::RecordIo;
 use crate::{RealityOptions, TlsError, TlsOptions, TrustStore};
 
 const HS_SERVER_HELLO: u8 = 2;
-const HS_ENCRYPTED_EXTENSIONS: u8 = 8;
-const HS_CERTIFICATE: u8 = 11;
-const HS_CERTIFICATE_VERIFY: u8 = 15;
-const HS_FINISHED: u8 = 20;
+pub(super) const HS_ENCRYPTED_EXTENSIONS: u8 = 8;
+pub(super) const HS_CERTIFICATE: u8 = 11;
+pub(super) const HS_CERTIFICATE_VERIFY: u8 = 15;
+pub(super) const HS_FINISHED: u8 = 20;
 const HS_COMPRESSED_CERTIFICATE: u8 = 25;
-const SCHEME_ED25519: u16 = 0x0807;
+pub(super) const SCHEME_ED25519: u16 = 0x0807;
 const MAX_HANDSHAKE: usize = 65_536;
 const MAX_CERTIFICATE_MESSAGE: usize = 262_144;
 const MAX_DECOMPRESSED: usize = (1 << 24) - 1;
@@ -742,7 +742,7 @@ fn x25519_agree(private: &agreement::PrivateKey, peer: &[u8]) -> io::Result<Vec<
     Ok(secret)
 }
 
-fn seal_reality(
+pub(super) fn seal_reality(
     options: &RealityOptions,
     x25519: &agreement::PrivateKey,
     random: &[u8; 32],

@@ -3,17 +3,15 @@
 
 use std::io;
 
-use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
-use aws_lc_rs::agreement::{self, UnparsedPublicKey, X25519};
-use aws_lc_rs::kem::{EncapsulationKey, ML_KEM_768};
-use aws_lc_rs::signature::Ed25519KeyPair;
-use aws_lc_rs::{hmac, rand::fill};
+use aws_lc_rs::agreement::{self, X25519};
+use aws_lc_rs::rand::fill;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::reality::{
-    CT_APPLICATION_DATA, CT_HANDSHAKE, Cursor, Hash, RecordKey, Suite, application_secrets, expand,
-    extract, finished_verify_data, handshake_secrets, put_u24,
+use crate::fingerprints::{GROUP_X25519, GROUP_X25519_MLKEM768};
+use crate::reality::server::{
+    ClientHello, RealityCert, ServerFlight, open_session_id, server_share,
 };
+use crate::reality::{CT_APPLICATION_DATA, CT_HANDSHAKE, RecordKey, Suite, put_u24};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fault {
@@ -30,6 +28,8 @@ pub enum Fault {
 
 pub struct MockReality {
     private: agreement::PrivateKey,
+    cert: RealityCert,
+    other_cert: RealityCert,
     pub public_key: [u8; 32],
     pub short_id: [u8; 8],
     pub hybrid: bool,
@@ -51,6 +51,8 @@ impl MockReality {
             .unwrap();
         Self {
             private,
+            cert: reality_cert(),
+            other_cert: reality_cert(),
             public_key,
             short_id: [0xab, 0xcd, 0, 0, 0, 0, 0, 0],
             hybrid: false,
@@ -61,6 +63,13 @@ impl MockReality {
             fragmented: false,
         }
     }
+}
+
+fn reality_cert() -> RealityCert {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let params = rcgen::CertificateParams::new(vec!["reality.test".into()]).unwrap();
+    let der = params.self_signed(&key).unwrap().der().to_vec();
+    RealityCert::new(der, &key.serialize_der()).unwrap()
 }
 
 async fn read_record<S: AsyncRead + Unpin>(io: &mut S) -> io::Result<([u8; 5], Vec<u8>)> {
@@ -89,79 +98,10 @@ fn bad(text: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, text.to_owned())
 }
 
-struct ClientHello {
-    random: [u8; 32],
-    session_id: Vec<u8>,
-    x25519: Option<Vec<u8>>,
-    mlkem_ek: Option<Vec<u8>>,
-}
-
-fn parse_client_hello(msg: &[u8]) -> io::Result<ClientHello> {
-    let mut outer = Cursor::new(msg);
-    if outer.u8()? != 1 {
-        return Err(bad("not a client hello"));
-    }
-    let mut c = Cursor::new(outer.vec24()?);
-    c.u16()?;
-    let random: [u8; 32] = c.take(32)?.try_into().unwrap();
-    let session_id = c.vec8()?.to_vec();
-    c.vec16()?;
-    c.vec8()?;
-    let mut exts = Cursor::new(c.vec16()?);
-    let (mut x25519, mut mlkem_ek) = (None, None);
-    while !exts.is_empty() {
-        let kind = exts.u16()?;
-        let data = exts.vec16()?;
-        if kind == 51 {
-            let mut shares = Cursor::new(Cursor::new(data).vec16()?);
-            while !shares.is_empty() {
-                let group = shares.u16()?;
-                let share = shares.vec16()?;
-                match group {
-                    0x001d if share.len() == 32 => x25519 = Some(share.to_vec()),
-                    0x11ec if share.len() == 1184 + 32 => {
-                        mlkem_ek = Some(share[..1184].to_vec());
-                        x25519.get_or_insert_with(|| share[1184..].to_vec());
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    Ok(ClientHello {
-        random,
-        session_id,
-        x25519,
-        mlkem_ek,
-    })
-}
-
 impl MockReality {
-    fn reality_cert(&self, auth_key: &[u8], tamper: bool) -> (Vec<u8>, rcgen::KeyPair) {
-        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
-        let params = rcgen::CertificateParams::new(vec!["reality.test".into()]).unwrap();
-        let mut der = params.self_signed(&key).unwrap().der().to_vec();
-        let mut mac = hmac::sign(
-            &hmac::Key::new(hmac::HMAC_SHA512, auth_key),
-            key.public_key_raw(),
-        )
-        .as_ref()
-        .to_vec();
-        if tamper {
-            mac[0] ^= 1;
-        }
-        let at = der.len() - 64;
-        der[at..].copy_from_slice(&mac);
-        (der, key)
-    }
-
     pub async fn serve<S: AsyncRead + AsyncWrite + Unpin>(&self, mut io: S) -> io::Result<()> {
         let (_, hello) = read_record(&mut io).await?;
-        let parsed = parse_client_hello(&hello)?;
-        let client_x = parsed
-            .x25519
-            .clone()
-            .ok_or_else(|| bad("no x25519 share"))?;
+        let parsed = ClientHello::parse(&hello)?;
 
         if self.fault == Fault::Garbage {
             io.write_all(&[0x99; 600]).await?;
@@ -186,56 +126,20 @@ impl MockReality {
             }
             vec![0; 32]
         } else {
-            let ecdh = agreement::agree(
-                &self.private,
-                UnparsedPublicKey::new(&X25519, &client_x),
-                (),
-                |s| Ok(s.to_vec()),
-            )
-            .map_err(|()| bad("agree"))?;
-            let auth_key = expand(
-                &extract(Hash::Sha256, &parsed.random[..20], &ecdh),
-                b"REALITY",
-                32,
-            );
-            let mut zeroed = hello.clone();
-            zeroed[39..71].fill(0);
-            let aead = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &auth_key).unwrap());
-            let mut sealed = parsed.session_id.clone();
-            let plain = aead
-                .open_in_place(
-                    Nonce::assume_unique_for_key(parsed.random[20..32].try_into().unwrap()),
-                    Aad::from(zeroed.as_slice()),
-                    &mut sealed,
-                )
-                .map_err(|_| bad("session id does not open"))?;
-            if plain[..3] != [1, 8, 2] || plain[8..16] != self.short_id {
+            let opened = open_session_id(&self.private, &parsed)
+                .ok_or_else(|| bad("session id does not open"))?;
+            if opened.sealed[..3] != [1, 8, 2] || opened.sealed[8..16] != self.short_id {
                 return Err(bad("unknown client"));
             }
-
-            auth_key
+            opened.auth_key
         };
 
-        let xs = agreement::PrivateKey::generate(&X25519).unwrap();
-        let xpub = xs.compute_public_key().unwrap();
-        let x_ss = agreement::agree(&xs, UnparsedPublicKey::new(&X25519, &client_x), (), |s| {
-            Ok(s.to_vec())
-        })
-        .unwrap();
-        let (group, share, shared) = match (&parsed.mlkem_ek, self.hybrid) {
-            (Some(ek), true) => {
-                let (ct, ss) = EncapsulationKey::new(&ML_KEM_768, ek)
-                    .unwrap()
-                    .encapsulate()
-                    .unwrap();
-                let mut share = ct.as_ref().to_vec();
-                share.extend_from_slice(xpub.as_ref());
-                let mut shared = ss.as_ref().to_vec();
-                shared.extend_from_slice(&x_ss);
-                (0x11ecu16, share, shared)
-            }
-            _ => (0x001d, xpub.as_ref().to_vec(), x_ss),
+        let group = if self.hybrid && parsed.share(GROUP_X25519_MLKEM768).is_some() {
+            GROUP_X25519_MLKEM768
+        } else {
+            GROUP_X25519
         };
+        let (share, shared) = server_share(group, &parsed)?;
 
         let mut random = [0u8; 32];
         fill(&mut random).unwrap();
@@ -257,7 +161,7 @@ impl MockReality {
         if self.fault == Fault::NoSessionIdEcho {
             sh.extend_from_slice(&[0u8; 32]);
         } else {
-            sh.extend_from_slice(&parsed.session_id);
+            sh.extend_from_slice(parsed.session_id());
         }
         sh.extend_from_slice(&cipher.to_be_bytes());
         sh.push(0);
@@ -294,66 +198,38 @@ impl MockReality {
             return Ok(());
         }
 
-        let hash = suite.hash();
-        let mut transcript = hello.clone();
-        transcript.extend_from_slice(&server_hello);
-        let secrets = handshake_secrets(hash, &shared, &transcript);
-        let mut server_key = RecordKey::new(suite, &secrets.server)?;
-        let mut client_key = RecordKey::new(suite, &secrets.client)?;
+        let flight = ServerFlight::new(suite, &shared, &hello, &server_hello);
+        let mut server_key = flight.server_key()?;
+        let mut client_key = flight.client_key()?;
 
-        let mut ee_body = vec![0, 0];
+        let mut extensions = Vec::new();
         if let Some(alpn) = self.alpn {
             let mut list = vec![u8::try_from(alpn.len()).unwrap()];
             list.extend_from_slice(alpn);
-            let mut ext = vec![0, 16];
-            ext.extend_from_slice(&u16::try_from(list.len() + 2).unwrap().to_be_bytes());
-            ext.extend_from_slice(&u16::try_from(list.len()).unwrap().to_be_bytes());
-            ext.extend_from_slice(&list);
-            ee_body = u16::try_from(ext.len()).unwrap().to_be_bytes().to_vec();
-            ee_body.extend_from_slice(&ext);
+            extensions.extend_from_slice(&[0, 16]);
+            extensions.extend_from_slice(&u16::try_from(list.len() + 2).unwrap().to_be_bytes());
+            extensions.extend_from_slice(&u16::try_from(list.len()).unwrap().to_be_bytes());
+            extensions.extend_from_slice(&list);
         }
-        let ee = message(8, &ee_body);
-        let (cert_der, cert_key) = self.reality_cert(&auth_key, self.fault == Fault::BadHmac);
-        let mut cert_body = vec![0];
-        put_u24(&mut cert_body, cert_der.len() + 5);
-        put_u24(&mut cert_body, cert_der.len());
-        cert_body.extend_from_slice(&cert_der);
-        cert_body.extend_from_slice(&[0, 0]);
-        let cert = message(11, &cert_body);
-
-        let mut so_far = transcript.clone();
-        so_far.extend_from_slice(&ee);
-        so_far.extend_from_slice(&cert);
-        let mut to_sign = vec![0x20u8; 64];
-        to_sign.extend_from_slice(b"TLS 1.3, server CertificateVerify\0");
-        to_sign.extend_from_slice(&hash.digest(&so_far));
-        if self.fault == Fault::BadCertificateVerify {
-            to_sign.push(1);
+        let mut der = self.cert.for_client(&auth_key);
+        if self.fault == Fault::BadHmac {
+            let at = der.len() - 64;
+            der[at] ^= 1;
         }
-        let signer = Ed25519KeyPair::from_pkcs8(&cert_key.serialize_der()).unwrap();
-        let signature = signer.sign(&to_sign);
-        let mut cv_body = vec![0x08, 0x07];
-        cv_body.extend_from_slice(
-            &u16::try_from(signature.as_ref().len())
-                .unwrap()
-                .to_be_bytes(),
-        );
-        cv_body.extend_from_slice(signature.as_ref());
-        let cv = message(15, &cv_body);
-        so_far.extend_from_slice(&cv);
-        let mut verify_data = finished_verify_data(hash, &secrets.server, &so_far);
+        let signer = if self.fault == Fault::BadCertificateVerify {
+            &self.other_cert
+        } else {
+            &self.cert
+        };
+        let (mut messages, flight) = flight.messages(&extensions, &der, signer)?;
         if self.fault == Fault::BadFinished {
-            verify_data[0] ^= 1;
+            messages[3][4] ^= 1;
         }
-        let finished = message(20, &verify_data);
-        so_far.extend_from_slice(&finished);
-
-        for msg in [&ee, &cert, &cv, &finished] {
+        for msg in &messages {
             io.write_all(&server_key.seal(CT_HANDSHAKE, msg)?).await?;
         }
         io.flush().await?;
 
-        let (client_secret, server_secret) = application_secrets(hash, &secrets.master, &so_far);
         let (header, mut body) = loop {
             let (header, body) = read_record(&mut io).await?;
             if header[0] != 20 {
@@ -361,13 +237,13 @@ impl MockReality {
             }
         };
         let (kind, len) = client_key.open_in_place(&header, &mut body)?;
-        let expected = finished_verify_data(hash, &secrets.client, &so_far);
-        if kind != CT_HANDSHAKE || body[4..len] != expected {
+        if kind != CT_HANDSHAKE {
             return Err(bad("client finished mismatch"));
         }
+        let secrets = flight.client_finished(&body[..len])?;
 
-        let mut read_key = RecordKey::new(suite, &client_secret)?;
-        let mut write_key = RecordKey::new(suite, &server_secret)?;
+        let mut read_key = RecordKey::new(suite, &secrets.client)?;
+        let mut write_key = RecordKey::new(suite, &secrets.server)?;
         loop {
             let (header, mut body) = match read_record(&mut io).await {
                 Ok(record) => record,
