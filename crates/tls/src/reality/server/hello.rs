@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io;
 
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
@@ -10,8 +11,12 @@ use super::share::{MLKEM768_KEY, X25519_KEY};
 use crate::error::invalid_data;
 use crate::fingerprints::{GROUP_X25519, GROUP_X25519_MLKEM768};
 
-const CLIENT_HELLO: u8 = 1;
-const KEY_SHARE: u16 = 51;
+pub(super) const CLIENT_HELLO: u8 = 1;
+pub(super) const SERVER_NAME: u16 = 0;
+const HOST_NAME: u8 = 0;
+pub(super) const SUPPORTED_VERSIONS: u16 = 43;
+pub(super) const KEY_SHARE: u16 = 51;
+pub(super) const TLS13: u16 = 0x0304;
 const AUTH_KEY_LEN: usize = 32;
 const SEALED_LEN: usize = 16;
 const SALT_LEN: usize = 20;
@@ -20,6 +25,8 @@ pub(crate) struct ClientHello<'a> {
     message: &'a [u8],
     random: [u8; 32],
     session_id: &'a [u8],
+    server_name: Option<&'a [u8]>,
+    tls13: bool,
     shares: Vec<(u16, &'a [u8])>,
 }
 
@@ -43,7 +50,14 @@ impl<'a> ClientHello<'a> {
         let session_id = body.vec8()?;
         body.vec16()?;
         body.vec8()?;
-        let mut shares = Vec::new();
+        let mut hello = ClientHello {
+            message,
+            random,
+            session_id,
+            server_name: None,
+            tls13: false,
+            shares: Vec::new(),
+        };
         if !body.is_empty() {
             let mut extensions = Cursor::new(body.vec16()?);
             if !body.is_empty() {
@@ -57,17 +71,27 @@ impl<'a> ClientHello<'a> {
                     return Err(malformed());
                 }
                 seen.push(kind);
-                if kind == KEY_SHARE {
-                    shares = key_shares(data)?;
+                match kind {
+                    SERVER_NAME => hello.server_name = Some(host_name(data)?),
+                    SUPPORTED_VERSIONS => hello.tls13 = offers_tls13(data)?,
+                    KEY_SHARE => hello.shares = key_shares(data)?,
+                    _ => {}
                 }
             }
         }
-        Ok(ClientHello {
-            message,
-            random,
-            session_id,
-            shares,
-        })
+        Ok(hello)
+    }
+
+    /// Whether Go's `mutualVersion` settles on TLS 1.3 and the host name is one of
+    /// `server_names`, the two checks of `reality.go:383` before any key is used.
+    pub(crate) fn may_authenticate(&self, server_names: &HashSet<String>) -> bool {
+        let name = self.server_name.unwrap_or_default();
+        let named = std::str::from_utf8(name).is_ok_and(|name| server_names.contains(name));
+        self.tls13 && named
+    }
+
+    pub(crate) fn random(&self) -> [u8; 32] {
+        self.random
     }
 
     pub(crate) fn session_id(&self) -> &'a [u8] {
@@ -95,6 +119,44 @@ impl<'a> ClientHello<'a> {
                 .and_then(|share| share.get(MLKEM768_KEY..))
         })
     }
+}
+
+/// `handshake_messages.go:505-533`.
+fn host_name(extension: &[u8]) -> io::Result<&[u8]> {
+    let mut extension = Cursor::new(extension);
+    let mut list = Cursor::new(extension.vec16()?);
+    if !extension.is_empty() || list.is_empty() {
+        return Err(malformed());
+    }
+    let mut host = None;
+    while !list.is_empty() {
+        let kind = list.u8()?;
+        let name = list.vec16()?;
+        if name.is_empty() || (kind == HOST_NAME && host.is_some()) {
+            return Err(malformed());
+        }
+        if kind == HOST_NAME {
+            host = Some(name);
+        }
+    }
+    let host = host.unwrap_or_default();
+    if host.ends_with(b".") {
+        return Err(malformed());
+    }
+    Ok(host)
+}
+
+fn offers_tls13(extension: &[u8]) -> io::Result<bool> {
+    let mut extension = Cursor::new(extension);
+    let mut list = Cursor::new(extension.vec8()?);
+    if !extension.is_empty() || list.is_empty() {
+        return Err(malformed());
+    }
+    let mut tls13 = false;
+    while !list.is_empty() {
+        tls13 |= list.u16()? == TLS13;
+    }
+    Ok(tls13)
 }
 
 fn key_shares(extension: &[u8]) -> io::Result<Vec<(u16, &[u8])>> {
@@ -160,50 +222,8 @@ pub(crate) fn open_session_id(
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::handshake::seal_reality;
+    use super::super::testing::*;
     use super::*;
-    use crate::RealityOptions;
-
-    fn u16_bytes(n: usize) -> [u8; 2] {
-        u16::try_from(n).unwrap().to_be_bytes()
-    }
-
-    fn extension(kind: u16, data: &[u8]) -> Vec<u8> {
-        let mut out = kind.to_be_bytes().to_vec();
-        out.extend_from_slice(&u16_bytes(data.len()));
-        out.extend_from_slice(data);
-        out
-    }
-
-    fn key_share(shares: &[(u16, &[u8])]) -> Vec<u8> {
-        let mut list = Vec::new();
-        for (group, share) in shares {
-            list.extend_from_slice(&extension(*group, share));
-        }
-        let mut data = u16_bytes(list.len()).to_vec();
-        data.extend_from_slice(&list);
-        extension(KEY_SHARE, &data)
-    }
-
-    fn hello(extensions: Option<&[u8]>) -> Vec<u8> {
-        let mut body = vec![3, 3];
-        body.extend_from_slice(&[7; 32]);
-        body.push(32);
-        body.extend_from_slice(&[9; SESSION_ID_LEN]);
-        body.extend_from_slice(&[0, 2, 0x13, 0x01, 1, 0]);
-        if let Some(extensions) = extensions {
-            body.extend_from_slice(&u16_bytes(extensions.len()));
-            body.extend_from_slice(extensions);
-        }
-        let mut message = vec![CLIENT_HELLO];
-        crate::reality::put_u24(&mut message, body.len());
-        message.extend_from_slice(&body);
-        message
-    }
-
-    fn with_shares(shares: &[(u16, &[u8])]) -> Vec<u8> {
-        hello(Some(&key_share(shares)))
-    }
 
     #[test]
     fn a_low_order_share_opens_no_session_id() {
@@ -221,23 +241,17 @@ mod tests {
         let mut share = vec![5; MLKEM768_KEY];
         share.extend_from_slice(client.compute_public_key().unwrap().as_ref());
         let mut message = with_shares(&[(GROUP_X25519_MLKEM768, &share)]);
-        message[SESSION_ID_OFFSET..][..SESSION_ID_LEN].fill(0);
-        let options = RealityOptions {
-            public_key: server
-                .compute_public_key()
-                .unwrap()
-                .as_ref()
-                .try_into()
-                .unwrap(),
-            short_id: [1, 2, 3, 4, 5, 6, 7, 8],
-            support_x25519mlkem768: true,
-        };
-        let (session_id, auth_key) =
-            seal_reality(&options, &client, &[7; 32], &message, 1_700_000_000).unwrap();
-        message[SESSION_ID_OFFSET..][..SESSION_ID_LEN].copy_from_slice(&session_id);
+        let short_id = [1, 2, 3, 4, 5, 6, 7, 8];
+        let public = server
+            .compute_public_key()
+            .unwrap()
+            .as_ref()
+            .try_into()
+            .unwrap();
+        let auth_key = seal(&mut message, &client, public, short_id, 1_700_000_000);
         let opened = open_session_id(&server, &ClientHello::parse(&message).unwrap()).unwrap();
         assert_eq!(opened.auth_key, auth_key);
-        assert_eq!(opened.sealed[8..], options.short_id);
+        assert_eq!(opened.sealed[8..], short_id);
     }
 
     #[test]
@@ -255,7 +269,7 @@ mod tests {
     #[test]
     fn a_hello_go_would_not_unmarshal_is_refused() {
         let share = key_share(&[(GROUP_X25519, &[2; X25519_KEY])]);
-        let mut trailing = hello(Some(&share));
+        let mut trailing = hello([7; 32], Some(&share));
         trailing.push(0);
         let twice = [share.clone(), share.clone()].concat();
         let mut long_share = share.clone();
@@ -263,13 +277,50 @@ mod tests {
         long_share[3] += 1;
         let refused = [
             trailing,
-            hello(Some(&twice)),
-            hello(Some(&long_share)),
+            hello([7; 32], Some(&twice)),
+            hello([7; 32], Some(&long_share)),
             with_shares(&[(GROUP_X25519, &[])]),
         ];
         for message in refused {
             assert!(ClientHello::parse(&message).is_err(), "{message:?}");
         }
+        let refused_extensions = [
+            server_name(&[(HOST_NAME, b"a.test"), (HOST_NAME, b"b.test")]),
+            server_name(&[(HOST_NAME, b"a.test.")]),
+            server_name(&[(1, b"")]),
+            server_name(&[]),
+            supported_versions(&[]),
+            extension(SUPPORTED_VERSIONS, &[1, 3]),
+        ];
+        for extension in refused_extensions {
+            let message = hello([7; 32], Some(&extension));
+            assert!(ClientHello::parse(&message).is_err(), "{extension:?}");
+        }
+    }
+
+    #[test]
+    fn the_host_name_and_tls13_are_read_as_go_reads_them() {
+        let names = HashSet::from(["a.test".to_owned()]);
+        let mut extensions = server_name(&[(1, b"other"), (HOST_NAME, b"a.test")]);
+        extensions.extend_from_slice(&supported_versions(&[0x0a0a, TLS13]));
+        let message = hello([7; 32], Some(&extensions));
+        assert!(
+            ClientHello::parse(&message)
+                .unwrap()
+                .may_authenticate(&names)
+        );
+        let unnamed = hello([7; 32], Some(&supported_versions(&[TLS13])));
+        assert!(
+            !ClientHello::parse(&unnamed)
+                .unwrap()
+                .may_authenticate(&names)
+        );
+        let named = HashSet::from([String::new()]);
+        assert!(
+            ClientHello::parse(&unnamed)
+                .unwrap()
+                .may_authenticate(&named)
+        );
     }
 
     /// Go takes a hello with no extensions and a session ID of another length, and then
@@ -277,7 +328,7 @@ mod tests {
     #[test]
     fn a_hello_with_no_extensions_or_a_short_session_id_does_not_authenticate() {
         let private = agreement::PrivateKey::generate(&X25519).unwrap();
-        let bare = hello(None);
+        let bare = hello([7; 32], None);
         let hello = ClientHello::parse(&bare).unwrap();
         assert!(hello.auth_share().is_none());
         assert!(open_session_id(&private, &hello).is_none());

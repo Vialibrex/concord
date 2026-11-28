@@ -207,7 +207,9 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   the rest of the profile loads. `shadow-tls` in front of `shadowsocks`, `vmess`, `vless`, `trojan` and `anytls`
   is served in v1, v2 and v3 as in mihomo, with `handshake-for-server-name`, `strict-mode` and `wildcard-sni` (`all` lets anyone have the server relay them to port 443 of any host, as in mihomo, so `authed` is the one to use); on
   `shadowsocks` the v3 user names the flow unless the listener's own `users` name it, and the listener's UDP has no
-  ShadowTLS in front. sing-mux (smux, yamux and h2mux, with `mux-option` padding and Brutal) and Mux.Cool,
+  ShadowTLS in front. Over v2, session tickets a TLS 1.3 handshake server sends that reach the client after its
+  handshake are taken by the client as data, by mihomo's client as by Concord's: v2 has nothing to tell them apart
+  by, so a v2 listener is best given a handshake server that speaks TLS 1.2 or sends no tickets. sing-mux (smux, yamux and h2mux, with `mux-option` padding and Brutal) and Mux.Cool,
   its TCP sessions and XUDP alike, are served as in mihomo. A sing-mux stream whose destination cannot be reached
   closes without the error status mihomo writes first. Brutal is set only on Linux and Android, where the tcp-brutal
   module must be loaded, and only for a session on the accepted TCP connection itself: elsewhere a listener that

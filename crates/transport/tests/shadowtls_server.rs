@@ -26,7 +26,7 @@ struct Decoy {
     der: CertificateDer<'static>,
 }
 
-fn decoy(versions: &[&'static rustls::SupportedProtocolVersion]) -> Arc<Decoy> {
+fn decoy(versions: &[&'static rustls::SupportedProtocolVersion], tickets: usize) -> Arc<Decoy> {
     let key = KeyPair::generate().unwrap();
     let cert = CertificateParams::new(vec!["decoy.test".to_owned()])
         .unwrap()
@@ -34,7 +34,7 @@ fn decoy(versions: &[&'static rustls::SupportedProtocolVersion]) -> Arc<Decoy> {
         .unwrap();
     let der = cert.der().clone();
     let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let config = ServerConfig::builder_with_provider(provider)
+    let mut config = ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(versions)
         .unwrap()
         .with_no_client_auth()
@@ -43,6 +43,7 @@ fn decoy(versions: &[&'static rustls::SupportedProtocolVersion]) -> Arc<Decoy> {
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
         )
         .unwrap();
+    config.send_tls13_tickets = tickets;
     Arc::new(Decoy {
         config: Arc::new(config),
         der,
@@ -156,7 +157,11 @@ fn client(version: u8, password: &str, decoy: &Decoy) -> TransportStack {
 }
 
 async fn through(version: ShadowTlsVersion, client_version: u8, password: &str) -> Option<String> {
-    let decoy = decoy(&[&rustls::version::TLS13, &rustls::version::TLS12]);
+    // A ticket that reaches a v2 client after its handshake is read as data, as by
+    // sing-shadowtls `v2_client.go:13-15`; the hash of late writes is held by
+    // `a_v2_client_may_hash_what_came_before_the_last_write`.
+    let tickets = if client_version == 2 { 0 } else { 2 };
+    let decoy = decoy(&[&rustls::version::TLS13, &rustls::version::TLS12], tickets);
     let (near, far) = tcp_pair().await;
     let dialed = Dialed::default();
     let upstream = {
@@ -196,7 +201,7 @@ async fn each_version_carries_the_client_past_the_handshake() {
 }
 
 async fn stranger(version: ShadowTlsVersion, lines: usize) -> io::Result<Option<Option<String>>> {
-    let decoy = decoy(&[&rustls::version::TLS13]);
+    let decoy = decoy(&[&rustls::version::TLS13], 2);
     let (near, far) = tcp_pair().await;
     let upstream = {
         let decoy = decoy.clone();
@@ -220,7 +225,7 @@ async fn a_stranger_talks_to_the_handshake_server_to_the_end() {
 
 #[tokio::test]
 async fn a_v3_client_with_another_password_reaches_only_the_handshake_server() {
-    let decoy = decoy(&[&rustls::version::TLS13]);
+    let decoy = decoy(&[&rustls::version::TLS13], 2);
     let (near, far) = tcp_pair().await;
     let upstream = {
         let decoy = decoy.clone();

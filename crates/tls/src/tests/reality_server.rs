@@ -1,16 +1,16 @@
 //! A small REALITY server for tests: authenticates the session id like
 //! `utls.RealityServer`, then speaks just enough TLS 1.3 to echo.
 
+use std::collections::HashSet;
 use std::io;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::agreement::{self, X25519};
 use aws_lc_rs::rand::fill;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::fingerprints::{GROUP_X25519, GROUP_X25519_MLKEM768};
-use crate::reality::server::{
-    ClientHello, RealityCert, ServerFlight, open_session_id, server_share,
-};
+use crate::reality::server::{ClientHello, RealityAuth, RealityCert, ServerFlight, server_share};
 use crate::reality::{CT_APPLICATION_DATA, CT_HANDSHAKE, RecordKey, Suite, put_u24};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,7 +27,7 @@ pub enum Fault {
 }
 
 pub struct MockReality {
-    private: agreement::PrivateKey,
+    private_key: [u8; 32],
     cert: RealityCert,
     other_cert: RealityCert,
     pub public_key: [u8; 32],
@@ -42,15 +42,17 @@ pub struct MockReality {
 
 impl MockReality {
     pub fn new() -> Self {
-        let private = agreement::PrivateKey::generate(&X25519).unwrap();
-        let public_key = private
+        let mut private_key = [0; 32];
+        fill(&mut private_key).unwrap();
+        let public_key = agreement::PrivateKey::from_private_key(&X25519, &private_key)
+            .unwrap()
             .compute_public_key()
             .unwrap()
             .as_ref()
             .try_into()
             .unwrap();
         Self {
-            private,
+            private_key,
             cert: reality_cert(),
             other_cert: reality_cert(),
             public_key,
@@ -126,12 +128,21 @@ impl MockReality {
             }
             vec![0; 32]
         } else {
-            let opened = open_session_id(&self.private, &parsed)
-                .ok_or_else(|| bad("session id does not open"))?;
-            if opened.sealed[..3] != [1, 8, 2] || opened.sealed[8..16] != self.short_id {
-                return Err(bad("unknown client"));
-            }
-            opened.auth_key
+            let auth = RealityAuth::new(
+                &self.private_key,
+                HashSet::from(["cover.test".to_owned()]),
+                HashSet::from([self.short_id]),
+                Duration::ZERO,
+                Default::default(),
+            )?;
+            let unix_now = || {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+            };
+            auth.authenticate(&parsed, unix_now)
+                .ok_or_else(|| bad("unknown client"))?
+                .auth_key
         };
 
         let group = if self.hybrid && parsed.share(GROUP_X25519_MLKEM768).is_some() {
