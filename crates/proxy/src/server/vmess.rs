@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
-use aes::cipher::{BlockDecrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, KeyInit};
 use concord_common::serve::{InboundCx, Peer, ServeFuture};
 use concord_common::{Address, BoxStream, ClockOffset, InboundKind};
 use concord_config::listener::VmessUser;

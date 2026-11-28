@@ -2,7 +2,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use aes::Aes128;
-use aes::cipher::{BlockDecrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, KeyInit};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::{Buf, BytesMut};
@@ -120,7 +120,7 @@ impl ServerProtocol {
                 };
                 let secret = format!("{}{salt}", STANDARD.encode(&user_key));
                 let cipher = Aes128::new_from_slice(&kdf(secret.as_bytes(), 16)).unwrap();
-                let mut block = aes::Block::clone_from_slice(&input[11..27]);
+                let mut block = aes::Block::try_from(&input[11..27]).unwrap();
                 cipher.decrypt_block(&mut block);
                 let total = usize::from(u16::from_le_bytes([block[12], block[13]]));
                 let rand_len = usize::from(u16::from_le_bytes([block[14], block[15]]));

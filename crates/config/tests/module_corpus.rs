@@ -138,7 +138,7 @@ fn pinned(entries: Vec<(u32, String)>) -> Value {
         .collect();
     json!({
         "count": entries.len(),
-        "sha256": format!("{:x}", hasher.finalize()),
+        "sha256": hex::encode(hasher.finalize()),
         "errors": errors,
     })
 }

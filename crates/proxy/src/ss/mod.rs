@@ -70,7 +70,7 @@ impl Outbound for Shadowsocks {
             return uot::session(Box::new(stream), version, hint, self.link.tasks());
         }
         let server = self.link.server_socket(cx).await?;
-        let codec = SsUdp::new(self.key.kind, self.key.key(), self.clock.clone())
+        let codec = SsUdp::new(self.key.kind, self.key.key(), self.clock.clone())?
             .with_identity(self.key.identity_keys());
         let session = UdpRelay::open(&self.link.egress, cx, server, codec, None).await?;
         Ok(Arc::new(session))

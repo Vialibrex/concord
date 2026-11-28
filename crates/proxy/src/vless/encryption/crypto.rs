@@ -1,6 +1,6 @@
 use std::io;
 
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherEncrypt, KeyInit};
 use aws_lc_rs::aead::{AES_256_GCM, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, Tag, UnboundKey};
 
 use super::{invalid, kdf};

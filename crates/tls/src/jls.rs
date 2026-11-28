@@ -1,4 +1,4 @@
-use aes_gcm::aead::generic_array::{GenericArray, typenum::U32};
+use aes_gcm::aead::array::typenum::U32;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{AesGcm, aes::Aes256};
 use sha2::{Digest, Sha256};
@@ -64,10 +64,7 @@ impl JlsAuth {
     }
 
     fn cipher(&self, hello: &[u8]) -> AesGcm<Aes256, U32> {
-        AesGcm::new(GenericArray::from_slice(&Self::digest(
-            &self.password,
-            hello,
-        )))
+        AesGcm::new(&Self::digest(&self.password, hello).into())
     }
 
     fn auth_data(hello: &[u8], kind: u8) -> std::io::Result<Vec<u8>> {
@@ -92,7 +89,7 @@ impl JlsAuth {
         loop {
             let seed: [u8; 16] = rand::random();
             let sealed = cipher
-                .encrypt(GenericArray::from_slice(&nonce), seed.as_slice())
+                .encrypt(&nonce.into(), seed.as_slice())
                 .map_err(|_| invalid_data("jls: random seal failed"))?;
             if forbidden(&sealed) {
                 continue;
@@ -110,10 +107,7 @@ impl JlsAuth {
         let nonce = Self::digest(&self.username, &auth);
         Ok(self
             .cipher(&auth)
-            .decrypt(
-                GenericArray::from_slice(&nonce),
-                hello.get(6..38).unwrap_or_default(),
-            )
+            .decrypt(&nonce.into(), hello.get(6..38).unwrap_or_default())
             .is_ok_and(|seed| seed.len() == 16))
     }
 }
@@ -146,7 +140,7 @@ mod tests {
         let nonce = JlsAuth::digest("name", &plain);
         assert_eq!(
             auth.cipher(&plain)
-                .decrypt(GenericArray::from_slice(&nonce), &hello[6..38])
+                .decrypt(&nonce.into(), &hello[6..38])
                 .unwrap()
                 .len(),
             16
@@ -157,7 +151,7 @@ mod tests {
         let nonce = JlsAuth::digest("name", &server_auth);
         let sealed = auth
             .cipher(&server_auth)
-            .encrypt(GenericArray::from_slice(&nonce), [7; 16].as_slice())
+            .encrypt(&nonce.into(), [7; 16].as_slice())
             .unwrap();
         // Go 1.27.3, mihomo 3c0d10a5 transport/jls: AES-256-GCM with a 32-byte nonce, key
         // SHA-256("secret" || hello), nonce SHA-256("name" || hello), sealing sixteen 7s.

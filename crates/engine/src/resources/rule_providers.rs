@@ -42,6 +42,14 @@ fn md5_of(bytes: &[u8]) -> Hash {
     Md5::digest(bytes).into()
 }
 
+fn hex(hash: &Hash) -> String {
+    hash.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn default_cache_path(url: &str) -> String {
+    format!("rules/{}", hex(&md5_of(url.as_bytes())))
+}
+
 pub(crate) struct RuleProvider {
     pub def: RuleProviderDef,
     pub handle: Arc<RuleSetHandle>,
@@ -136,7 +144,7 @@ impl RuleProviders {
                 RuleSource::File { path } => Some(confine(path)?),
                 RuleSource::Http(http) => {
                     let relative = if http.path.is_empty() {
-                        format!("rules/{:x}", Md5::digest(http.url.as_bytes()))
+                        default_cache_path(&http.url)
                     } else {
                         http.path.clone()
                     };
@@ -502,5 +510,22 @@ impl RuleProviders {
         }
         self.release(provider);
         pulled.is_ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_cache_path;
+
+    #[test]
+    fn default_cache_path_uses_lowercase_md5_hex() {
+        assert_eq!(
+            default_cache_path(""),
+            "rules/d41d8cd98f00b204e9800998ecf8427e"
+        );
+        assert_eq!(
+            default_cache_path("abc"),
+            "rules/900150983cd24fb0d6963f7d28e17f72"
+        );
     }
 }

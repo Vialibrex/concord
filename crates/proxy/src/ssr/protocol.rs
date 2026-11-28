@@ -3,7 +3,7 @@ use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 use aes::Aes128;
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherEncrypt, KeyInit};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use bytes::{Buf, BytesMut};
@@ -29,7 +29,7 @@ pub(super) fn hmac(hash: Hash, key: &[u8], data: &[u8]) -> Vec<u8> {
     match hash {
         Hash::Md5 => hmac_md5(key, data).to_vec(),
         Hash::Sha1 => {
-            let Ok(mut mac) = <Hmac<Sha1> as Mac>::new_from_slice(key) else {
+            let Ok(mut mac) = <Hmac<Sha1> as KeyInit>::new_from_slice(key) else {
                 return Vec::new();
             };
             mac.update(data);
@@ -39,7 +39,7 @@ pub(super) fn hmac(hash: Hash, key: &[u8], data: &[u8]) -> Vec<u8> {
 }
 
 pub(super) fn hmac_md5(key: &[u8], data: &[u8]) -> [u8; 16] {
-    let Ok(mut mac) = <Hmac<Md5> as Mac>::new_from_slice(key) else {
+    let Ok(mut mac) = <Hmac<Md5> as KeyInit>::new_from_slice(key) else {
         return [0; 16];
     };
     mac.update(data);

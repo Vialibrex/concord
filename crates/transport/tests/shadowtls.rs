@@ -11,7 +11,7 @@ use concord_tls::{TlsConnector, TlsOptions, TrustStore};
 use concord_transport::{
     Layer, ShadowTlsClient, ShadowTlsOptions, TransportStack, WS_ALPN, tls_dial,
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rcgen::{CertificateParams, KeyPair};
 use rustls::ServerConfig;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};

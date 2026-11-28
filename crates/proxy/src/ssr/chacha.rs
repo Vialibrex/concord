@@ -1,39 +1,40 @@
 use std::io;
 
-use chacha20::cipher::consts::U10;
-use chacha20::cipher::{Block, KeyIvInit, StreamCipher, StreamCipherCore, StreamCipherSeekCore};
-use chacha20::{ChaCha20, hchacha};
+use chacha20::cipher::{Block, KeyIvInit, StreamCipher, StreamCipherCore};
+use chacha20::variants::Ietf;
+use chacha20::{ChaCha20, ChaChaCore, R20, hchacha};
 
 pub(super) struct ChaCha64 {
     key: chacha20::Key,
     nonce: [u8; 12],
     cipher: ChaCha20,
     position: u64,
-    last: Block<chacha20::ChaChaCore<U10>>,
+    last: Block<ChaChaCore<R20, Ietf>>,
 }
 
 impl ChaCha64 {
     pub(super) fn new(key: &[u8], iv: &[u8]) -> io::Result<Self> {
-        let mut key = chacha20::Key::clone_from_slice(
-            <&[u8; 32]>::try_from(key).map_err(|_| io::ErrorKind::InvalidInput)?,
+        let mut key = chacha20::Key::from(
+            <[u8; 32]>::try_from(key).map_err(|_| io::ErrorKind::InvalidInput)?,
         );
         let mut nonce = [0u8; 12];
         let (_, tail) = nonce.split_at_mut(4);
-        match iv.len() {
-            8 => tail.copy_from_slice(iv),
-            24 => {
-                let (head, rest) = iv.split_at(16);
-                key = hchacha::<U10>(&key, head.into());
-                tail.copy_from_slice(rest);
-            }
-            _ => return Err(io::ErrorKind::InvalidInput.into()),
+        if iv.len() == 8 {
+            tail.copy_from_slice(iv);
+        } else if let Some((&head, rest)) = iv.split_first_chunk::<16>()
+            && rest.len() == 8
+        {
+            key = hchacha::<R20>(&key, &head.into());
+            tail.copy_from_slice(rest);
+        } else {
+            return Err(io::ErrorKind::InvalidInput.into());
         }
         Ok(Self {
             cipher: ChaCha20::new(&key, &nonce.into()),
             key,
             nonce,
             position: 0,
-            last: Block::<chacha20::ChaChaCore<U10>>::default(),
+            last: Block::<ChaChaCore<R20, Ietf>>::default(),
         })
     }
 
@@ -55,7 +56,7 @@ impl ChaCha64 {
             } else {
                 let offset = (self.position - final_block_offset) as usize;
                 if offset == 0 {
-                    let mut core = chacha20::ChaChaCore::<U10>::new(&self.key, &self.nonce.into());
+                    let mut core = ChaChaCore::<R20, Ietf>::new(&self.key, &self.nonce.into());
                     core.set_block_pos(u32::MAX);
                     core.write_keystream_block(&mut self.last);
                 }

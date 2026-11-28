@@ -118,7 +118,7 @@ h3-quinn = "=0.0.10"
 
 # Protocols
 shadowsocks = { version = "1.25", default-features = false }
-sha3 = "0.10"
+shake = "0.1"
 hyper = { version = "1.12", features = ["client", "http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http = "1"
@@ -130,21 +130,21 @@ hickory-proto = { version = "0.26.3", default-features = false, features = ["std
 gotatun = { version = "0.10.2", default-features = false, features = ["device", "aws-lc-rs"] }
 ipnetwork = "0.21"
 russh = { version = "0.65.1", default-features = false, features = ["aws-lc-rs"] }
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
 
 # Crypto primitives the TLS stacks do not expose
-sha1 = "0.10"
-sha2 = "0.10"
-md-5 = "0.10"
-hmac = "0.12"
-blake2 = "0.10"
+sha1 = "0.11"
+sha2 = "0.11"
+md-5 = "0.11"
+hmac = "0.13"
+blake2 = "0.11"
 blake3 = "1"
-aes = "0.8"
-aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+aes = "0.9"
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc"] }
 crc32fast = "1"
 x25519-dalek = { version = "3", features = ["static_secrets"] }
-chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc", "reduced-round"] }
-chacha20 = { version = "0.9", default-features = false, features = ["std"] }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "reduced-round", "zeroize"] }
+chacha20 = { version = "0.10", default-features = false, features = ["xchacha"] }
 
 # TUN
 tun-rs = { version = "=2.8.16", default-features = false, features = ["async_tokio"] }

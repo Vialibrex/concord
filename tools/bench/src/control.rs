@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf};
@@ -28,7 +28,7 @@ pub fn token() -> String {
 
 fn proof(token: &str, role: u8, initiator: &[u8], responder: &[u8]) -> [u8; PROOF_LEN] {
     let mut mac =
-        <Hmac<Sha256> as Mac>::new_from_slice(token.as_bytes()).expect("HMAC takes any key");
+        <Hmac<Sha256> as KeyInit>::new_from_slice(token.as_bytes()).expect("HMAC takes any key");
     mac.update(LABEL);
     mac.update(&[role]);
     mac.update(initiator);

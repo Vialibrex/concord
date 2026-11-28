@@ -1,7 +1,7 @@
 use std::io;
 use std::ops::Range;
 
-use aes::cipher::{BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherEncrypt, KeyInit};
 use aws_lc_rs::aead::{AES_128_GCM, Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use aws_lc_rs::digest::{Context as DigestContext, SHA256};
 use concord_common::Address;
@@ -9,8 +9,7 @@ use concord_common::stream_buffer::{BufferRequirements, StreamBuffer};
 use hmac::{Hmac, Mac};
 use md5::{Digest as _, Md5};
 use rand::RngExt;
-use sha3::Shake128;
-use sha3::digest::{ExtendableOutput, XofReader};
+use shake::{ExtendableOutput, Shake128, Shake128Reader, XofReader};
 
 use super::cfb::{CfbDecryptor, CfbEncryptor};
 pub(crate) use super::one_shot::{one_shot_open, one_shot_seal};
@@ -333,8 +332,8 @@ impl Request {
         dst: &Address,
     ) -> io::Result<Vec<u8>> {
         let mut header = self.encode(dst)?;
-        let mut mac =
-            <Hmac<Md5> as Mac>::new_from_slice(alter).map_err(|_| invalid_data("bad alter key"))?;
+        let mut mac = <Hmac<Md5> as KeyInit>::new_from_slice(alter)
+            .map_err(|_| invalid_data("bad alter key"))?;
         mac.update(&now.to_be_bytes());
         let id_hash = mac.finalize().into_bytes();
         let stamp = now.to_be_bytes();
@@ -407,7 +406,7 @@ impl ResponseOpener {
 /// Masking and padding both draw from one SHAKE128 stream seeded with the
 /// direction's nonce: padding first, then the length mask.
 struct Shake {
-    reader: sha3::Shake128Reader,
+    reader: Shake128Reader,
     padding: bool,
     masking: bool,
 }
@@ -420,7 +419,7 @@ impl Shake {
             return None;
         }
         let mut shake = Shake128::default();
-        sha3::digest::Update::update(&mut shake, nonce);
+        shake::Update::update(&mut shake, nonce);
         Some(Shake {
             reader: shake.finalize_xof(),
             padding,

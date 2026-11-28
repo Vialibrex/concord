@@ -3,11 +3,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::UNIX_EPOCH;
 
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::{Aes128, Aes256, Block};
-use chacha20::cipher::consts::U10;
+use chacha20::R20;
 use chacha20poly1305::ChaCha8Poly1305;
-use chacha20poly1305::aead::AeadInPlace;
+use chacha20poly1305::aead::AeadInOut;
 use concord_common::sync::lock;
 use concord_common::{Address, PacketBuf};
 use rand::RngExt;
@@ -133,7 +133,7 @@ pub(crate) struct SsUdp {
 }
 
 impl SsUdp {
-    pub(crate) fn new(kind: CipherKind, key: &[u8], clock: Clock) -> Self {
+    pub(crate) fn new(kind: CipherKind, key: &[u8], clock: Clock) -> io::Result<Self> {
         let scheme = if kind.is_none() {
             Scheme::Plain
         } else if kind.is_aead() {
@@ -149,23 +149,25 @@ impl SsUdp {
         } else {
             Scheme::Aes2022
         };
-        let session = matches!(scheme, Scheme::Aes2022 | Scheme::Chacha2022).then(|| {
+        let session = if matches!(scheme, Scheme::Aes2022 | Scheme::Chacha2022) {
             let id: u64 = rand::rng().random();
-            Session2022 {
+            Some(Session2022 {
                 id,
                 packet: AtomicU64::new(0),
-                cipher: Cipher2022::new(kind, key, id),
+                cipher: Cipher2022::new(kind, key, id)?,
                 server: Mutex::new(ServerSessions::default()),
-            }
-        });
-        SsUdp {
+            })
+        } else {
+            None
+        };
+        Ok(SsUdp {
             kind,
             key: key.into(),
             identity: Vec::new(),
             scheme,
             session,
             clock,
-        }
+        })
     }
 
     /// sing-shadowsocks2 EIH: the packet header goes out under the first iPSK, and after
@@ -307,9 +309,11 @@ impl SsUdp {
             let ids = PacketIds::read(head)?;
             servers.check(ids)?;
             let known = servers.get(ids.server).and_then(|s| s.cipher.as_ref());
-            let fresh = known
-                .is_none()
-                .then(|| Cipher2022::new(self.kind, &self.key, ids.server));
+            let fresh = if known.is_none() {
+                Some(Cipher2022::new(self.kind, &self.key, ids.server)?)
+            } else {
+                None
+            };
             let nonce = head
                 .get(4..16)
                 .ok_or_else(|| invalid_data("short header"))?;
@@ -374,18 +378,20 @@ enum Cipher2022 {
 }
 
 impl Cipher2022 {
-    fn new(kind: CipherKind, key: &[u8], session: u64) -> Self {
+    fn new(kind: CipherKind, key: &[u8], session: u64) -> io::Result<Self> {
         if kind == CipherKind::AEAD2022_BLAKE3_CHACHA8_POLY1305 {
-            return Cipher2022::Chacha8(*chacha20::Key::from_slice(key));
+            let key = <[u8; 32]>::try_from(key).map_err(|_| invalid_data("bad key length"))?;
+            return Ok(Cipher2022::Chacha8(key.into()));
         }
-        Cipher2022::Crate(shadowsocks::crypto::v2::udp::UdpCipher::new(
-            kind, key, session,
+        Ok(Cipher2022::Crate(
+            shadowsocks::crypto::v2::udp::UdpCipher::new(kind, key, session),
         ))
     }
 
     fn chacha8(key: &chacha20::Key, nonce: &[u8]) -> Option<(ChaCha8Poly1305, [u8; 12])> {
-        let (head, tail) = (nonce.get(..16)?, nonce.get(16..24)?);
-        let subkey = chacha20::hchacha::<U10>(key, head.into());
+        let &head = nonce.first_chunk::<16>()?;
+        let tail = nonce.get(16..24)?;
+        let subkey = chacha20::hchacha::<R20>(key, &head.into());
         let mut short = [0u8; 12];
         short.get_mut(4..)?.copy_from_slice(tail);
         Some((ChaCha8Poly1305::new(&subkey), short))
@@ -400,7 +406,7 @@ impl Cipher2022 {
                 };
                 let plain_len = buf.len().saturating_sub(TAG_LEN);
                 let (plain, tag_out) = buf.split_at_mut(plain_len);
-                if let Ok(tag) = cipher.encrypt_in_place_detached(&short.into(), &[], plain) {
+                if let Ok(tag) = cipher.encrypt_inout_detached(&short.into(), &[], plain.into()) {
                     tag_out.copy_from_slice(&tag);
                 }
             }
@@ -418,8 +424,11 @@ impl Cipher2022 {
                     return false;
                 };
                 let (body, tag) = buf.split_at_mut(plain_len);
+                let Ok(tag) = chacha20poly1305::Tag::try_from(&*tag) else {
+                    return false;
+                };
                 cipher
-                    .decrypt_in_place_detached(&short.into(), &[], body, (&*tag).into())
+                    .decrypt_inout_detached(&short.into(), &[], body.into(), &tag)
                     .is_ok()
             }
         }
@@ -551,6 +560,7 @@ mod tests {
         } else {
             pkt.advance(tag);
             Cipher2022::new(codec.kind, &codec.key, server)
+                .unwrap()
                 .encrypt_packet(&ids[4..], pkt.as_mut_slice());
             ecb(&codec.key, &mut ids, true).unwrap();
             pkt.prepend(16).copy_from_slice(&ids);
@@ -566,8 +576,12 @@ mod tests {
 
     #[test]
     fn a_replayed_server_packet_is_dropped() {
-        for kind in [AES, CipherKind::AEAD2022_BLAKE3_CHACHA20_POLY1305] {
-            let codec = SsUdp::new(kind, &key_for(kind), clock());
+        for kind in [
+            AES,
+            CipherKind::AEAD2022_BLAKE3_CHACHA20_POLY1305,
+            CipherKind::AEAD2022_BLAKE3_CHACHA8_POLY1305,
+        ] {
+            let codec = SsUdp::new(kind, &key_for(kind), clock()).unwrap();
             let first = from_server(&codec, 1, 0);
             assert!(open(&codec, &first).is_ok());
             assert!(open(&codec, &first).is_err());
@@ -576,9 +590,19 @@ mod tests {
     }
 
     #[test]
+    fn chacha8_rejects_bad_key_length_and_tampered_packet() {
+        let kind = CipherKind::AEAD2022_BLAKE3_CHACHA8_POLY1305;
+        assert!(SsUdp::new(kind, &[7u8; 16], clock()).is_err());
+        let codec = SsUdp::new(kind, &key_for(kind), clock()).unwrap();
+        let mut packet = from_server(&codec, 1, 0);
+        *packet.last_mut().unwrap() ^= 1;
+        assert!(open(&codec, &packet).is_err());
+    }
+
+    #[test]
     fn a_third_server_session_within_a_minute_is_refused() {
         let secs = Arc::new(AtomicU64::new(1_000_000));
-        let codec = SsUdp::new(AES, &key_for(AES), at(&secs));
+        let codec = SsUdp::new(AES, &key_for(AES), at(&secs)).unwrap();
         assert!(open(&codec, &from_server(&codec, 1, 0)).is_ok());
         assert!(open(&codec, &from_server(&codec, 2, 0)).is_ok());
         assert!(open(&codec, &from_server(&codec, 1, 1)).is_ok());
@@ -591,7 +615,7 @@ mod tests {
 
     #[test]
     fn a_packet_that_fails_does_not_take_a_server_session_slot() {
-        let codec = SsUdp::new(AES, &key_for(AES), clock());
+        let codec = SsUdp::new(AES, &key_for(AES), clock()).unwrap();
         assert!(open(&codec, &from_server(&codec, 1, 0)).is_ok());
         let mut forged = from_server(&codec, 2, 0);
         *forged.last_mut().unwrap() ^= 1;
@@ -606,7 +630,7 @@ mod tests {
 
     fn round_trip_v1(kind: CipherKind) {
         let key = key_for(kind);
-        let client = SsUdp::new(kind, &key, clock());
+        let client = SsUdp::new(kind, &key, clock()).unwrap();
         let dst = Address::new("203.0.113.5", 53);
         let mut pkt = PacketBuf::with_headroom(client.headroom());
         pkt.extend_from_slice(b"query");
@@ -635,7 +659,7 @@ mod tests {
     #[test]
     fn a_tampered_packet_is_rejected() {
         let kind = CipherKind::AES_128_GCM;
-        let codec = SsUdp::new(kind, &key_for(kind), clock());
+        let codec = SsUdp::new(kind, &key_for(kind), clock()).unwrap();
         let mut pkt = PacketBuf::with_headroom(codec.headroom());
         pkt.extend_from_slice(b"query");
         codec

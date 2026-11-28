@@ -2,8 +2,8 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::sync::Arc;
 
-use aes_gcm::aead::generic_array::GenericArray;
-use aes_gcm::aead::generic_array::typenum::U32;
+use aes_gcm::aead::array::Array;
+use aes_gcm::aead::array::typenum::U32;
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{AesGcm, aes::Aes256};
 use quinn::crypto::rustls::QuicClientConfig;
@@ -59,11 +59,11 @@ fn digest(first: &[u8], second: &[u8]) -> [u8; 32] {
 
 fn cipher(user: &JlsUser, auth: &[u8]) -> Gcm {
     let key = digest(user.password.as_bytes(), auth);
-    Gcm::new(GenericArray::from_slice(&key))
+    Gcm::new(&key.into())
 }
 
-fn nonce(user: &JlsUser, auth: &[u8]) -> GenericArray<u8, U32> {
-    GenericArray::clone_from_slice(&digest(user.username.as_bytes(), auth))
+fn nonce(user: &JlsUser, auth: &[u8]) -> Array<u8, U32> {
+    digest(user.username.as_bytes(), auth).into()
 }
 
 fn forbidden_tail(random: &[u8]) -> bool {

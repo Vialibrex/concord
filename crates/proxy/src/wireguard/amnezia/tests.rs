@@ -175,7 +175,7 @@ async fn a_cookie_reply_sets_mac2_on_the_next_initiation() {
     let sealed = XChaCha20Poly1305::new_from_slice(&key.finalize())
         .unwrap()
         .encrypt(
-            XNonce::from_slice(&nonce),
+            &XNonce::from(nonce),
             Payload {
                 msg: &cookie,
                 aad: &mac1,
@@ -197,7 +197,7 @@ async fn a_cookie_reply_sets_mac2_on_the_next_initiation() {
         .pop()
         .unwrap();
     let body = &second[15..];
-    let mut mac = <Blake2sMac<U16> as Mac>::new_from_slice(&cookie).unwrap();
+    let mut mac = Blake2sMac::<U16>::new_from_slice(&cookie).unwrap();
     mac.update(&body[..132]);
     assert_eq!(&body[132..], mac.finalize().into_bytes().as_slice());
 }

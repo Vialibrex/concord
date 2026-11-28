@@ -22,7 +22,7 @@ fn derive(label: &[u8], public: &[u8; 32]) -> [u8; 32] {
 }
 
 fn mac(key: &[u8], parts: &[u8]) -> Option<[u8; MAC]> {
-    let mut mac = <Blake2sMac<U16> as Mac>::new_from_slice(key).ok()?;
+    let mut mac = Blake2sMac::<U16>::new_from_slice(key).ok()?;
     mac.update(parts);
     Some(mac.finalize().into_bytes().into())
 }
@@ -115,8 +115,11 @@ impl Macs {
         let Ok(cipher) = XChaCha20Poly1305::new_from_slice(&self.cookie) else {
             return false;
         };
+        let Ok(nonce) = XNonce::try_from(nonce) else {
+            return false;
+        };
         let opened = cipher.decrypt(
-            XNonce::from_slice(nonce),
+            &nonce,
             Payload {
                 msg: sealed,
                 aad: &last,

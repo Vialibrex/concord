@@ -23,9 +23,9 @@ fn both_stream_ciphers_carry_the_counter_past_256_gib() {
         let mut original = ChaCha64::new(&[7; 32], &iv).unwrap();
         original.cipher.seek(boundary - 5);
         original.cipher.apply_keystream(&mut expected[..5]);
-        let mut last = chacha20::ChaChaCore::<U10>::new(&original.key, &original.nonce.into());
+        let mut last = ChaChaCore::<R20, Ietf>::new(&original.key, &original.nonce.into());
         last.set_block_pos(u32::MAX);
-        let mut block = Block::<chacha20::ChaChaCore<U10>>::default();
+        let mut block = Block::<ChaChaCore<R20, Ietf>>::default();
         last.write_keystream_block(&mut block);
         expected[5..69].copy_from_slice(&block);
         let mut nonce = original.nonce;

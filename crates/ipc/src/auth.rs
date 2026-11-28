@@ -2,7 +2,7 @@ use std::fmt;
 use std::io;
 use std::time::Duration;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::RngExt;
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

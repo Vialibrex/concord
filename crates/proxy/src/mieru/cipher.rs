@@ -2,8 +2,8 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use aws_lc_rs::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
-use chacha20::cipher::consts::U10;
-use hmac::{Hmac, Mac};
+use chacha20::R20;
+use hmac::{Hmac, KeyInit, Mac};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
@@ -27,7 +27,7 @@ pub(super) fn hash_password(password: &str, user: &str) -> [u8; 32] {
 
 fn pbkdf2(password: &[u8], salt: &[u8]) -> [u8; 32] {
     let prf = |data: &[u8]| -> [u8; 32] {
-        let Ok(mut mac) = <Hmac<Sha256> as Mac>::new_from_slice(password) else {
+        let Ok(mut mac) = <Hmac<Sha256> as KeyInit>::new_from_slice(password) else {
             return [0; 32];
         };
         mac.update(data);
@@ -147,7 +147,7 @@ impl XChaCha {
     }
 
     fn subkey(&self, input: &[u8; SUBKEY_INPUT]) -> io::Result<LessSafeKey> {
-        let derived = chacha20::hchacha::<U10>(&self.master, input.into());
+        let derived = chacha20::hchacha::<R20>(&self.master, &(*input).into());
         UnboundKey::new(&CHACHA20_POLY1305, &derived)
             .map(LessSafeKey::new)
             .map_err(|_| invalid("cipher key"))

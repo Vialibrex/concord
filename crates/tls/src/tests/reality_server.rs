@@ -174,20 +174,14 @@ impl MockReality {
         }
 
         let auth_key = if self.jls {
-            use aes_gcm::aead::{
-                Aead, KeyInit, generic_array::GenericArray, generic_array::typenum::U32,
-            };
+            use aes_gcm::aead::{Aead, KeyInit, array::typenum::U32};
             use sha2::{Digest, Sha256};
             let mut zeroed = hello.clone();
             zeroed[6..38].fill(0);
             let key = Sha256::digest([b"secret".as_slice(), &zeroed].concat());
             let nonce = Sha256::digest([b"name".as_slice(), &zeroed].concat());
-            let cipher =
-                aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U32>::new(GenericArray::from_slice(&key));
-            if cipher
-                .decrypt(GenericArray::from_slice(&nonce), &hello[6..38])
-                .is_err()
-            {
+            let cipher = aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U32>::new(&key);
+            if cipher.decrypt(&nonce, &hello[6..38]).is_err() {
                 return Err(bad("jls client random does not authenticate"));
             }
             vec![0; 32]
@@ -276,18 +270,13 @@ impl MockReality {
         sh.extend_from_slice(&exts);
         let mut server_hello = message(2, &sh);
         if self.jls && self.fault != Fault::HelloRetry {
-            use aes_gcm::aead::{
-                Aead, KeyInit, generic_array::GenericArray, generic_array::typenum::U32,
-            };
+            use aes_gcm::aead::{Aead, KeyInit, array::typenum::U32};
             use sha2::{Digest, Sha256};
             server_hello[6..38].fill(0);
             let key = Sha256::digest([b"secret".as_slice(), &server_hello].concat());
             let nonce = Sha256::digest([b"name".as_slice(), &server_hello].concat());
-            let cipher =
-                aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U32>::new(GenericArray::from_slice(&key));
-            let random = cipher
-                .encrypt(GenericArray::from_slice(&nonce), [7; 16].as_slice())
-                .unwrap();
+            let cipher = aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U32>::new(&key);
+            let random = cipher.encrypt(&nonce, [7; 16].as_slice()).unwrap();
             server_hello[6..38].copy_from_slice(&random);
         }
         for chunk in server_hello.chunks(if self.fragmented {
