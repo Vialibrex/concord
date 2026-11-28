@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/metacubex/tailscale/ipn"
 	"github.com/metacubex/tailscale/ipn/store/mem"
 	"github.com/metacubex/tailscale/tsnet"
 	"golang.org/x/net/dns/dnsmessage"
@@ -115,15 +117,18 @@ func TestAQueryInFlightDoesNotAnswerAfterStop(t *testing.T) {
 }
 
 func TestALinkChangeBeforeOrDuringStopIsHarmless(t *testing.T) {
-	testReset()
-	h := startNode(t, nodeJSON(t, t.TempDir(), true))
-	time.Sleep(300 * time.Millisecond)
-	if testFailedEvents() != 0 {
-		t.Fatalf("the node did not start: %s", testLastFailure())
+	for _, after := range []time.Duration{0, 300 * time.Millisecond} {
+		testReset()
+		h := startNode(t, nodeJSON(t, t.TempDir(), true))
+		testLinkChanged(h)
+		time.Sleep(after)
+		if testFailedEvents() != 0 {
+			t.Fatalf("the node did not start: %s", testLastFailure())
+		}
+		testLinkChanged(h)
+		stopAndWatch(t, h)
+		testLinkChanged(h)
 	}
-	testLinkChanged(h)
-	stopAndWatch(t, h)
-	testLinkChanged(h)
 }
 
 func TestWriteDeliversInBatchesAndSkipsEmptyBuffers(t *testing.T) {
@@ -189,5 +194,166 @@ func TestQueryDNSDoesNotStartANodeWhoseStartWasSkipped(t *testing.T) {
 	}
 	if s.Sys() != nil {
 		t.Fatal("queryDNS implicitly started tsnet.Server when Start was skipped")
+	}
+}
+
+func TestLinkChangeBeforeStartCompletesIsDeliveredOnceStarted(t *testing.T) {
+	testReset()
+	makeNode := func() (*node, int64) {
+		ctx, cancel := context.WithCancel(context.Background())
+		n := &node{
+			cb:        testCallbacks(),
+			gate:      newGate(),
+			ctx:       ctx,
+			cancel:    cancel,
+			tun:       testTun(),
+			startDone: make(chan struct{}),
+		}
+		n.server = &tsnet.Server{
+			Dir:        t.TempDir(),
+			Hostname:   "test",
+			ControlURL: deadControl,
+			Ephemeral:  true,
+			Tun:        n.tun,
+			Store:      new(mem.Store),
+			UserLogf:   func(string, ...any) {},
+			Logf:       func(string, ...any) {},
+		}
+		id := nextID.Add(1)
+		nodesMu.Lock()
+		nodes[id] = n
+		nodesMu.Unlock()
+		return n, id
+	}
+
+	queued, qid := makeNode()
+	defer stopAndWatch(t, qid)
+	testLinkChanged(qid)
+	testLinkChanged(qid)
+	queued.wg.Add(1)
+	go queued.run()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for queued.linkChanges.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := queued.linkChanges.Load(); got != 1 {
+		t.Fatalf("queued link changes delivered = %d, want 1", got)
+	}
+
+	quiet, quietID := makeNode()
+	defer stopAndWatch(t, quietID)
+	quiet.wg.Add(1)
+	go quiet.run()
+	<-quiet.startDone
+	time.Sleep(200 * time.Millisecond)
+	if got := quiet.linkChanges.Load(); got != 0 {
+		t.Fatalf("unexpected link changes without cts_link_changed = %d", got)
+	}
+}
+
+func TestAddrsTrackerTransitions(t *testing.T) {
+	statePtr := func(s ipn.State) *ipn.State { return &s }
+	v4a := netip.MustParseAddr("100.64.0.2")
+	v4b := netip.MustParseAddr("100.64.0.3")
+
+	steps := []struct {
+		name           string
+		loginURL       bool
+		state          *ipn.State
+		v4             netip.Addr
+		wantCheckAddrs bool
+		wantStartLogin bool
+		wantEmit       bool
+		wantIPv4       string
+	}{
+		{
+			name:  "startup NoState does nothing",
+			state: statePtr(ipn.NoState),
+		},
+		{
+			name:  "startup NeedsLogin before Running does not call StartLoginInteractive",
+			state: statePtr(ipn.NeedsLogin),
+		},
+		{
+			name: "nil state while NeedsLogin does not check addrs",
+		},
+		{
+			name:           "first Running emits initial address",
+			state:          statePtr(ipn.Running),
+			v4:             v4a,
+			wantCheckAddrs: true,
+			wantEmit:       true,
+			wantIPv4:       "100.64.0.2",
+		},
+		{
+			name:           "nil state while Running with unchanged IP suppresses duplicate",
+			v4:             v4a,
+			wantCheckAddrs: true,
+			wantEmit:       false,
+		},
+		{
+			name:           "nil state while Running with new IP emits update",
+			v4:             v4b,
+			wantCheckAddrs: true,
+			wantEmit:       true,
+			wantIPv4:       "100.64.0.3",
+		},
+		{
+			name:           "Running to NeedsLogin triggers StartLoginInteractive once",
+			state:          statePtr(ipn.NeedsLogin),
+			wantStartLogin: true,
+		},
+		{
+			name:  "repeated NeedsLogin without re-entering Running does not re-trigger",
+			state: statePtr(ipn.NeedsLogin),
+		},
+		{
+			name:           "same-IP recovery after NeedsLogin re-emits ADDRS and rearms tracker",
+			state:          statePtr(ipn.Running),
+			v4:             v4b,
+			wantCheckAddrs: true,
+			wantEmit:       true,
+			wantIPv4:       "100.64.0.3",
+		},
+		{
+			name:     "LoginURL followed by NeedsLogin skips duplicate StartLoginInteractive",
+			loginURL: true,
+			state:    statePtr(ipn.NeedsLogin),
+		},
+		{
+			name:           "same-IP recovery after LoginURL re-emits ADDRS and rearms tracker",
+			state:          statePtr(ipn.Running),
+			v4:             v4b,
+			wantCheckAddrs: true,
+			wantEmit:       true,
+			wantIPv4:       "100.64.0.3",
+		},
+		{
+			name:           "second Running to NeedsLogin triggers StartLoginInteractive again",
+			state:          statePtr(ipn.NeedsLogin),
+			wantStartLogin: true,
+		},
+	}
+
+	var tr addrsTracker
+	for _, step := range steps {
+		if step.loginURL {
+			tr.onLoginURL()
+		}
+		act := tr.onNotify(step.state)
+		if act.checkAddrs != step.wantCheckAddrs || act.startLogin != step.wantStartLogin {
+			t.Fatalf("%s: onNotify = %+v, want checkAddrs=%v startLogin=%v",
+				step.name, act, step.wantCheckAddrs, step.wantStartLogin)
+		}
+		if !act.checkAddrs {
+			continue
+		}
+		addrs, emit := tr.onAddrs(step.v4, netip.Addr{})
+		if emit != step.wantEmit || addrs.IPv4 != step.wantIPv4 {
+			t.Fatalf("%s: onAddrs = (%+v, %v), want (%q, %v)",
+				step.name, addrs, emit, step.wantIPv4, step.wantEmit)
+		}
 	}
 }

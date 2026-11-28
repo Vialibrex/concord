@@ -1,4 +1,5 @@
 mod inbox;
+mod launch;
 mod tunnel;
 mod via;
 
@@ -21,7 +22,8 @@ use concord_net::dial_found;
 use concord_tsnet::Library;
 use serde_json::json;
 
-use self::tunnel::{Launch, Start, Tunnel};
+use self::launch::Launch;
+use self::tunnel::{Start, Tunnel};
 use crate::ctx::{BuildCtx, BuildError};
 use crate::node::{Egress, info_for};
 use crate::stack::{Congestion, IpStream, SessionTunnel, StackSession};
@@ -294,7 +296,7 @@ mod tests {
     use concord_common::sync::lock;
     use concord_config::proxy::ProxyDef;
 
-    use super::tunnel::Launch;
+    use super::launch::Launch;
     use super::{node_config, tailscale};
     use crate::BuildCtx;
 

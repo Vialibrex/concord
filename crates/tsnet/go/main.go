@@ -61,10 +61,13 @@ type node struct {
 	// Close must not run before or during Start, nor after a Start that failed early.
 	startDone chan struct{}
 	started   bool
-	// linkMu guards stopping against cts_link_changed adding to links.
-	linkMu   sync.Mutex
-	stopping bool
-	links    sync.WaitGroup
+	// linkMu guards startReady, pendingLinkChange, stopping, and adding to links.
+	linkMu            sync.Mutex
+	startReady        bool
+	pendingLinkChange bool
+	stopping          bool
+	links             sync.WaitGroup
+	linkChanges       atomic.Int64
 }
 
 var (
@@ -266,15 +269,94 @@ type addrsEvent struct {
 	IPv6 string `json:"ipv6,omitempty"`
 }
 
+type notifyAction struct {
+	checkAddrs bool
+	startLogin bool
+}
+
+type addrsTracker struct {
+	cur        ipn.State
+	hadRunning bool
+	last       addrsEvent
+}
+
+func (a *addrsTracker) onLoginURL() {
+	a.last = addrsEvent{}
+	a.hadRunning = false
+}
+
+func (a *addrsTracker) onNotify(state *ipn.State) notifyAction {
+	if state != nil {
+		a.cur = *state
+		if a.cur != ipn.Running {
+			a.last = addrsEvent{}
+			if a.hadRunning && a.cur == ipn.NeedsLogin {
+				a.hadRunning = false
+				return notifyAction{startLogin: true}
+			}
+			return notifyAction{}
+		}
+	}
+	if a.cur != ipn.Running {
+		return notifyAction{}
+	}
+	a.hadRunning = true
+	return notifyAction{checkAddrs: true}
+}
+
+func (a *addrsTracker) onAddrs(v4, v6 netip.Addr) (addrsEvent, bool) {
+	if a.cur != ipn.Running {
+		a.last = addrsEvent{}
+		return addrsEvent{}, false
+	}
+	addrs := addrsEvent{}
+	if v4.IsValid() {
+		addrs.IPv4 = v4.String()
+	}
+	if v6.IsValid() {
+		addrs.IPv6 = v6.String()
+	}
+	if addrs == a.last {
+		return addrsEvent{}, false
+	}
+	a.last = addrs
+	return addrs, true
+}
+
+func (n *node) startLoginInteractive(start func(context.Context) error) {
+	n.wg.Add(1)
+	go func() {
+		defer n.wg.Done()
+		ctx, cancel := context.WithTimeout(n.ctx, 30*time.Second)
+		err := start(ctx)
+		cancel()
+		if err != nil && n.ctx.Err() == nil {
+			n.emit(C.CTS_EVENT_ERROR, "login: "+err.Error())
+		}
+	}()
+}
+
+func (n *node) finishStart(ok bool) {
+	n.linkMu.Lock()
+	n.started = ok
+	n.startReady = true
+	pending := ok && n.pendingLinkChange && !n.stopping
+	n.pendingLinkChange = false
+	if pending {
+		n.spawnLinkChangeLocked()
+	}
+	n.linkMu.Unlock()
+	close(n.startDone)
+}
+
 func (n *node) run() {
 	defer n.wg.Done()
 	if n.ctx.Err() != nil {
-		close(n.startDone)
+		n.finishStart(false)
 		return
 	}
 	err := n.server.Start()
-	n.started = err == nil
-	close(n.startDone)
+	n.finishStart(err == nil)
 	if err != nil {
 		n.emit(C.CTS_EVENT_FAILED, "start: "+err.Error())
 		return
@@ -303,7 +385,7 @@ func (n *node) run() {
 	}
 	defer watcher.Close()
 	exitPending := n.exitNodeByIP()
-	var lastAddrs addrsEvent
+	var tracker addrsTracker
 	for {
 		msg, err := watcher.Next()
 		if err != nil {
@@ -313,28 +395,24 @@ func (n *node) run() {
 			return
 		}
 		if msg.BrowseToURL != nil && *msg.BrowseToURL != "" {
+			tracker.onLoginURL()
 			n.emit(C.CTS_EVENT_LOGIN_URL, *msg.BrowseToURL)
 		}
 		if msg.ErrMessage != nil {
 			n.emit(C.CTS_EVENT_ERROR, *msg.ErrMessage)
 		}
-		if msg.State == nil {
-			continue
+		if msg.State != nil {
+			n.emit(C.CTS_EVENT_STATE, msg.State.String())
 		}
-		n.emit(C.CTS_EVENT_STATE, msg.State.String())
-		if *msg.State != ipn.Running {
+		act := tracker.onNotify(msg.State)
+		if act.startLogin {
+			n.startLoginInteractive(lc.StartLoginInteractive)
+		}
+		if !act.checkAddrs {
 			continue
 		}
 		v4, v6 := n.server.TailscaleIPs()
-		addrs := addrsEvent{}
-		if v4.IsValid() {
-			addrs.IPv4 = v4.String()
-		}
-		if v6.IsValid() {
-			addrs.IPv6 = v6.String()
-		}
-		if addrs != lastAddrs {
-			lastAddrs = addrs
+		if addrs, emit := tracker.onAddrs(v4, v6); emit {
 			text, _ := json.Marshal(addrs)
 			n.emit(C.CTS_EVENT_ADDRS, string(text))
 		}
@@ -483,10 +561,10 @@ func (n *node) queryDNS(raw []byte) ([]byte, error) {
 	return answer, nil
 }
 
-// cts_link_changed tells a started node that the device's network changed under it, as the
-// official Android client tells netmon: it rechecks the links, and magicsock opens its UDP
-// sockets again (through `prepare_socket`, so they follow the new network) and finds its paths
-// anew. A node still starting reads the network as it is.
+// cts_link_changed tells a node that the device's network changed under it, as the official
+// Android client tells netmon: it rechecks the links, and magicsock opens its UDP sockets again
+// (through `prepare_socket`, so they follow the new network) and finds its paths anew. A call
+// before Start finishes is remembered and delivered once it succeeds.
 //
 //export cts_link_changed
 func cts_link_changed(h C.int64_t) {
@@ -494,22 +572,26 @@ func cts_link_changed(h C.int64_t) {
 	if n == nil {
 		return
 	}
-	select {
-	case <-n.startDone:
-	default:
-		return
-	}
-	if !n.started {
-		return
-	}
 	n.linkMu.Lock()
 	defer n.linkMu.Unlock()
 	if n.stopping {
 		return
 	}
+	if !n.startReady {
+		n.pendingLinkChange = true
+		return
+	}
+	if !n.started {
+		return
+	}
+	n.spawnLinkChangeLocked()
+}
+
+func (n *node) spawnLinkChangeLocked() {
 	n.links.Add(1)
 	go func() {
 		defer n.links.Done()
+		n.linkChanges.Add(1)
 		sys := n.server.Sys()
 		if monitor, ok := sys.NetMon.GetOK(); ok {
 			monitor.InjectEvent()
@@ -534,10 +616,11 @@ func cts_stop(h C.int64_t) {
 	}
 	n.linkMu.Lock()
 	n.stopping = true
+	n.pendingLinkChange = false
 	n.linkMu.Unlock()
 	n.cancel()
-	n.links.Wait()
 	<-n.startDone
+	n.links.Wait()
 	if n.started {
 		_ = n.server.Close()
 	}

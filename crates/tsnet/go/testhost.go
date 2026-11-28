@@ -119,3 +119,5 @@ func testQuery(h int64, id uint64, msg []byte) int32 {
 }
 
 func testTun() *packetTun { return newPacketTun(C.cts_test_callbacks(), newGate()) }
+
+func testCallbacks() *C.cts_callbacks { return C.cts_test_callbacks() }
