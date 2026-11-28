@@ -4,6 +4,7 @@
 //! its own.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -32,6 +33,10 @@ const PACKET_SLOTS: usize = concord_tsnet::BATCH;
 const STREAM_SLOTS: usize = 1;
 /// mihomo's TCP dial timeout, for a dial whose context sets none.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Base unit of tailscale's `util/backoff` (`min(n² * 10 ms, max)` with 0.5–1.5x jitter).
+const RECONNECT_UNIT: Duration = Duration::from_millis(10);
+/// Upper bound of tailscale's DERP reconnect backoff (`magicsock/derp.go`).
+const RECONNECT_MAX: Duration = Duration::from_secs(5);
 
 pub(super) struct Via {
     node: Arc<str>,
@@ -81,7 +86,9 @@ impl Conns for Via {
             dst: Address::parse(addr)?,
             datagram,
         };
-        let opened = dial.open(self.stop.clone(), timeout.unwrap_or(OPEN_TIMEOUT));
+        let opened = dial
+            .clone()
+            .open(self.stop.clone(), timeout.unwrap_or(OPEN_TIMEOUT));
         let (pipe, carrier) = match wait_on(&self.tasks, opened) {
             Some(Ok(opened)) => opened,
             Some(Err(err)) => {
@@ -99,7 +106,7 @@ impl Conns for Via {
         self.tasks.spawn(async move {
             tokio::select! {
                 () = stop.cancelled() => pipe.close(),
-                () = pump(&pipe, carrier) => {}
+                () = pump(&pipe, carrier, &dial) => {}
             }
         });
         Some(conn)
@@ -108,14 +115,14 @@ impl Conns for Via {
     fn read(&self, conn: i64, buf: &mut [u8], from: &mut [u8]) -> (Io, usize) {
         match self.pipe(conn) {
             Some(pipe) => pipe.read(buf, from),
-            None => (Io::Failed, 0),
+            None => (Io::Closed, 0),
         }
     }
 
     fn write(&self, conn: i64, data: &[u8], to: &str) -> Io {
         match self.pipe(conn) {
             Some(pipe) => pipe.write(data, to),
-            None => Io::Failed,
+            None => Io::Closed,
         }
     }
 
@@ -140,6 +147,7 @@ impl Conns for Via {
 }
 
 /// A connection the node asked for, opened on the runtime.
+#[derive(Clone)]
 struct Dial {
     node: Arc<str>,
     proxy: Arc<str>,
@@ -149,13 +157,13 @@ struct Dial {
 }
 
 impl Dial {
-    async fn open(
-        self,
+    async fn run_bounded<T>(
         stop: CancellationToken,
         timeout: Duration,
-    ) -> io::Result<(Arc<Pipe>, Carrier)> {
+        work: impl Future<Output = io::Result<T>>,
+    ) -> io::Result<T> {
         match stop
-            .run_until_cancelled_owned(tokio::time::timeout(timeout, self.connect()))
+            .run_until_cancelled_owned(tokio::time::timeout(timeout, work))
             .await
         {
             Some(Ok(opened)) => opened,
@@ -164,17 +172,38 @@ impl Dial {
         }
     }
 
-    async fn connect(self) -> io::Result<(Arc<Pipe>, Carrier)> {
+    async fn open(
+        self,
+        stop: CancellationToken,
+        timeout: Duration,
+    ) -> io::Result<(Arc<Pipe>, Carrier)> {
+        let gone = stop.child_token();
+        Self::run_bounded(stop, timeout, self.connect(gone)).await
+    }
+
+    async fn open_packets(
+        &self,
+        stop: CancellationToken,
+        timeout: Duration,
+    ) -> io::Result<Arc<dyn PacketSession>> {
+        Self::run_bounded(stop, timeout, self.connect_packets()).await
+    }
+
+    async fn connect_packets(&self) -> io::Result<Arc<dyn PacketSession>> {
         let cx = DialCx::new(&self.env, Initiator::Proxy, None);
         let inner = cx.enter(&self.node)?;
+        self.env
+            .nodes
+            .associate_via(&self.proxy, &inner, &self.dst)
+            .await
+    }
+
+    async fn connect(&self, gone: CancellationToken) -> io::Result<(Arc<Pipe>, Carrier)> {
         let carrier = if self.datagram {
-            Carrier::Packets(
-                self.env
-                    .nodes
-                    .associate_via(&self.proxy, &inner, &self.dst)
-                    .await?,
-            )
+            Carrier::Packets(self.connect_packets().await?)
         } else {
+            let cx = DialCx::new(&self.env, Initiator::Proxy, None);
+            let inner = cx.enter(&self.node)?;
             Carrier::Stream(
                 self.env
                     .nodes
@@ -182,7 +211,7 @@ impl Dial {
                     .await?,
             )
         };
-        Ok((Arc::new(Pipe::new(self.datagram)), carrier))
+        Ok((Arc::new(Pipe::new(self.datagram, gone)), carrier))
     }
 }
 
@@ -293,6 +322,10 @@ struct State {
     outbound: Lane,
     /// The stream ended after what `inbound` holds.
     eof: bool,
+    /// Datagram carrier is rebuilding its underlying association; reads block and writes drop.
+    reconnecting: bool,
+    /// Closed explicitly by the node or host (`Via::close` / `Via::close_all`).
+    closed: bool,
     /// Closed by the node, or failed on the network side.
     done: bool,
 }
@@ -315,7 +348,7 @@ struct Pipe {
 }
 
 impl Pipe {
-    fn new(datagram: bool) -> Pipe {
+    fn new(datagram: bool, gone: CancellationToken) -> Pipe {
         let slots = if datagram { PACKET_SLOTS } else { STREAM_SLOTS };
         Pipe {
             state: Mutex::new(State {
@@ -323,13 +356,15 @@ impl Pipe {
                 inbound: Lane::new(slots),
                 outbound: Lane::new(slots),
                 eof: false,
+                reconnecting: false,
+                closed: false,
                 done: false,
             }),
             readable: Condvar::new(),
             writable: Condvar::new(),
             to_send: Notify::new(),
             to_receive: Notify::new(),
-            gone: CancellationToken::new(),
+            gone,
         }
     }
 
@@ -367,7 +402,7 @@ impl Pipe {
         let (mut state, wait) = self.wait(&self.readable, lock(&self.state), |s| &s.inbound, ready);
         let read = match wait {
             Wait::TimedOut => return (Io::TimedOut, 0),
-            Wait::Done => return (Io::Failed, 0),
+            Wait::Done => return (if state.closed { Io::Closed } else { Io::Failed }, 0),
             Wait::Ready if state.datagram => state.inbound.take_packet(buf, from),
             Wait::Ready => (state.inbound.take_bytes(buf), 0),
         };
@@ -377,16 +412,20 @@ impl Pipe {
     }
 
     fn write(&self, data: &[u8], to: &str) -> Io {
-        let ready = |s: &State| !s.done && !s.outbound.empty.is_empty();
+        let ready =
+            |s: &State| !s.done && (!s.outbound.empty.is_empty() || (s.datagram && s.reconnecting));
         let (mut state, wait) =
             self.wait(&self.writable, lock(&self.state), |s| &s.outbound, ready);
         let taken = match wait {
             Wait::TimedOut => return Io::TimedOut,
-            Wait::Done => return Io::Failed,
+            Wait::Done => return if state.closed { Io::Closed } else { Io::Failed },
             Wait::Ready if state.datagram => {
                 let Ok(peer) = to.parse() else {
                     return Io::Failed;
                 };
+                if state.reconnecting {
+                    return Io::Done(data.len());
+                }
                 state.outbound.put_packet(data, peer);
                 data.len()
             }
@@ -395,6 +434,22 @@ impl Pipe {
         drop(state);
         self.to_send.notify_one();
         Io::Done(taken)
+    }
+
+    /// Marks the UDP pipe as rebuilding its underlying session; drops stale queued outbound
+    /// packets and wakes blocked writers so Go senders never stall while the association rebuilds.
+    fn set_reconnecting(&self, reconnecting: bool) {
+        let mut state = lock(&self.state);
+        state.reconnecting = reconnecting;
+        if reconnecting {
+            while state.outbound.filled.front().is_some() {
+                state.outbound.recycle_front();
+            }
+        }
+        drop(state);
+        if reconnecting {
+            self.writable.notify_all();
+        }
     }
 
     fn deadline(&self, read: bool, write: bool, at: Option<Instant>) {
@@ -411,6 +466,19 @@ impl Pipe {
     }
 
     fn close(&self) {
+        {
+            let mut state = lock(&self.state);
+            state.closed = true;
+            state.done = true;
+        }
+        self.gone.cancel();
+        self.readable.notify_all();
+        self.writable.notify_all();
+        self.to_send.notify_one();
+        self.to_receive.notify_one();
+    }
+
+    fn finish(&self) {
         lock(&self.state).done = true;
         self.gone.cancel();
         self.readable.notify_all();
@@ -487,83 +555,217 @@ fn write_peer(out: &mut [u8], peer: Option<SocketAddr>) -> usize {
     }
 }
 
-async fn pump(pipe: &Pipe, carrier: Carrier) {
-    match carrier {
-        Carrier::Stream(stream) => {
-            let (mut rd, mut wr) = stream.into_split();
-            let down = async {
-                while let Some(mut bytes) = pipe.empty_inbound().await {
-                    let read = rd.read(&mut bytes).await;
-                    match read {
-                        Ok(len) if len > 0 => pipe.received(bytes, len, None),
-                        _ => {
-                            pipe.unused(bytes);
-                            return pipe.ended(read.is_err());
-                        }
-                    }
-                }
-            };
-            let up = async {
-                while let Some(slot) = pipe.next_outbound().await {
-                    let sent = wr
-                        .write_all(slot.bytes.get(..slot.end).unwrap_or_default())
-                        .await;
-                    pipe.sent(slot.bytes);
-                    if sent.is_err() {
-                        return pipe.ended(true);
-                    }
-                }
-                let _ = wr.shutdown().await;
-            };
-            // Bytes the node wrote before it closed still go out; reading stops at once.
-            let down = async {
-                tokio::select! {
-                    () = down => {}
-                    () = pipe.gone.cancelled() => {}
-                }
-            };
-            tokio::join!(down, up);
-        }
-        Carrier::Packets(session) => {
-            let down = async {
-                while let Ok((packet, from)) = recv_packet(&*session).await {
-                    let Address::Socket(from) = from else {
-                        continue;
-                    };
-                    let Some(mut bytes) = pipe.empty_inbound().await else {
-                        return;
-                    };
-                    let data = packet.as_slice();
-                    if data.len() > bytes.len() {
-                        pipe.unused(bytes);
-                        continue;
-                    }
-                    let n = copy(&mut bytes, data);
-                    pipe.received(bytes, n, Some(from));
-                }
-            };
-            let up = async {
-                while let Some(slot) = pipe.next_outbound().await {
-                    let mut packet = PacketBuf::take();
-                    packet.extend_from_slice(slot.bytes.get(..slot.end).unwrap_or_default());
-                    let peer = slot.peer.map(Address::from);
-                    pipe.sent(slot.bytes);
-                    if let Some(peer) = peer {
-                        let _ = send_packet(&*session, &mut packet, &peer).await;
-                    }
-                }
-            };
-            tokio::select! {
-                () = down => {}
-                () = up => {}
-            }
+struct ReconnectBackoff {
+    attempts: u32,
+    unit: Duration,
+    max: Duration,
+}
+
+impl ReconnectBackoff {
+    fn new(unit: Duration, max: Duration) -> Self {
+        Self {
+            attempts: 0,
+            unit,
+            max,
         }
     }
-    pipe.close();
+
+    fn reset(&mut self) {
+        self.attempts = 0;
+    }
+
+    fn next_with_sample(&mut self, sample: f64) -> (Duration, bool) {
+        self.attempts = self.attempts.saturating_add(1);
+        let sq = u64::from(self.attempts).saturating_mul(u64::from(self.attempts));
+        let unclamped = self
+            .unit
+            .saturating_mul(u32::try_from(sq).unwrap_or(u32::MAX));
+        let capped = unclamped >= self.max;
+        let base = unclamped.min(self.max);
+        let scale = sample.clamp(0.0, 1.0) + 0.5;
+        (Duration::from_secs_f64(base.as_secs_f64() * scale), capped)
+    }
+}
+
+async fn pump(pipe: &Pipe, carrier: Carrier, dial: &Dial) {
+    match carrier {
+        Carrier::Stream(stream) => pump_stream(pipe, stream).await,
+        Carrier::Packets(session) => {
+            pump_packets_with_backoff(
+                &dial.node,
+                pipe,
+                session,
+                ReconnectBackoff::new(RECONNECT_UNIT, RECONNECT_MAX),
+                rand::random::<f64>,
+                || dial.open_packets(pipe.gone.clone(), OPEN_TIMEOUT),
+            )
+            .await;
+        }
+    }
+    pipe.finish();
+}
+
+async fn pump_stream(pipe: &Pipe, stream: BoxStream) {
+    let (mut rd, mut wr) = stream.into_split();
+    let down = async {
+        while let Some(mut bytes) = pipe.empty_inbound().await {
+            let read = rd.read(&mut bytes).await;
+            match read {
+                Ok(len) if len > 0 => pipe.received(bytes, len, None),
+                _ => {
+                    pipe.unused(bytes);
+                    return pipe.ended(read.is_err());
+                }
+            }
+        }
+    };
+    let up = async {
+        while let Some(slot) = pipe.next_outbound().await {
+            let sent = wr
+                .write_all(slot.bytes.get(..slot.end).unwrap_or_default())
+                .await;
+            pipe.sent(slot.bytes);
+            if sent.is_err() {
+                return pipe.ended(true);
+            }
+        }
+        let _ = wr.shutdown().await;
+    };
+    // Bytes the node wrote before it closed still go out; reading stops at once.
+    let down = async {
+        tokio::select! {
+            () = down => {}
+            () = pipe.gone.cancelled() => {}
+        }
+    };
+    tokio::join!(down, up);
+}
+
+fn is_session_broken(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::BrokenPipe
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::UnexpectedEof
+            | io::ErrorKind::NotConnected
+    )
+}
+
+async fn pump_packets_once(pipe: &Pipe, session: Arc<dyn PacketSession>) -> bool {
+    let mut received_any = false;
+    {
+        let down = async {
+            while let Ok((packet, from)) = recv_packet(&*session).await {
+                let Address::Socket(from) = from else {
+                    continue;
+                };
+                let Some(mut bytes) = pipe.empty_inbound().await else {
+                    return;
+                };
+                let data = packet.as_slice();
+                if data.len() > bytes.len() {
+                    pipe.unused(bytes);
+                    continue;
+                }
+                let n = copy(&mut bytes, data);
+                pipe.received(bytes, n, Some(from));
+                received_any = true;
+            }
+        };
+        let up = async {
+            while let Some(slot) = pipe.next_outbound().await {
+                let mut packet = PacketBuf::take();
+                packet.extend_from_slice(slot.bytes.get(..slot.end).unwrap_or_default());
+                let peer = slot.peer.map(Address::from);
+                pipe.sent(slot.bytes);
+                if let Some(peer) = peer
+                    && let Err(err) = send_packet(&*session, &mut packet, &peer).await
+                    && is_session_broken(&err)
+                {
+                    return;
+                }
+            }
+        };
+        tokio::select! {
+            () = pipe.gone.cancelled() => {}
+            () = down => {}
+            () = up => {}
+        }
+    }
+    session.close();
+    received_any
+}
+
+async fn pump_packets_with_backoff<S, F, Fut>(
+    node: &str,
+    pipe: &Pipe,
+    initial: Arc<dyn PacketSession>,
+    mut backoff: ReconnectBackoff,
+    mut sample: S,
+    mut reconnect: F,
+) where
+    S: FnMut() -> f64,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = io::Result<Arc<dyn PacketSession>>>,
+{
+    let mut session = initial;
+    loop {
+        let received = pump_packets_once(pipe, session).await;
+        if pipe.gone.is_cancelled() {
+            break;
+        }
+        if received {
+            backoff.reset();
+        }
+        pipe.set_reconnecting(true);
+        tracing::warn!(
+            "[Tailscale]({node}) dialer-proxy UDP session ended; rebuilding association"
+        );
+        let mut warned_first = false;
+        let mut warned_cap = false;
+        session = loop {
+            let (delay, capped) = backoff.next_with_sample(sample());
+            if pipe
+                .gone
+                .run_until_cancelled(tokio::time::sleep(delay))
+                .await
+                .is_none()
+            {
+                return;
+            }
+            match pipe.gone.run_until_cancelled(reconnect()).await {
+                None => return,
+                Some(Ok(next)) => {
+                    pipe.set_reconnecting(false);
+                    tracing::info!("[Tailscale]({node}) dialer-proxy UDP association rebuilt");
+                    break next;
+                }
+                Some(Err(err)) => {
+                    if pipe.gone.is_cancelled() {
+                        return;
+                    }
+                    if !warned_first || (capped && !warned_cap) {
+                        warned_first = true;
+                        warned_cap |= capped;
+                        tracing::warn!(
+                            "[Tailscale]({node}) rebuilding dialer-proxy UDP association failed: {err}"
+                        );
+                    } else {
+                        tracing::debug!(
+                            "[Tailscale]({node}) rebuilding dialer-proxy UDP association failed: {err}"
+                        );
+                    }
+                }
+            }
+        };
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+
     use super::*;
 
     fn blocking<T: Send + 'static>(
@@ -575,9 +777,12 @@ mod tests {
     #[tokio::test]
     async fn a_stream_carries_both_ways_and_reports_its_end() {
         let (near, mut far) = tokio::io::duplex(1024);
-        let pipe = Arc::new(Pipe::new(false));
+        let pipe = Arc::new(Pipe::new(false, CancellationToken::new()));
         let pumped = pipe.clone();
-        tokio::spawn(async move { pump(&pumped, Carrier::Stream(Box::new(near))).await });
+        tokio::spawn(async move {
+            pump_stream(&pumped, Box::new(near)).await;
+            pumped.finish();
+        });
 
         let writer = pipe.clone();
         assert!(matches!(
@@ -608,7 +813,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_deadline_ends_a_waiting_read_and_closing_ends_the_rest() {
-        let pipe = Arc::new(Pipe::new(false));
+        let pipe = Arc::new(Pipe::new(false, CancellationToken::new()));
         pipe.deadline(
             true,
             false,
@@ -628,13 +833,13 @@ mod tests {
         let waiting = blocking(move || reader.read(&mut [0; 8], &mut []).0);
         tokio::time::sleep(Duration::from_millis(20)).await;
         pipe.close();
-        assert!(matches!(waiting.await.unwrap(), Io::Failed));
-        assert!(matches!(pipe.write(b"late", ""), Io::Failed));
+        assert!(matches!(waiting.await.unwrap(), Io::Closed));
+        assert!(matches!(pipe.write(b"late", ""), Io::Closed));
     }
 
     #[tokio::test]
     async fn packets_keep_their_peer_and_an_oversized_one_is_dropped() {
-        let pipe = Pipe::new(true);
+        let pipe = Pipe::new(true, CancellationToken::new());
         assert!(matches!(
             pipe.write(b"hello", "192.0.2.1:41641"),
             Io::Done(5)
@@ -661,5 +866,355 @@ mod tests {
         let (io, from_len) = pipe.read(&mut buf, &mut from);
         assert!(matches!(io, Io::Done(len) if len == n));
         assert_eq!(&from[..from_len], b"[2001:db8::1]:3478");
+    }
+
+    type Datagram = (Vec<u8>, Address);
+    type Inbound = io::Result<Datagram>;
+
+    struct MockPackets {
+        inbound: Mutex<tokio::sync::mpsc::UnboundedReceiver<Inbound>>,
+        outbound: tokio::sync::mpsc::UnboundedSender<Datagram>,
+        closed: AtomicBool,
+    }
+
+    impl MockPackets {
+        fn pair() -> (
+            Arc<Self>,
+            tokio::sync::mpsc::UnboundedSender<Inbound>,
+            tokio::sync::mpsc::UnboundedReceiver<Datagram>,
+        ) {
+            let (in_tx, in_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel();
+            let session = Arc::new(Self {
+                inbound: Mutex::new(in_rx),
+                outbound: out_tx,
+                closed: AtomicBool::new(false),
+            });
+            (session, in_tx, out_rx)
+        }
+    }
+
+    impl PacketSession for MockPackets {
+        fn poll_send(
+            &self,
+            _cx: &mut std::task::Context<'_>,
+            pkt: &mut PacketBuf,
+            dst: &Address,
+        ) -> std::task::Poll<io::Result<()>> {
+            if self.closed.load(Ordering::Relaxed) {
+                return std::task::Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
+            }
+            let _ = self.outbound.send((pkt.as_slice().to_vec(), dst.clone()));
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_recv(
+            &self,
+            cx: &mut std::task::Context<'_>,
+            out: &mut PacketBuf,
+        ) -> std::task::Poll<io::Result<Address>> {
+            match lock(&self.inbound).poll_recv(cx) {
+                std::task::Poll::Pending => std::task::Poll::Pending,
+                std::task::Poll::Ready(Some(Ok((data, from)))) => {
+                    out.clear();
+                    out.extend_from_slice(&data);
+                    std::task::Poll::Ready(Ok(from))
+                }
+                std::task::Poll::Ready(Some(Err(err))) => {
+                    self.closed.store(true, Ordering::Relaxed);
+                    std::task::Poll::Ready(Err(err))
+                }
+                std::task::Poll::Ready(None) => {
+                    self.closed.store(true, Ordering::Relaxed);
+                    std::task::Poll::Ready(Err(io::ErrorKind::ConnectionReset.into()))
+                }
+            }
+        }
+
+        fn close(&self) {
+            self.closed.store(true, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn reconnect_backoff_follows_tailscale_quadratic_curve_and_jitter() {
+        let mut b = ReconnectBackoff::new(RECONNECT_UNIT, RECONNECT_MAX);
+        assert_eq!(b.next_with_sample(0.5), (Duration::from_millis(10), false));
+        assert_eq!(b.next_with_sample(0.5), (Duration::from_millis(40), false));
+        assert_eq!(b.next_with_sample(0.5), (Duration::from_millis(90), false));
+        assert_eq!(b.next_with_sample(0.0), (Duration::from_millis(80), false));
+        assert_eq!(b.next_with_sample(1.0), (Duration::from_millis(375), false));
+        for _ in 0..20 {
+            let _ = b.next_with_sample(0.5);
+        }
+        assert_eq!(b.next_with_sample(0.5), (Duration::from_secs(5), true));
+        assert_eq!(b.next_with_sample(0.0), (Duration::from_millis(2500), true));
+        assert_eq!(b.next_with_sample(1.0), (Duration::from_millis(7500), true));
+        b.reset();
+        assert_eq!(b.next_with_sample(0.5), (Duration::from_millis(10), false));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_udp_carrier_rebuilds_its_session_with_backoff_and_keeps_the_pipe_open() {
+        struct CloseOnDrop(Arc<Pipe>);
+        impl Drop for CloseOnDrop {
+            fn drop(&mut self) {
+                self.0.close();
+            }
+        }
+
+        let (first, first_in, mut first_out) = MockPackets::pair();
+        let (second, second_in, mut second_out) = MockPackets::pair();
+        let pipe = Arc::new(Pipe::new(true, CancellationToken::new()));
+        let _guard = CloseOnDrop(pipe.clone());
+
+        let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::unbounded_channel();
+        let first_gate = Arc::new(Notify::new());
+        let first_gate_cb = first_gate.clone();
+        let second_slot = Arc::new(Mutex::new(Some(second as Arc<dyn PacketSession>)));
+        let attempt_count = Arc::new(AtomicI64::new(0));
+        let first_session = first.clone();
+        let pumped = pipe.clone();
+        let pump_task = tokio::spawn(async move {
+            pump_packets_with_backoff(
+                "ts",
+                &pumped,
+                first_session,
+                ReconnectBackoff::new(RECONNECT_UNIT, RECONNECT_MAX),
+                || 0.5,
+                move || {
+                    let attempt_tx = attempt_tx.clone();
+                    let first_gate = first_gate_cb.clone();
+                    let second_slot = second_slot.clone();
+                    let attempt_count = attempt_count.clone();
+                    async move {
+                        let count = attempt_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        let _ = attempt_tx.send(tokio::time::Instant::now());
+                        if count == 1 {
+                            first_gate.notified().await;
+                        }
+                        if count < 3 {
+                            Err(io::Error::from(io::ErrorKind::ConnectionRefused))
+                        } else {
+                            Ok(lock(&second_slot).take().unwrap())
+                        }
+                    }
+                },
+            )
+            .await;
+            pumped.finish();
+        });
+
+        let peer: SocketAddr = "192.0.2.1:41641".parse().unwrap();
+        assert!(matches!(
+            pipe.write(b"before", "192.0.2.1:41641"),
+            Io::Done(6)
+        ));
+        assert_eq!(first_out.recv().await.unwrap().0, b"before");
+        first_in
+            .send(Ok((b"in1".to_vec(), Address::Socket(peer))))
+            .unwrap();
+        let reader = pipe.clone();
+        let first_read = blocking(move || {
+            let (mut buf, mut from) = ([0; 16], [0; 64]);
+            let (io, fl) = reader.read(&mut buf, &mut from);
+            (io, buf, fl)
+        })
+        .await
+        .unwrap();
+        assert!(matches!(first_read.0, Io::Done(3)));
+        assert_eq!(&first_read.1[..3], b"in1");
+
+        let reader = pipe.clone();
+        let blocked_read = std::thread::spawn(move || {
+            let (mut buf, mut from) = ([0; 32], [0; 64]);
+            let (io, fl) = reader.read(&mut buf, &mut from);
+            (io, buf, fl, from)
+        });
+        let dropped_at = tokio::time::Instant::now();
+        first_in
+            .send(Err(io::Error::from(io::ErrorKind::ConnectionReset)))
+            .unwrap();
+        let t0 = attempt_rx.recv().await.unwrap();
+        assert!(lock(&pipe.state).reconnecting);
+        assert!(first.closed.load(Ordering::Relaxed));
+
+        let writer = pipe.clone();
+        std::thread::spawn(move || {
+            for _ in 0..PACKET_SLOTS + 8 {
+                assert!(matches!(
+                    writer.write(b"drop-during-rebuild", "192.0.2.1:41641"),
+                    Io::Done(19)
+                ));
+            }
+        })
+        .join()
+        .unwrap();
+
+        first_gate.notify_one();
+        let t1 = attempt_rx.recv().await.unwrap();
+        let t2 = attempt_rx.recv().await.unwrap();
+        assert_eq!(t0.duration_since(dropped_at), Duration::from_millis(10));
+        assert_eq!(t1.duration_since(t0), Duration::from_millis(40));
+        assert_eq!(t2.duration_since(t1), Duration::from_millis(90));
+
+        second_in
+            .send(Ok((b"after-rebuild".to_vec(), Address::Socket(peer))))
+            .unwrap();
+        let (io, buf, fl, from) = tokio::task::spawn_blocking(move || blocked_read.join().unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(io, Io::Done(13)));
+        assert_eq!(&buf[..13], b"after-rebuild");
+        assert_eq!(&from[..fl], b"192.0.2.1:41641");
+
+        assert!(matches!(
+            pipe.write(b"ping2", "192.0.2.1:41641"),
+            Io::Done(5)
+        ));
+        assert_eq!(second_out.recv().await.unwrap().0, b"ping2");
+
+        pipe.close();
+        pump_task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_a_udp_pipe_during_reconnect_backoff_ends_immediately() {
+        let (first, first_in, _first_out) = MockPackets::pair();
+        let pipe = Arc::new(Pipe::new(true, CancellationToken::new()));
+        let pumped = pipe.clone();
+        let pump_task = tokio::spawn(async move {
+            pump_packets_with_backoff(
+                "ts",
+                &pumped,
+                first,
+                ReconnectBackoff::new(Duration::from_secs(5), Duration::from_secs(5)),
+                || 0.5,
+                || async { Err(io::Error::from(io::ErrorKind::ConnectionRefused)) },
+            )
+            .await;
+            pumped.finish();
+        });
+
+        first_in
+            .send(Err(io::Error::from(io::ErrorKind::ConnectionReset)))
+            .unwrap();
+        while !lock(&pipe.state).reconnecting {
+            tokio::task::yield_now().await;
+        }
+        let closed_at = tokio::time::Instant::now();
+        pipe.close();
+        pump_task.await.unwrap();
+        assert_eq!(closed_at.elapsed(), Duration::ZERO);
+        assert!(matches!(pipe.read(&mut [0; 8], &mut [0; 32]).0, Io::Closed));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_a_udp_pipe_while_reconnecting_ends_immediately() {
+        let (first, first_in, _first_out) = MockPackets::pair();
+        let pipe = Arc::new(Pipe::new(true, CancellationToken::new()));
+        let started = Arc::new(Notify::new());
+        let started_cb = started.clone();
+        let pumped = pipe.clone();
+        let pump_task = tokio::spawn(async move {
+            pump_packets_with_backoff(
+                "ts",
+                &pumped,
+                first,
+                ReconnectBackoff::new(RECONNECT_UNIT, RECONNECT_MAX),
+                || 0.5,
+                move || {
+                    let started = started_cb.clone();
+                    async move {
+                        started.notify_one();
+                        std::future::pending::<io::Result<Arc<dyn PacketSession>>>().await
+                    }
+                },
+            )
+            .await;
+            pumped.finish();
+        });
+
+        first_in
+            .send(Err(io::Error::from(io::ErrorKind::ConnectionReset)))
+            .unwrap();
+        started.notified().await;
+        let closed_at = tokio::time::Instant::now();
+        pipe.close();
+        pump_task.await.unwrap();
+        assert_eq!(closed_at.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flappy_udp_session_backs_off_until_a_session_delivers_traffic() {
+        let (first, first_in, _first_out) = MockPackets::pair();
+        let (flappy, flappy_in, _flappy_out) = MockPackets::pair();
+        let (healthy, healthy_in, _healthy_out) = MockPackets::pair();
+        let (fourth, _fourth_in, _fourth_out) = MockPackets::pair();
+        let pipe = Arc::new(Pipe::new(true, CancellationToken::new()));
+
+        let (attempt_tx, mut attempt_rx) = tokio::sync::mpsc::unbounded_channel();
+        let sessions = Arc::new(Mutex::new(VecDeque::<Arc<dyn PacketSession>>::from([
+            flappy as Arc<dyn PacketSession>,
+            healthy as Arc<dyn PacketSession>,
+            fourth as Arc<dyn PacketSession>,
+        ])));
+        let pumped = pipe.clone();
+        let pump_task = tokio::spawn(async move {
+            pump_packets_with_backoff(
+                "ts",
+                &pumped,
+                first,
+                ReconnectBackoff::new(RECONNECT_UNIT, RECONNECT_MAX),
+                || 0.5,
+                move || {
+                    let attempt_tx = attempt_tx.clone();
+                    let sessions = sessions.clone();
+                    async move {
+                        let _ = attempt_tx.send(tokio::time::Instant::now());
+                        lock(&sessions)
+                            .pop_front()
+                            .ok_or_else(|| io::Error::from(io::ErrorKind::ConnectionRefused))
+                    }
+                },
+            )
+            .await;
+            pumped.finish();
+        });
+
+        let start = tokio::time::Instant::now();
+        flappy_in
+            .send(Err(io::Error::from(io::ErrorKind::ConnectionReset)))
+            .unwrap();
+        first_in
+            .send(Err(io::Error::from(io::ErrorKind::ConnectionReset)))
+            .unwrap();
+        let t0 = attempt_rx.recv().await.unwrap();
+        let t1 = attempt_rx.recv().await.unwrap();
+        assert_eq!(t0.duration_since(start), Duration::from_millis(10));
+        assert_eq!(t1.duration_since(t0), Duration::from_millis(40));
+
+        let peer: SocketAddr = "192.0.2.1:41641".parse().unwrap();
+        healthy_in
+            .send(Ok((b"ok".to_vec(), Address::Socket(peer))))
+            .unwrap();
+        let reader = pipe.clone();
+        let (io, _) = blocking(move || reader.read(&mut [0; 16], &mut [0; 64]))
+            .await
+            .unwrap();
+        assert!(matches!(io, Io::Done(2)));
+
+        let dropped_healthy = tokio::time::Instant::now();
+        healthy_in
+            .send(Err(io::Error::from(io::ErrorKind::ConnectionReset)))
+            .unwrap();
+        let t2 = attempt_rx.recv().await.unwrap();
+        assert_eq!(
+            t2.duration_since(dropped_healthy),
+            Duration::from_millis(10)
+        );
+
+        pipe.close();
+        pump_task.await.unwrap();
     }
 }

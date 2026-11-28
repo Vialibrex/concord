@@ -30,6 +30,7 @@ const EVENT_DEBUG: i32 = 6;
 const EVENT_FAILED: i32 = 7;
 const IO_TIMEOUT: i64 = -1;
 const IO_FAILED: i64 = -2;
+const IO_CLOSED: i64 = -3;
 const IO_READ: i32 = 1;
 const IO_WRITE: i32 = 2;
 
@@ -136,6 +137,7 @@ pub enum Io {
     Done(usize),
     TimedOut,
     Failed,
+    Closed,
 }
 
 impl Io {
@@ -144,6 +146,7 @@ impl Io {
             Io::Done(len) => i64::try_from(len).unwrap_or(IO_FAILED),
             Io::TimedOut => IO_TIMEOUT,
             Io::Failed => IO_FAILED,
+            Io::Closed => IO_CLOSED,
         }
     }
 }
@@ -776,5 +779,6 @@ mod tests {
         }
         assert_eq!(define("CTS_IO_TIMEOUT"), IO_TIMEOUT);
         assert_eq!(define("CTS_IO_FAILED"), IO_FAILED);
+        assert_eq!(define("CTS_IO_CLOSED"), IO_CLOSED);
     }
 }

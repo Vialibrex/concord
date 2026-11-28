@@ -21,6 +21,7 @@
 /* conn_read and conn_write results below zero. */
 #define CTS_IO_TIMEOUT -1
 #define CTS_IO_FAILED -2
+#define CTS_IO_CLOSED -3
 /* conn_deadline directions. */
 #define CTS_IO_READ 1
 #define CTS_IO_WRITE 2

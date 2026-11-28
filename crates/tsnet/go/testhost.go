@@ -46,20 +46,28 @@ static int32_t t_verbose(void *u) {
     cts_test_note();
     return 1;
 }
+extern int64_t cts_test_go_via_open(int32_t d, const char *a, size_t l, int64_t t);
+extern int64_t cts_test_go_via_read(int64_t c, uint8_t *b, size_t cap, char *f, size_t *fl);
+extern int64_t cts_test_go_via_write(int64_t c, const uint8_t *b, size_t l, const char *t, size_t tl);
+extern void cts_test_go_via_close(int64_t c);
+
 static int64_t t_open(void *u, int32_t d, const char *a, size_t l, int64_t t) {
     cts_test_note();
-    return 0;
+    return cts_test_go_via_open(d, a, l, t);
 }
 static int64_t t_read(void *u, int64_t c, uint8_t *b, size_t cap, char *f, size_t *fl) {
     cts_test_note();
-    return CTS_IO_FAILED;
+    return cts_test_go_via_read(c, b, cap, f, fl);
 }
 static int64_t t_write(void *u, int64_t c, const uint8_t *b, size_t l, const char *t, size_t tl) {
     cts_test_note();
-    return CTS_IO_FAILED;
+    return cts_test_go_via_write(c, b, l, t, tl);
 }
 static void t_deadline(void *u, int64_t c, int32_t d, int64_t t) { cts_test_note(); }
-static void t_close(void *u, int64_t c) { cts_test_note(); }
+static void t_close(void *u, int64_t c) {
+    cts_test_note();
+    cts_test_go_via_close(c);
+}
 
 static cts_callbacks cts_test_cb = {
     0, t_deliver, t_writable, t_prepare, t_event, t_dns, t_lookup, t_verbose,
@@ -121,3 +129,5 @@ func testQuery(h int64, id uint64, msg []byte) int32 {
 func testTun() *packetTun { return newPacketTun(C.cts_test_callbacks(), newGate()) }
 
 func testCallbacks() *C.cts_callbacks { return C.cts_test_callbacks() }
+
+func testVia() *via { return newVia(C.cts_test_callbacks(), newGate()) }

@@ -263,9 +263,11 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   level and its dials fail without it; in an app, the URL shows as the failed connection's reason. When the device's network changes or the TUN comes up,
   the node keeps its login and address, as in mihomo, and opens its UDP sockets again on the network now in use; its
   control and DERP connections carry on until they fail. A node without `hostname` presents its own name, where
-  mihomo presents the program's name, which in an app is the app process and tells the tailnet nothing. As in
-  mihomo, several nodes need their own `state-dir` each, and a `dialer-proxy` carries all of the node's own traffic:
-  control, DERP and WireGuard's UDP. A UDP packet over 4096 bytes on that path is dropped. A build that pins the
+  mihomo presents the program's name, which in an app is the app process and tells the tailnet nothing. Several nodes
+  need their own `state-dir` each, as in mihomo. A `dialer-proxy` carries all of the node's own traffic — control,
+  DERP and WireGuard's UDP, rebuilding a dropped UDP association with backoff — including through outbounds such as
+  SOCKS5, Shadowsocks, Trojan, VMess, VLESS, Hysteria2 and TUIC, where mihomo fails to open a UDP listener. A UDP
+  packet over 4096 bytes on that path is dropped. A build that pins the
   library's SHA-256 refuses any other library, so a library swapped in beside a core started with privileges does
   not run in it.
 - **mieru:** both transports work against mihomo's mieru listener; the UDP transport with a `dialer-proxy` is

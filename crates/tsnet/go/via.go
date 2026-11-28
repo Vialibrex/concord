@@ -89,6 +89,8 @@ func outcome(got C.int64_t) (int, error) {
 		return int(got), nil
 	case got == C.CTS_IO_TIMEOUT:
 		return 0, os.ErrDeadlineExceeded
+	case got == C.CTS_IO_CLOSED:
+		return 0, net.ErrClosed
 	default:
 		return 0, errViaFailed
 	}
@@ -102,6 +104,9 @@ func (e viaEnd) read(p []byte, from []byte) (int, int, error) {
 	fromLen := C.size_t(len(from))
 	got := C.cts_call_conn_read(e.v.cb, e.id, bytesPtr(p), C.size_t(len(p)),
 		(*C.char)(unsafe.Pointer(unsafe.SliceData(from))), &fromLen)
+	if got < 0 && e.closed.Load() {
+		return 0, 0, net.ErrClosed
+	}
 	n, err := outcome(got)
 	return n, int(fromLen), err
 }
@@ -112,7 +117,11 @@ func (e viaEnd) write(p []byte, to string) (int, error) {
 	}
 	defer e.v.gate.leave()
 	tp, tl := cstr(to)
-	return outcome(C.cts_call_conn_write(e.v.cb, e.id, bytesPtr(p), C.size_t(len(p)), tp, tl))
+	got := C.cts_call_conn_write(e.v.cb, e.id, bytesPtr(p), C.size_t(len(p)), tp, tl)
+	if got < 0 && e.closed.Load() {
+		return 0, net.ErrClosed
+	}
+	return outcome(got)
 }
 
 func (e viaEnd) deadline(dir C.int32_t, t time.Time) error {
