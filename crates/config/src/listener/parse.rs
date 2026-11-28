@@ -4,6 +4,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use indexmap::IndexMap;
 use serde_json::Value;
 
+mod masquerade;
+
+use self::masquerade::masquerade;
 use super::tunnel::{bind_addr, parse_networks, parse_tunnel};
 use super::*;
 use crate::Map;
@@ -724,9 +727,8 @@ fn tuic_server(
     })
 }
 
-/// `realm-opts` and the Gecko obfuscation wait for a later batch; `masquerade` is answered
-/// with 404 as when it is unset, and `max-idle-time`, which mihomo reads but never applies,
-/// is not read.
+/// `realm-opts` and the Gecko obfuscation wait for a later batch, and `max-idle-time`, which
+/// mihomo reads but never applies, is not read.
 fn hysteria2_server(f: &mut Fields<'_>) -> R<Hysteria2Server> {
     if asks_for(f, "realm-opts") {
         return skip("option 'realm-opts' is not served yet");
@@ -743,7 +745,7 @@ fn hysteria2_server(f: &mut Fields<'_>) -> R<Hysteria2Server> {
         "gecko" => return skip("obfs 'gecko' is not served yet"),
         other => return skip(format!("unknown obfs type: {other}")),
     };
-    f.ignore("masquerade", "answered with 404 until masquerade is served");
+    let masquerade = masquerade(&f.string("masquerade")?)?;
     let tls = quic_tls(f)?;
     let mux = mux_option(f)?;
     Ok(Hysteria2Server {
@@ -761,6 +763,7 @@ fn hysteria2_server(f: &mut Fields<'_>) -> R<Hysteria2Server> {
         max_stream_window: f.u64("max-stream-receive-window")?,
         initial_conn_window: f.u64("initial-connection-receive-window")?,
         max_conn_window: f.u64("max-connection-receive-window")?,
+        masquerade,
         mux,
     })
 }

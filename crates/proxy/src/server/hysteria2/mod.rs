@@ -3,6 +3,7 @@
 //! datagrams are served once a connection has authenticated.
 
 mod dispatch;
+mod masquerade;
 #[cfg(test)]
 mod tests;
 
@@ -19,18 +20,19 @@ use bytes::Bytes;
 use concord_common::serve::{Current, EndpointService, InboundCx, Peer, ServeFuture};
 use concord_common::{Address, InboundKind, PacketBuf, PacketSession};
 use concord_config::listener::Hysteria2Server;
+use concord_platform::HomeDir;
 use concord_quic::{
     BbrProfile, Brutal, CappedFrame, Inbox, ObfsSpec, QuicStream, Sessions, SwitchFactory,
     bbr_factory, bbr_window,
 };
-use h3::server::RequestStream;
 use quinn::congestion::ControllerFactory;
 use quinn::crypto::rustls::QuicServerConfig;
 use quinn::{Incoming, VarInt};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Sleep;
 
-use self::dispatch::{Bidi, Dispatched, ForH3, Route, route};
+use self::dispatch::{Dispatched, ForH3, Route, route};
+use self::masquerade::{H3Stream, Masquerade};
 use super::certs::ServerCerts;
 use super::mux::{Mux, MuxServe};
 use super::quic::{self, QuicServer};
@@ -66,11 +68,16 @@ pub(super) struct Hysteria2 {
     obfs: ObfsSpec,
     socket_key: u64,
     mux: Arc<MuxServe>,
+    masquerade: Masquerade,
     _certs: ServerCerts,
 }
 
 impl Hysteria2 {
-    pub(super) fn new(server: &Hysteria2Server, tls: TlsSetup) -> Result<Self, ServerError> {
+    pub(super) fn new(
+        server: &Hysteria2Server,
+        tls: TlsSetup,
+        home: &Arc<HomeDir>,
+    ) -> Result<Self, ServerError> {
         let crypto = quic::crypto(&tls, &server.alpn, false)?;
         let mut key = DefaultHasher::new();
         server.salamander.hash(&mut key);
@@ -108,6 +115,7 @@ impl Hysteria2 {
             },
             socket_key: key.finish(),
             mux: MuxServe::new(&server.mux),
+            masquerade: Masquerade::new(server.masquerade.as_ref(), home)?,
             _certs: tls.certs,
         })
     }
@@ -244,7 +252,7 @@ impl Conn {
                 let request = async move {
                     let resolved = bounded(async { resolver.resolve_request().await.ok() }).await;
                     if let Some((request, stream)) = resolved {
-                        conn.answer(&request, stream).await;
+                        conn.answer(request, stream).await;
                     }
                 };
                 if self.user().is_some() {
@@ -257,45 +265,41 @@ impl Conn {
         self.conn.close(VarInt::from_u32(0), b"");
     }
 
-    async fn answer(
-        &self,
-        request: &http::Request<()>,
-        mut stream: RequestStream<Bidi<Bytes>, Bytes>,
-    ) {
+    /// The masquerade's answer ends with the connection, as quic-go's request context does
+    /// (`http3/server_conn.go:191-193`), so what it holds of the tunnel goes with it.
+    async fn answer(&self, request: http::Request<()>, mut stream: H3Stream) {
         let asks_auth = request.method() == http::Method::POST
             && request.uri().authority().map(|host| host.as_str()) == Some("hysteria")
             && request.uri().path() == "/auth";
         let rx = if asks_auth {
-            self.authenticate(request)
+            self.authenticate(&request)
         } else {
             None
         };
-        let (response, body) = match rx {
-            Some(rx) => (
-                http::Response::builder()
-                    .status(AUTH_OK)
-                    .header("Hysteria-UDP", "true")
-                    .header("Hysteria-CC-RX", rx)
-                    .header("Hysteria-Padding", padding(256, 2048)),
-                None,
-            ),
-            None => (
-                http::Response::builder()
-                    .status(http::StatusCode::NOT_FOUND)
-                    .header("Content-Type", "text/plain; charset=utf-8")
-                    .header("X-Content-Type-Options", "nosniff"),
-                Some(Bytes::from_static(b"404 page not found\n")),
-            ),
-        };
-        let Ok(response) = response.body(()) else {
+        let Some(rx) = rx else {
+            let answer = self
+                .server
+                .masquerade
+                .answer(request, stream, self.cx.clone());
+            tokio::select! {
+                () = answer => {}
+                _ = self.conn.closed() => {}
+            }
             return;
         };
+        let response = http::Response::builder()
+            .status(AUTH_OK)
+            .header("Hysteria-UDP", "true")
+            .header("Hysteria-CC-RX", rx)
+            .header("Hysteria-Padding", padding(256, 2048));
+        let Ok(mut response) = response.body(()) else {
+            return;
+        };
+        response
+            .headers_mut()
+            .insert(http::header::CONTENT_LENGTH, http::HeaderValue::from(0));
+        masquerade::stamp_date(response.headers_mut());
         if stream.send_response(response).await.is_err() {
-            return;
-        }
-        if let Some(body) = body
-            && stream.send_data(body).await.is_err()
-        {
             return;
         }
         let _ = stream.finish().await;

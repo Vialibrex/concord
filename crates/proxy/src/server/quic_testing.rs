@@ -5,13 +5,14 @@
 )]
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use concord_common::packet::UdpPayload;
 use concord_common::serve::{Current, EndpointService, InboundCx};
 use concord_common::{
-    Address, BoxStream, ClockOffset, FlowHandler, FlowMeta, Tasks, UdpFlow, UdpReply,
+    Address, BoxStream, ClockOffset, FlowHandler, FlowMeta, InboundKind, Tasks, UdpFlow, UdpReply,
 };
 use concord_config::listener::{ClientAuth, ServerTls};
 use concord_platform::HomeDir;
@@ -48,10 +49,12 @@ pub(super) fn tls_setup() -> TlsSetup {
 
 /// The TCP flows the endpoint opened, their destination and `IN-USER`, and the connection
 /// key of each datagram it handed on. It keeps each reply, as the tunnel's NAT does for its
-/// idle time.
+/// idle time. A flow to an IP is connected there once `forward` is set, and dropped before.
 #[derive(Default)]
 pub(super) struct Flows {
     opened: Mutex<Vec<(Address, Option<Arc<str>>)>>,
+    kinds: Mutex<Vec<InboundKind>>,
+    forward: AtomicBool,
     datagrams: Mutex<Vec<u64>>,
     replies: Mutex<Vec<Arc<dyn UdpReply>>>,
     changed: Notify,
@@ -60,6 +63,14 @@ pub(super) struct Flows {
 impl Flows {
     pub(super) fn opened(&self) -> Vec<(Address, Option<Arc<str>>)> {
         lock(&self.opened).clone()
+    }
+
+    pub(super) fn kinds(&self) -> Vec<InboundKind> {
+        lock(&self.kinds).clone()
+    }
+
+    pub(super) fn forward(&self) {
+        self.forward.store(true, Ordering::Relaxed);
     }
 
     pub(super) async fn wait_for(&self, count: usize) -> Vec<(Address, Option<Arc<str>>)> {
@@ -88,7 +99,16 @@ impl Flows {
 }
 
 impl FlowHandler for Flows {
-    fn handle_tcp(&self, meta: FlowMeta, _stream: BoxStream) {
+    fn handle_tcp(&self, meta: FlowMeta, mut stream: BoxStream) {
+        if let (true, Address::Socket(to)) = (self.forward.load(Ordering::Relaxed), &meta.dst) {
+            let to = *to;
+            tokio::spawn(async move {
+                if let Ok(mut far) = tokio::net::TcpStream::connect(to).await {
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut far).await;
+                }
+            });
+        }
+        lock(&self.kinds).push(meta.inbound.kind);
         lock(&self.opened).push((meta.dst, meta.inbound.user));
         self.changed.notify_waiters();
     }

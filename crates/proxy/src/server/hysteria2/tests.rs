@@ -4,6 +4,13 @@ use super::super::quic_testing::{Running, close_and_drain, tls_setup, unnamed_tl
 use super::*;
 use crate::hysteria2::wire::{UdpHeader, put_udp_header, put_varint, tcp_request};
 
+mod masquerade;
+
+/// A server without a masquerade directory reads nothing from its home.
+fn home() -> Arc<HomeDir> {
+    Arc::new(HomeDir::new(std::env::temp_dir()))
+}
+
 fn config(users: &[(&str, &str)]) -> Hysteria2Server {
     Hysteria2Server {
         users: users
@@ -24,11 +31,12 @@ fn config(users: &[(&str, &str)]) -> Hysteria2Server {
         initial_conn_window: 0,
         max_conn_window: 0,
         mux: Default::default(),
+        masquerade: None,
     }
 }
 
 fn server(users: &[(&str, &str)]) -> Arc<Hysteria2> {
-    Arc::new(Hysteria2::new(&config(users), tls_setup()).unwrap())
+    Arc::new(Hysteria2::new(&config(users), tls_setup(), &home()).unwrap())
 }
 
 type Requests = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
@@ -185,7 +193,7 @@ fn the_client_rate_picks_brutal_or_bbr_as_sing_quic_does() {
         config.up = up.into();
         config.down = down.into();
         config.ignore_client_bandwidth = ignore;
-        let server = Hysteria2::new(&config, tls_setup()).unwrap();
+        let server = Hysteria2::new(&config, tls_setup(), &home()).unwrap();
         assert_eq!(
             server.pace(rx),
             pace,

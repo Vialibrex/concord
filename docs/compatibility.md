@@ -40,6 +40,14 @@ mihomo; a key that only uses one, such as `copy: *domain`, is still unknown.
 | UDP routing | The first packet from a source decides the route for all its destinations | Each destination is routed by the rules; flows that reach one outbound share its session, so the external mapping stays endpoint-independent. Single-destination protocols such as plain VMess are the exception |
 | Streams a client holds open on a `tuic` or `hysteria2` listener | No limit | 1024 in each direction at once; only streams open at the same time count, so a client that closes its streams opens any number over time |
 | The certificate a `tuic` or `hysteria2` listener with neither `certificate` nor `private-key` signs for itself | A new one each time the listener is built, so a reload changes it | Kept across reloads under the listener's name, so a client that pinned it still connects |
+| A name under a `hysteria2` `masquerade` directory that passes through a symlink, or a directory outside the home directory | Served: Go's `http.Dir` follows symlinks and opens any directory | 404 for the name, as a provider path through a symlink is refused; a directory outside the home directory skips the listener |
+| A name like `CON.txt` under a `hysteria2` `masquerade` directory on Windows | Served on Windows 11, where it names a file, and refused before it | 404 on every Windows, as a name without the extension is in both |
+| A `hysteria2` `masquerade` directory asked for several byte ranges at once | A 206 `multipart/byteranges` answer | The whole file with 200, as when the ranges overlap the file; a single range is still answered with 206 |
+| The `Content-Type` of a file under a `hysteria2` `masquerade` directory | From the extension, by Go's built-in table and the system's `mime.types`, else sniffed by `http.DetectContentType` | From the extension by Go 1.27.3's built-in table only, else sniffed for HTML, XML, PDF, PNG, JPEG, GIF, WebP, gzip and zip, then plain text or `application/octet-stream` |
+| A `hysteria2` `masquerade` reverse proxy's connections | Kept idle and reused, up to 100 for 90 s | A new connection for each request |
+| Requests on a `hysteria2` connection that has not authenticated | Answered at the same time | Answered one at a time, so a client that has not authenticated holds one header block and one masquerade request at most |
+| A `CONNECT` to a `hysteria2` `masquerade` reverse proxy | Forwarded upstream as `CONNECT /`, and the upstream's answer relayed | 502 without dialling: a request that has not authenticated opens nothing upstream, and a browser sends no `CONNECT` to the site |
+| A `hysteria2` `masquerade` reverse proxy's protocol to the upstream | HTTP/2 where an `https://` upstream offers it (`ForceAttemptHTTP2`), else HTTP/1.1 | HTTP/1.1 only: a prober does not see the upstream's protocol, and an upstream that speaks only HTTP/2 answers 502 |
 | `GEOIP` | Reads the mmdb or `GeoIP.dat` | Reads the mmdb only; `geodata-mode` and `geox-url.geoip` are ignored, and a code that only a custom `GeoIP.dat` held does not match. `GEOIP,!cn` negates against the mmdb |
 | `IP-ASN` and `SRC-IP-ASN` without `ASN.mmdb` | The apply downloads the file and fails if the download does | The apply goes ahead; the rules match nothing until the file, fetched in the background and retried, loads, and a `NOT` around one does not turn that into a match |
 | `dns.fake-ip-filter` left out | `dns.msftnsci.com`, `www.msftnsci.com` and `www.msftconnecttest.com`; the first two misspell the domain of Windows' connectivity check, so they never match it | `dns.msftncsi.com`, `www.msftncsi.com` and `www.msftconnecttest.com`, so the check gets a real address |
@@ -207,10 +215,12 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   above 0 cannot connect; mihomo also takes the legacy header. A Trojan request with an unknown key is closed, with no
   fallback, and one with the trojan-go mux command (`0x7f`) is closed too. A Shadowsocks server takes the ciphers its
   node does: `aes-192-gcm`, which mihomo's server also takes, is not served. A `hysteria2` listener serves
-  Salamander but not Gecko obfuscation nor `realm-opts`, which skip it, and answers every request other than a
-  client's authentication with a 404, so `masquerade` is ignored with a warning. A
-  certificate, key or client CA is the PEM text itself or a file inside the home directory. A listener that cannot
-  bind is logged and retried on the next reload; unlike the ports, it is not reported to the host.
+  Salamander but not Gecko obfuscation nor `realm-opts`, which skip it. A request other than a client's authentication
+  gets the `masquerade`, as in mihomo: a 404 without one, the files under the directory of a `file://` URL inside the
+  home directory, or a reverse proxy to an `http://` or `https://` URL, dialled through the rules as mihomo's inner
+  connections are; another scheme skips the listener. A certificate, key or client CA is the PEM text itself or a file
+  inside the home directory. A listener that cannot bind is logged and retried on the next reload; unlike the ports,
+  it is not reported to the host.
 - **MASQUE:** Cloudflare WARP CONNECT-IP over H3 and H2 capsules, and TCP-only `h3-l4proxy`, with
   ECDSA client authentication and endpoint SPKI pinning. H3 IP advertises the 10 MiB header limit and both
   standard and legacy datagram settings; L4 advertises only the header limit. Grease and disabled extension

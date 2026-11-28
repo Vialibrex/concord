@@ -147,7 +147,7 @@ pub fn build(kind: &ListenerKind, env: &ServerEnv<'_>) -> Result<Option<Protocol
         ListenerKind::Hysteria2(server) => {
             let kept = env.carried.of(env.keep);
             let tls = TlsSetup::new(&server.tls, Some(&kept.self_signed), env)?;
-            let service = hysteria2::Hysteria2::new(server, tls)?;
+            let service = hysteria2::Hysteria2::new(server, tls, env.home)?;
             return Ok(Some(Protocol {
                 kind: InboundKind::Hysteria2,
                 stream: None,

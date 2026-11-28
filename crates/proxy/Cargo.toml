@@ -9,7 +9,7 @@ description = "Outbound proxy protocols for Concord"
 repository.workspace = true
 
 [features]
-server = []
+server = ["dep:flate2", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:percent-encoding"]
 
 [lib]
 doctest = false
@@ -24,7 +24,7 @@ concord-transport = { workspace = true }
 concord-quic = { workspace = true }
 concord-netstack = { workspace = true }
 concord-tsnet = { workspace = true }
-tokio = { workspace = true, features = ["net", "time", "io-util", "macros", "rt", "sync"] }
+tokio = { workspace = true, features = ["fs", "net", "time", "io-util", "macros", "rt", "sync"] }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
@@ -38,6 +38,11 @@ h3-quinn = { workspace = true }
 rustls = { workspace = true }
 http = { workspace = true }
 h2 = { workspace = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+percent-encoding = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
 rcgen = { workspace = true }
 x509-parser = { workspace = true }
 time = { workspace = true }

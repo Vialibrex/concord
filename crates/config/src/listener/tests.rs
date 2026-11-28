@@ -400,8 +400,12 @@ fn a_hysteria2_listener_reads_users_rates_obfs_and_windows() {
         (0, 1024)
     );
     assert!(server.tls.certificate.is_empty() && server.tls.private_key.is_empty());
+    assert_eq!(
+        server.masquerade,
+        Some(Masquerade::Proxy("https://example.com".parse().unwrap()))
+    );
     assert!(
-        report
+        !report
             .warnings
             .iter()
             .any(|w| w.message.contains("masquerade")),
@@ -558,4 +562,46 @@ fn mux_option_sets_padding_and_an_enabled_brutal() {
             "{reason}"
         );
     }
+}
+
+#[test]
+fn a_hysteria2_masquerade_takes_a_file_path_or_an_http_url_and_nothing_else() {
+    let masquerade = |url: &str| {
+        let (defs, report) = load(json!([{
+            "name": "in", "type": "hysteria2", "port": 443, "masquerade": url,
+        }]));
+        let [def] = defs.listeners.as_slice() else {
+            panic!("one listener: {report:?}")
+        };
+        let ListenerKind::Hysteria2(server) = &def.kind else {
+            panic!("hysteria2")
+        };
+        server.masquerade.clone()
+    };
+    assert_eq!(
+        masquerade("file:///srv/www"),
+        Some(Masquerade::File("/srv/www".into()))
+    );
+    assert_eq!(
+        masquerade("file://host/www"),
+        Some(Masquerade::File("/www".into()))
+    );
+    assert_eq!(
+        masquerade("file:///my%20site?x#y"),
+        Some(Masquerade::File("/my site".into()))
+    );
+    assert_eq!(
+        masquerade("http://127.0.0.1:8080/base?x=1"),
+        Some(Masquerade::Proxy(
+            "http://127.0.0.1:8080/base?x=1".parse().unwrap()
+        ))
+    );
+    assert_eq!(masquerade(""), None);
+    let refused = |url: &str| {
+        skipped(json!({"name": "in", "type": "hysteria2", "port": 443, "masquerade": url}))
+    };
+    assert!(refused("ftp://example.com").contains("unknown masquerade URL scheme: ftp"));
+    assert!(refused("example.com").contains("unknown masquerade URL scheme"));
+    assert!(refused("https://").contains("parse masquerade URL"));
+    assert!(refused("file:site").contains("names no directory"));
 }

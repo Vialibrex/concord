@@ -270,7 +270,18 @@ pub struct Hysteria2Server {
     pub max_stream_window: u64,
     pub initial_conn_window: u64,
     pub max_conn_window: u64,
+    pub masquerade: Option<Masquerade>,
     pub mux: MuxServer,
+}
+
+/// What a hysteria2 listener answers a request that is not a client's authentication
+/// with, in place of the 404 (`listener/sing_hysteria2/server.go:120-157`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Masquerade {
+    /// The files under this directory, as Go's `http.FileServer`.
+    File(String),
+    /// A reverse proxy to this `http` or `https` URL.
+    Proxy(http::Uri),
 }
 
 /// Everything a profile opens besides the fixed ports of the general section.
