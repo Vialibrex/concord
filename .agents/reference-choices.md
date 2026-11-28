@@ -471,10 +471,11 @@ Concord already takes these from the references; keep them unless the reference 
   16,406-byte TLS 1.3 records grow `cap` to 40,960 bytes (five 8 KiB pages), leaving 8,148 bytes after two records so
   steady-state `read` calls request and return 32,812 bytes (Linux arm64 `trojan-tls` `tcp-multi`, 8 flows: 2,976 of
   3,027 `read` calls request 32,812 B, `bpftrace` mean 32,697 B requested and 32,435 B returned, 30.75 reads/MB). A
-  node's native record engine (`crates/tls/src/record.rs` (`Recv::poll_fill`)) reads an empty buffer up to
-  `COPY_BUFFER_SIZE` (32,768 B) and completes a partial record plus up to 32,768 B of the next in one `readv`, giving
-  the same 32,812-byte steady-state read (`44 + 32,768` B; same workload: 7,491 of 7,491 `readv` calls return
-  32,812 B, `bpftrace` mean 32,999 B, 30.61 reads/MB). Go's `Conn.Read` (`crypto/tls/conn.go:1391-1418`) hands the
+  node's native record engine (`crates/tls/src/record/recv.rs` (`Recv::poll_fill`)) reads an empty buffer up to
+  `COPY_BUFFER_SIZE` (32,768 B), completes a partial record or partial 5-byte header that fits within
+  `COPY_BUFFER_SIZE` in the same unaligned pooled block up to 32,768 B, and completes a partial record straddling
+  `COPY_BUFFER_SIZE` plus up to 32,768 B of the next in one `readv`, giving the same 32,812-byte steady-state read
+  (`44 + 32,768` B; same workload: 7,491 of 7,491 `readv` calls return 32,812 B, `bpftrace` mean 32,999 B, 30.61 reads/MB). Go's `Conn.Read` (`crypto/tls/conn.go:1391-1418`) hands the
   caller at most one record per call from `rawInput`, whereas `Recv::poll_read` fills the caller's 32 KiB buffer from
   ready records; nothing on the wire changes (`crates/tls/src/tests/whole.rs`). Against Concord's earlier one-record
   buffered-rustls reads (~17 kB), two-record reads ended 8-flow starvation under TUN (Linux arm64, six rounds:
@@ -907,7 +908,7 @@ MiB, GiB, ns, µs, ms, s, min, h), or as the source text in backticks; `cfg` var
 | `tls::reality::handshake::MAX_HANDSHAKE` | 65536 | B | mihomo's utls maxHandshake = 65536 (metacubex/utls v1.8.8 `common.go:68`), the per-message bound in mihomo's REALITY client; same value. |
 | `tls::record::MAX_HANDSHAKE_MESSAGE` | 65536 | B | mihomo's TLS maxHandshake = 65536 (metacubex/tls v0.1.9 `common.go:66`), as Go crypto/tls `common.go:71` that sing-box runs: the bound on a post-handshake message; same value. |
 | `tls::record::MAX_USELESS_RECORDS` | 16 | B | Consecutive non-advancing records before failing; Go `crypto/tls/common.go:73` maxUselessRecords = 16. |
-| `tls::record::MAX_WRITE` | 114688 | C | Plaintext one write seals = (MAX_WRITE_SLICES - 1) x 16 KiB records (`crates/tls/src/record.rs::MAX_WRITE_SLICES`): the sealed records plus a KeyUpdate answer leave in one writev, one slice each. Go seals the whole caller buffer before writing (crypto/tls `conn.go::writeRecordLocked`), so there is no Go cap to take. |
+| `tls::record::MAX_WRITE` | 114688 | C | Plaintext one write seals = (MAX_WRITE_SLICES - 1) x 16 KiB records (`crates/tls/src/record/mod.rs::MAX_WRITE_SLICES`): the sealed records plus a KeyUpdate answer leave in one writev, one slice each. Go seals the whole caller buffer before writing (crypto/tls `conn.go::writeRecordLocked`), so there is no Go cap to take. |
 | `tls::record::MAX_WRITE_SLICES` | 8 | C | Linux UIO_FASTIOV = 8 (`include/uapi/linux/uio.h:26`, as `net::relay::TCP_BATCH_BUFFERS` reads it): a writev of up to 8 slices imports them on the stack, so sealed records go out 8 per call. |
 | `tls::rustls_backend::HANDSHAKE_READ` | 18437 | A | Initial handshake input buffer = one maximal TLS 1.2 record on the wire, RFC 5246 §6.2.3 (2^14 + 2048) plus the 5-byte header; Go `crypto/tls/common.go:68` maxCiphertext = 16384 + 2048. |
 | `tls::rustls_backend::MAX_HANDSHAKE_BUFFER` | 83976 | C | rustls joins a split handshake message in the input buffer and refuses one above MAX_HANDSHAKE_SIZE = 0xffff (rustls 0.23.46 `src/msgs/deframer/handshake.rs:376`): the buffer holds that message, its 4-byte header and the record being read, `crates/tls/src/rustls_backend.rs::HANDSHAKE_READ` = 18437. |

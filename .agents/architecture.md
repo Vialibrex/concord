@@ -189,7 +189,7 @@ count over the first two IV bytes (`proxy/src/vmess/crypto.rs`), and REALITY XOR
 eight (`tls/src/reality/schedule.rs`); each follows its protocol, so one helper would need a mode per caller.
 `net::relay`'s `Half` asks its streams for `tcp` and `direct` at each use rather than once per turn:
 `PeekedStream::tcp` and `direct` (`common/src/stream.rs`) turn from `None` to `Some` once the replayed head has been
-read inside the same `Half::poll` loop, and `RecordIo`'s `RecordReader::tcp` (`tls/src/record.rs`) follows record
+read inside the same `Half::poll` loop, and `RecordIo`'s `RecordReader::tcp` (`tls/src/record/recv.rs`) follows record
 alignment, so a snapshot would hold back the switch to splice or direct I/O by a turn.
 
 `proxy/src/lazy.rs` keeps two state machines on purpose. `HeadFirst` holds one enum for its own header (held,

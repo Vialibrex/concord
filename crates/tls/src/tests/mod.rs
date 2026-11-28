@@ -9,6 +9,7 @@ mod policy;
 mod probe;
 mod reality;
 mod reality_server;
+mod record;
 mod split;
 mod support;
 mod whole;
