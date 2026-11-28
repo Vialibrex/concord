@@ -1657,3 +1657,96 @@ async fn a_relay_of_streams_that_never_block_yields_after_a_tokio_budget() {
         "{seen} reads ran before the other task"
     );
 }
+
+#[tokio::test]
+async fn peeked_stream_reclassifies_within_one_half_poll_for_direct_and_tcp() {
+    use crate::test_support::loopback_pair as pair;
+
+    let (mut target, mut receiver) = pair().await;
+    let head = b"peeked-head-".to_vec();
+    let tail = b"direct-body".to_vec();
+    let stack = DirectOnly {
+        outgoing: tail.clone(),
+        sent: 0,
+        received: std::sync::Arc::default(),
+        shut: std::sync::Arc::default(),
+    };
+    let mut reader = concord_common::PeekedStream::new(head.clone(), stack);
+    let mut half = Half::new();
+    let counted = std::cell::Cell::new(0u64);
+    let note = |bytes| counted.set(counted.get() + bytes);
+
+    let first = poll_fn(|cx| half.poll(cx, &mut reader, &mut target, &note))
+        .await
+        .unwrap();
+    assert!(matches!(first, Step::Progress));
+    assert!(
+        half.queued.is_empty(),
+        "once the peeked head drains, the same Half::poll must reclassify as Direct->Tcp instead of batch-queueing"
+    );
+    assert!(reader.direct().is_some());
+
+    let receive = async {
+        let mut got = Vec::new();
+        receiver.read_to_end(&mut got).await.unwrap();
+        got
+    };
+    let finish = async {
+        loop {
+            let step = poll_fn(|cx| half.poll(cx, &mut reader, &mut target, &note))
+                .await
+                .unwrap();
+            if matches!(step, Step::Finished) {
+                break;
+            }
+        }
+    };
+    let (got, ()) = tokio::join!(receive, finish);
+    let expected = [head.as_slice(), tail.as_slice()].concat();
+    assert_eq!(got, expected);
+    assert_eq!(counted.get(), expected.len() as u64);
+
+    let (mut sender, source) = pair().await;
+    let (mut target, mut receiver) = pair().await;
+    let mut reader = concord_common::PeekedStream::new(head.clone(), source);
+    let mut half = Half::new();
+    let counted = std::cell::Cell::new(0u64);
+    let note = |bytes| counted.set(counted.get() + bytes);
+
+    let first = poll_fn(|cx| half.poll(cx, &mut reader, &mut target, &note))
+        .await
+        .unwrap();
+    assert!(matches!(first, Step::Progress));
+    assert!(
+        half.queued.is_empty(),
+        "once the peeked head drains, the same Half::poll must reclassify as Tcp->Tcp instead of batch-queueing"
+    );
+    assert!(reader.tcp().is_some());
+
+    let tcp_tail = b"tcp-body-after-peek".to_vec();
+    let send = async {
+        sender.write_all(&tcp_tail).await.unwrap();
+        sender.shutdown().await.unwrap();
+    };
+    let receive = async {
+        let mut got = Vec::new();
+        receiver.read_to_end(&mut got).await.unwrap();
+        got
+    };
+    let finish = async {
+        loop {
+            let step = poll_fn(|cx| half.poll(cx, &mut reader, &mut target, &note))
+                .await
+                .unwrap();
+            if matches!(step, Step::Finished) {
+                break;
+            }
+        }
+    };
+    let ((), got, ()) = tokio::join!(send, receive, finish);
+    let expected = [head.as_slice(), tcp_tail.as_slice()].concat();
+    assert_eq!(got, expected);
+    assert_eq!(counted.get(), expected.len() as u64);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    assert!(matches!(half.bulk, Bulk::Pipe(_)));
+}

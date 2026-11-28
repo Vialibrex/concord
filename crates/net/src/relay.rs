@@ -67,6 +67,33 @@ enum Moved {
     Unavailable,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Endpoint {
+    Tcp,
+    Direct,
+    Buffered,
+}
+
+enum DirectStep {
+    Progress,
+    Continue,
+    Fallthrough,
+}
+
+fn endpoint<S: Stream + ?Sized>(stream: &mut S) -> Endpoint {
+    if stream.tcp().is_some() {
+        debug_assert!(
+            stream.direct().is_none(),
+            "a stream must not expose both tcp() and direct()"
+        );
+        Endpoint::Tcp
+    } else if stream.direct().is_some() {
+        Endpoint::Direct
+    } else {
+        Endpoint::Buffered
+    }
+}
+
 fn splice_unsupported(err: &io::Error) -> bool {
     matches!(
         err.kind(),
@@ -281,19 +308,203 @@ impl Half {
         }
     }
 
+    fn poll_flush_queued<W: Stream + ?Sized>(
+        &mut self,
+        cx: &mut Context<'_>,
+        writer: &mut W,
+    ) -> Poll<io::Result<()>> {
+        ready!(self.drain(cx, writer))?;
+        ready!(Pin::new(&mut *writer).poll_flush(cx))?;
+        self.need_flush = false;
+        Poll::Ready(Ok(()))
+    }
+
     /// Sends what was accepted before the read failed, then hands back the error.
     fn poll_read_failed<W: Stream + ?Sized>(
         &mut self,
         cx: &mut Context<'_>,
         writer: &mut W,
     ) -> Poll<io::Result<Step>> {
-        ready!(self.drain(cx, writer))?;
-        ready!(Pin::new(&mut *writer).poll_flush(cx))?;
-        self.need_flush = false;
+        ready!(self.poll_flush_queued(cx, writer))?;
         match std::mem::replace(&mut self.phase, Phase::Reading) {
             Phase::ReadFailed(err) => Poll::Ready(Err(err)),
             _ => Poll::Ready(Err(io::ErrorKind::InvalidData.into())),
         }
+    }
+
+    fn record_direct_io(&mut self, moved: usize, meter: &dyn Fn(u64)) -> DirectStep {
+        if moved == 0 {
+            self.phase = Phase::ReadDone;
+            return DirectStep::Continue;
+        }
+        self.total += moved as u64;
+        meter(moved as u64);
+        DirectStep::Progress
+    }
+
+    fn poll_direct_step<R, W>(
+        &mut self,
+        cx: &mut Context<'_>,
+        reader: &mut R,
+        writer: &mut W,
+        meter: &dyn Fn(u64),
+    ) -> Poll<io::Result<DirectStep>>
+    where
+        R: Stream + ?Sized,
+        W: Stream + ?Sized,
+    {
+        debug_assert!(
+            reader.tcp().is_none() || reader.direct().is_none(),
+            "a stream must not expose both tcp() and direct()"
+        );
+        debug_assert!(
+            writer.tcp().is_none() || writer.direct().is_none(),
+            "a stream must not expose both tcp() and direct()"
+        );
+        if let Some(src) = reader.tcp() {
+            if SplicePipe::AVAILABLE
+                && !matches!(self.bulk, Bulk::Off)
+                && let Some(dst) = writer.tcp()
+            {
+                return match ready!(self.poll_bulk(cx, src, dst, meter))? {
+                    Moved::Some => Poll::Ready(Ok(DirectStep::Progress)),
+                    Moved::Eof => Poll::Ready(Ok(DirectStep::Continue)),
+                    Moved::Unavailable => Poll::Ready(Ok(DirectStep::Fallthrough)),
+                };
+            }
+            if let Some(direct) = writer.direct() {
+                let moved = ready!(direct.poll_recv_from(cx, src))?;
+                return Poll::Ready(Ok(self.record_direct_io(moved, meter)));
+            }
+        } else if let Some(dst) = writer.tcp()
+            && let Some(direct) = reader.direct()
+        {
+            let moved = ready!(direct.poll_send_to(cx, dst))?;
+            return Poll::Ready(Ok(self.record_direct_io(moved, meter)));
+        }
+        Poll::Ready(Ok(DirectStep::Fallthrough))
+    }
+
+    fn poll_queue_tcp(
+        &mut self,
+        cx: &mut Context<'_>,
+        meter: &dyn Fn(u64),
+    ) -> Poll<io::Result<Step>> {
+        // An accepted buffered write does no socket I/O, so it must charge its own budget.
+        let budget = ready!(poll_proceed(cx));
+        let buffer = self.buffer.as_mut().ok_or(io::ErrorKind::InvalidData)?;
+        let written = buffer.len();
+        if written != self.remaining {
+            return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+        }
+        self.queued.push_back(buffer.take_owned());
+        self.buffer = None;
+        self.remaining = 0;
+        self.total += written as u64;
+        self.need_flush = true;
+        meter(written as u64);
+        budget.made_progress();
+        Poll::Ready(Ok(Step::Progress))
+    }
+
+    fn poll_write_buffered<W: Stream + ?Sized>(
+        &mut self,
+        cx: &mut Context<'_>,
+        writer: &mut W,
+        meter: &dyn Fn(u64),
+    ) -> Poll<io::Result<Option<Step>>> {
+        if !self.queued.is_empty() {
+            ready!(self.drain(cx, writer))?;
+        }
+        let buffer = self.buffer.as_mut().ok_or(io::ErrorKind::InvalidData)?;
+        let written = ready!(writer.poll_write_buffer(cx, buffer))?;
+        if written == 0 {
+            return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+        }
+        self.remaining = self
+            .remaining
+            .checked_sub(written)
+            .ok_or(io::ErrorKind::InvalidData)?;
+        self.total += written as u64;
+        self.need_flush = true;
+        meter(written as u64);
+        if self.remaining == 0 {
+            if !buffer.is_empty() {
+                return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+            }
+            self.buffer = None;
+            return Poll::Ready(Ok(Some(Step::Progress)));
+        }
+        Poll::Ready(Ok(None))
+    }
+
+    fn poll_finish<W: Stream + ?Sized>(
+        &mut self,
+        cx: &mut Context<'_>,
+        writer: &mut W,
+    ) -> Poll<io::Result<Step>> {
+        ready!(self.poll_flush_queued(cx, writer))?;
+        // A peer that is already gone cannot be told, and that is not an error.
+        ready!(Pin::new(&mut *writer).poll_shutdown(cx)).ok();
+        self.phase = Phase::Finished;
+        Poll::Ready(Ok(Step::Finished))
+    }
+
+    fn poll_read_next<R, W>(
+        &mut self,
+        cx: &mut Context<'_>,
+        reader: &mut R,
+        writer: &mut W,
+    ) -> Poll<io::Result<()>>
+    where
+        R: Stream + ?Sized,
+        W: Stream + ?Sized,
+    {
+        let requirements = writer.write_requirements();
+        let options = ReadBufferOptions::for_copy(reader.read_requirements(), requirements)?;
+        // A full preceding read permits scatter reads; short request/response traffic
+        // keeps one owner, and the first header/payload write remains scalar.
+        let can_read_vectored = self.read_was_full
+            && !writer.needs_handshake()
+            && endpoint(writer) == Endpoint::Buffered;
+        debug_assert!(
+            !can_read_vectored || reader.tcp().is_none() || reader.direct().is_none(),
+            "a stream must not expose both tcp() and direct()"
+        );
+        let socket = if can_read_vectored {
+            reader.tcp()
+        } else {
+            None
+        };
+        let vectored = socket.is_some();
+        let result = if let Some(socket) = socket {
+            self.poll_read_vectored(cx, socket, options)
+        } else {
+            reader.poll_read_buffer(cx, options)
+        };
+        match result {
+            Poll::Pending => {
+                if self.need_flush {
+                    ready!(self.poll_flush_queued(cx, writer))?;
+                }
+                return Poll::Pending;
+            }
+            Poll::Ready(Err(err)) => {
+                if self.queued.is_empty() && !self.need_flush {
+                    return Poll::Ready(Err(err));
+                }
+                self.phase = Phase::ReadFailed(err);
+            }
+            Poll::Ready(Ok(buffer)) if buffer.is_empty() => self.phase = Phase::ReadDone,
+            Poll::Ready(Ok(buffer)) => {
+                if !vectored {
+                    self.read_was_full = buffer.tailroom() == requirements.rear;
+                }
+                self.remaining = buffer.len();
+                self.buffer = Some(buffer);
+            }
+        }
+        Poll::Ready(Ok(()))
     }
 
     fn poll<R, W>(
@@ -322,153 +533,34 @@ impl Half {
                 self.remaining = buffer.len();
                 self.buffer = Some(buffer);
             }
-            let defer_tcp_flush = !self.queued.is_empty()
-                && writer.tcp().is_some()
-                && reader.tcp().is_none()
-                && reader.direct().is_none();
-            if self.need_flush
-                && self.buffer.is_none()
-                && (writer.tcp().is_some() || writer.direct().is_some())
-                && !defer_tcp_flush
-            {
-                ready!(self.drain(cx, writer))?;
-                ready!(Pin::new(&mut *writer).poll_flush(cx))?;
-                self.need_flush = false;
-            }
-            if SplicePipe::AVAILABLE
-                && self.buffer.is_none()
-                && !self.read_done()
-                && !matches!(self.bulk, Bulk::Off)
-                && let (Some(src), Some(dst)) = (reader.tcp(), writer.tcp())
-            {
-                match ready!(self.poll_bulk(cx, src, dst, meter))? {
-                    Moved::Some => return Poll::Ready(Ok(Step::Progress)),
-                    Moved::Eof => continue,
-                    Moved::Unavailable => {}
+            if self.need_flush && self.buffer.is_none() {
+                let path = (endpoint(reader), endpoint(writer));
+                let defer_tcp_flush =
+                    !self.queued.is_empty() && path == (Endpoint::Buffered, Endpoint::Tcp);
+                if path.1 != Endpoint::Buffered && !defer_tcp_flush {
+                    ready!(self.poll_flush_queued(cx, writer))?;
                 }
             }
             if self.buffer.is_none() && !self.read_done() {
-                let moved = if let Some(socket) = writer.tcp()
-                    && let Some(direct) = reader.direct()
-                {
-                    Some(ready!(direct.poll_send_to(cx, socket))?)
-                } else if let Some(socket) = reader.tcp()
-                    && let Some(direct) = writer.direct()
-                {
-                    Some(ready!(direct.poll_recv_from(cx, socket))?)
-                } else {
-                    None
-                };
-                match moved {
-                    Some(0) => {
-                        self.phase = Phase::ReadDone;
-                        continue;
-                    }
-                    Some(n) => {
-                        self.total += n as u64;
-                        meter(n as u64);
-                        return Poll::Ready(Ok(Step::Progress));
-                    }
-                    None => {}
+                match ready!(self.poll_direct_step(cx, reader, writer, meter))? {
+                    DirectStep::Progress => return Poll::Ready(Ok(Step::Progress)),
+                    DirectStep::Continue => continue,
+                    DirectStep::Fallthrough => {}
                 }
             }
-            if self.buffer.is_some()
-                && writer.tcp().is_some()
-                && reader.tcp().is_none()
-                && reader.direct().is_none()
-            {
-                // An accepted buffered write does no socket I/O, so it must charge its own budget.
-                let budget = ready!(poll_proceed(cx));
-                let buffer = self.buffer.as_mut().ok_or(io::ErrorKind::InvalidData)?;
-                let written = buffer.len();
-                if written != self.remaining {
-                    return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
+            if self.buffer.is_some() {
+                if endpoint(reader) == Endpoint::Buffered && endpoint(writer) == Endpoint::Tcp {
+                    return self.poll_queue_tcp(cx, meter);
                 }
-                self.queued.push_back(buffer.take_owned());
-                self.buffer = None;
-                self.remaining = 0;
-                self.total += written as u64;
-                self.need_flush = true;
-                meter(written as u64);
-                budget.made_progress();
-                return Poll::Ready(Ok(Step::Progress));
-            }
-            if self.buffer.is_some() && !self.queued.is_empty() {
-                ready!(self.drain(cx, writer))?;
-            }
-            if let Some(buffer) = self.buffer.as_mut() {
-                let written = ready!(writer.poll_write_buffer(cx, buffer))?;
-                if written == 0 {
-                    return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
-                }
-                self.remaining = self
-                    .remaining
-                    .checked_sub(written)
-                    .ok_or(io::ErrorKind::InvalidData)?;
-                self.total += written as u64;
-                self.need_flush = true;
-                meter(written as u64);
-                if self.remaining == 0 {
-                    if !buffer.is_empty() {
-                        return Poll::Ready(Err(io::ErrorKind::InvalidData.into()));
-                    }
-                    self.buffer = None;
-                    return Poll::Ready(Ok(Step::Progress));
+                if let Some(step) = ready!(self.poll_write_buffered(cx, writer, meter))? {
+                    return Poll::Ready(Ok(step));
                 }
                 continue;
             }
             if self.read_done() {
-                ready!(self.drain(cx, writer))?;
-                ready!(Pin::new(&mut *writer).poll_flush(cx))?;
-                self.need_flush = false;
-                // A peer that is already gone cannot be told, and that is not an error.
-                ready!(Pin::new(&mut *writer).poll_shutdown(cx)).ok();
-                self.phase = Phase::Finished;
-                return Poll::Ready(Ok(Step::Finished));
+                return self.poll_finish(cx, writer);
             }
-            let requirements = writer.write_requirements();
-            let options = ReadBufferOptions::for_copy(reader.read_requirements(), requirements)?;
-            // A full preceding read permits scatter reads; short request/response traffic
-            // keeps one owner, and the first header/payload write remains scalar.
-            let can_read_vectored = self.read_was_full
-                && !writer.needs_handshake()
-                && writer.tcp().is_none()
-                && writer.direct().is_none()
-                && reader.direct().is_none();
-            let vectored = can_read_vectored && reader.tcp().is_some();
-            let result = if vectored {
-                self.poll_read_vectored(
-                    cx,
-                    reader.tcp().ok_or(io::ErrorKind::InvalidData)?,
-                    options,
-                )
-            } else {
-                reader.poll_read_buffer(cx, options)
-            };
-            match result {
-                Poll::Pending => {
-                    if self.need_flush {
-                        ready!(self.drain(cx, writer))?;
-                        ready!(Pin::new(&mut *writer).poll_flush(cx))?;
-                        self.need_flush = false;
-                    }
-                    return Poll::Pending;
-                }
-                Poll::Ready(Err(err)) => {
-                    if self.queued.is_empty() && !self.need_flush {
-                        return Poll::Ready(Err(err));
-                    }
-                    self.phase = Phase::ReadFailed(err);
-                }
-                Poll::Ready(Ok(buffer)) if buffer.is_empty() => self.phase = Phase::ReadDone,
-                Poll::Ready(Ok(buffer)) => {
-                    if !vectored {
-                        self.read_was_full = buffer.tailroom() == requirements.rear;
-                    }
-                    self.remaining = buffer.len();
-                    self.buffer = Some(buffer);
-                }
-            }
+            ready!(self.poll_read_next(cx, reader, writer))?;
         }
     }
 }
