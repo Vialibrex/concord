@@ -252,6 +252,13 @@ where
         self.inner.stop_stream(error_code);
     }
 
+    /// Polls until every byte sent so far has been acknowledged, so that a
+    /// [`RequestStream::stop_stream()`] that follows loses none of it.
+    // Concord: lets a client reset a stream without losing its last writes.
+    pub fn poll_acked(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamError>> {
+        self.inner.poll_acked(cx)
+    }
+
     /// Send a set of trailers to end the request.
     ///
     /// [`RequestStream::finish()`] must be called to finalize a request.

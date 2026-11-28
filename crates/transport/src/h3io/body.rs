@@ -94,8 +94,10 @@ impl H3Body {
         H3Body { read, write }
     }
 
-    /// Shutdown ends the whole stream rather than half of it: after the FIN, which QUIC delivers
-    /// with every byte before it, STOP_SENDING asks the server to drop its side, and reads end.
+    /// Shutdown ends the whole stream rather than half of it, as Chromium cancels a stream:
+    /// once every byte written is acknowledged, or after `crate::RESET_DRAIN`, RESET_STREAM
+    /// H3_REQUEST_CANCELLED without a FIN, STOP_SENDING asks the server to drop its side, and
+    /// reads end.
     pub fn without_half_close(self) -> Self {
         let ended = Arc::new(Ended::default());
         let mut read = self.read;

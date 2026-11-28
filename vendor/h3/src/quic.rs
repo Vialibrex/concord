@@ -183,6 +183,12 @@ pub trait SendStream<B: Buf> {
 
     /// Get QUIC send stream id
     fn send_id(&self) -> StreamId;
+
+    /// Polls until every byte sent so far has been acknowledged. The default does not wait.
+    // Concord: lets a client reset a stream without losing its last writes.
+    fn poll_acked(&mut self, _cx: &mut task::Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
+        Poll::Ready(Ok(()))
+    }
 }
 
 /// Allows sending unframed pure bytes to a stream. Similar to [`AsyncWrite`](https://docs.rs/tokio/latest/tokio/io/trait.AsyncWrite.html)

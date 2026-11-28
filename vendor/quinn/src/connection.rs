@@ -928,6 +928,8 @@ impl ConnectionRef {
                 blocked_writers: FxHashMap::default(),
                 blocked_readers: FxHashMap::default(),
                 stopped: FxHashMap::default(),
+                // Concord: see `SendStream::poll_acked`.
+                acked: FxHashMap::default(),
                 error: None,
                 io_poller: socket.clone().create_io_poller(),
                 socket,
@@ -1010,6 +1012,8 @@ pub(crate) struct State {
     pub(crate) blocked_writers: FxHashMap<StreamId, Waker>,
     pub(crate) blocked_readers: FxHashMap<StreamId, Waker>,
     pub(crate) stopped: FxHashMap<StreamId, Arc<Notify>>,
+    // Concord: see `SendStream::poll_acked`.
+    pub(crate) acked: FxHashMap<StreamId, Waker>,
     /// Always set to Some before the connection becomes drained
     pub(crate) error: Option<ConnectionError>,
     socket: Arc<dyn AsyncUdpSocket>,
@@ -1158,6 +1162,8 @@ impl State {
                         wake_all(&mut self.blocked_writers);
                         wake_all(&mut self.blocked_readers);
                         wake_all_notify(&mut self.stopped);
+                        // Concord: see `SendStream::poll_acked`.
+                        wake_all(&mut self.acked);
                     }
                 }
                 ConnectionLost { reason } => {
@@ -1182,9 +1188,12 @@ impl State {
                     shared.stream_budget_available[dir as usize].notify_waiters();
                 }
                 Stream(StreamEvent::Finished { id }) => wake_stream_notify(id, &mut self.stopped),
+                // Concord: see `SendStream::poll_acked`; a stop wakes its waiter too.
+                Stream(StreamEvent::Acked { id }) => wake_stream(id, &mut self.acked),
                 Stream(StreamEvent::Stopped { id, .. }) => {
                     wake_stream_notify(id, &mut self.stopped);
                     wake_stream(id, &mut self.blocked_writers);
+                    wake_stream(id, &mut self.acked);
                 }
             }
         }
@@ -1258,6 +1267,8 @@ impl State {
             let _ = x.send(false);
         }
         wake_all_notify(&mut self.stopped);
+        // Concord: see `SendStream::poll_acked`.
+        wake_all(&mut self.acked);
         shared.closed.notify_waiters();
     }
 

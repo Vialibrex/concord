@@ -61,6 +61,12 @@ pub fn decode<B: Buf>(size: u8, buf: &mut B) -> Result<Vec<u8>, Error> {
 
 pub fn encode<B: BufMut>(size: u8, flags: u8, value: &[u8], buf: &mut B) -> Result<(), Error> {
     let encoded = Vec::from(value).hpack_encode()?;
+    // Concord: Huffman only when shorter, as Chromium's and Go's encoders choose.
+    if encoded.len() >= value.len() {
+        prefix_int::encode(size - 1, flags << 1, value.len().try_into()?, buf);
+        buf.put_slice(value);
+        return Ok(());
+    }
     prefix_int::encode(size - 1, flags << 1 | 1, encoded.len().try_into()?, buf);
     for byte in encoded {
         buf.write(byte);
@@ -144,7 +150,8 @@ mod tests {
         let mut buf = Vec::new();
         encode(8, 0b01, b"", &mut buf).unwrap();
         let mut read = Cursor::new(&buf);
-        assert_eq!(&buf, &[0b1000_0000]);
+        // Concord: an empty string goes out raw.
+        assert_eq!(&buf, &[0b0000_0000]);
         assert_eq!(decode(8, &mut read).unwrap(), b"");
     }
 
@@ -153,6 +160,15 @@ mod tests {
         let buf = vec![0b0100_0011, b'b', b'a', b'r'];
         let mut read = Cursor::new(&buf);
         assert_eq!(decode(6, &mut read).unwrap(), b"bar");
+    }
+
+    // Concord: see `encode`.
+    #[test]
+    fn a_value_huffman_does_not_shorten_goes_raw() {
+        let mut buf = Vec::new();
+        encode(8, 0, b"!!X", &mut buf).unwrap();
+        assert_eq!(&buf, &[0b0000_0011, b'!', b'!', b'X']);
+        assert_eq!(decode(8, &mut Cursor::new(&buf)).unwrap(), b"!!X");
     }
 
     #[test]

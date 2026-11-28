@@ -68,6 +68,8 @@ pub enum Frame<B> {
     /// Conversely, when sending, send this frame and unwrap the stream
     WebTransportStream(SessionId),
     Grease,
+    // Concord: RFC 9218 PRIORITY_UPDATE for a request stream, sent by the client only.
+    PriorityUpdateRequest(VarInt, &'static [u8]),
 }
 
 /// Represents the available data len for a `Data` frame on a RecvStream
@@ -200,6 +202,13 @@ where
                 buf.write_var(6);
                 buf.put_slice(b"grease");
             }
+            // Concord: see `Frame::PriorityUpdateRequest`.
+            Frame::PriorityUpdateRequest(element, value) => {
+                FrameType(PRIORITY_UPDATE_REQUEST).encode(buf);
+                buf.write_var((element.size() + value.len()) as u64);
+                element.encode(buf);
+                buf.put_slice(value);
+            }
             Frame::WebTransportStream(id) => {
                 FrameType::WEBTRANSPORT_BI_STREAM.encode(buf);
                 id.encode(buf);
@@ -262,6 +271,7 @@ impl fmt::Debug for Frame<PayloadLen> {
             Frame::Goaway(id) => write!(f, "GoAway({})", id),
             Frame::MaxPushId(id) => write!(f, "MaxPushId({})", id),
             Frame::Grease => write!(f, "Grease()"),
+            Frame::PriorityUpdateRequest(id, _) => write!(f, "PriorityUpdate({})", id),
             Frame::WebTransportStream(session) => write!(f, "WebTransportStream({:?})", session),
         }
     }
@@ -281,6 +291,7 @@ where
             Frame::Goaway(id) => write!(f, "GoAway({})", id),
             Frame::MaxPushId(id) => write!(f, "MaxPushId({})", id),
             Frame::Grease => write!(f, "Grease()"),
+            Frame::PriorityUpdateRequest(id, _) => write!(f, "PriorityUpdate({})", id),
             Frame::WebTransportStream(_) => write!(f, "WebTransportStream()"),
         }
     }
@@ -301,6 +312,10 @@ impl<T, U> PartialEq<Frame<T>> for Frame<U> {
             Frame::Goaway(x) => matches!(other, Frame::Goaway(y) if x == y),
             Frame::MaxPushId(x) => matches!(other, Frame::MaxPushId(y) if x == y),
             Frame::Grease => matches!(other, Frame::Grease),
+            // Concord: the variant Concord adds.
+            Frame::PriorityUpdateRequest(x, v) => {
+                matches!(other, Frame::PriorityUpdateRequest(y, w) if x == y && v == w)
+            }
             Frame::WebTransportStream(x) => {
                 matches!(other, Frame::WebTransportStream(y) if x == y)
             }
@@ -339,11 +354,26 @@ frame_types! {
     WEBTRANSPORT_BI_STREAM = 0x41,
 }
 
+// Concord: RFC 9218 §7.2; not in `frame_types!`, so received ones stay unknown and ignored.
+const PRIORITY_UPDATE_REQUEST: u64 = 0xf0700;
+
 impl FrameType {
     /// returns a FrameType type with random number of the 0x1f * N + 0x21
     /// format within the range of the Varint implementation
     pub fn grease() -> Self {
         FrameType(fastrand::u64(0..0x210842108421083) * 0x1f + 0x21)
+    }
+}
+
+/// A reserved frame of type `0x1f * N + 0x21` and `N % 4` random octets, for a random 32-bit `N`.
+// Concord: Chromium's control-stream grease, quiche `HttpEncoder::SerializeGreasingFrame`.
+pub(crate) fn encode_chromium_grease<B: BufMut>(buf: &mut B) {
+    let n = fastrand::u32(..);
+    FrameType(0x1f * u64::from(n) + 0x21).encode(buf);
+    let len = n % 4;
+    buf.write_var(u64::from(len));
+    for _ in 0..len {
+        buf.put_u8(fastrand::u8(..));
     }
 }
 
@@ -423,6 +453,12 @@ impl SettingId {
     /// format within the range of the Varint implementation
     pub fn grease() -> Self {
         SettingId(fastrand::u64(0..0x210842108421083) * 0x1f + 0x21)
+    }
+
+    /// A reserved id as Chromium picks one, `0x1f * N + 0x21` for a random 32-bit `N`.
+    // Concord: quiche `QuicSendControlStream::MaybeSendSettingsFrame`.
+    pub fn chromium_grease() -> Self {
+        SettingId(0x1f * u64::from(fastrand::u32(..)) + 0x21)
     }
 
     fn is_supported(self) -> bool {
@@ -652,6 +688,34 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use std::io::Cursor;
+
+    // Concord: see `encode_chromium_grease` and `SettingId::chromium_grease`.
+    #[test]
+    fn chromium_grease_takes_a_32_bit_n_and_n_mod_4_payload_octets() {
+        let mut lengths = [0; 4];
+        let (mut highest, mut highest_id) = (0, 0);
+        for _ in 0..4000 {
+            let mut buf = Vec::new();
+            encode_chromium_grease(&mut buf);
+            let mut read = &buf[..];
+            let kind = read.get_var().unwrap();
+            let n = u32::try_from((kind - 0x21) / 0x1f).unwrap();
+            highest = highest.max(n);
+            assert_eq!((kind - 0x21) % 0x1f, 0);
+            let len = read.get_var().unwrap();
+            assert_eq!(len, u64::from(n % 4));
+            assert_eq!(read.len() as u64, len);
+            lengths[len as usize] += 1;
+
+            let SettingId(id) = SettingId::chromium_grease();
+            assert_eq!((id - 0x21) % 0x1f, 0);
+            assert!((id - 0x21) / 0x1f <= u64::from(u32::MAX));
+            highest_id = highest_id.max((id - 0x21) / 0x1f);
+        }
+        assert!(lengths.iter().all(|&count| count > 800), "{lengths:?}");
+        assert!(highest > u32::MAX / 2, "{highest}");
+        assert!(highest_id > u64::from(u32::MAX / 2), "{highest_id}");
+    }
 
     #[test]
     fn unknown_frame_type() {

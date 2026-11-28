@@ -1,0 +1,36 @@
+# naiveproxy v154.0.8037.49-5 (github.com/klzgrad/naiveproxy, the release's naive binary for linux-arm64),
+# HTTP/3 to a recording QUIC proxy that answers every CONNECT 200 with `padding-type-reply: 1`:
+#   naive --listen=socks://127.0.0.1:18080 --proxy=quic://user:pass@127.0.0.1:18443
+#   curl --socks5-hostname 127.0.0.1:18080 http://exampleN.test/   (N = 1, 2, 3, one after another)
+# The client's unidirectional streams, control-stream frames and CONNECT requests as the recorder
+# printed them, its QUIC transport parameters, and the frames that ended each tunnel stream, one
+# packet per line, from the server's qlog. naiveproxy's GET before each CONNECT is left out with its
+# fields and its PRIORITY_UPDATE frames; its stream ids are the gaps (0, 4, 8 hold CONNECTs 4, 8, 12).
+
+transport max_datagram_frame_size=65536
+uni 2 type=0x0
+control frame type=0x4 len=31 settings=[0x1=65536 0x6=262144 0x7=100 0x33=1 0x12b48a95c9=1188944534] raw=018001000006800400000740643301c0000012b48a95c9c000000046ddda96
+control frame type=0x18d35616f3 len=2 raw=f4be
+control frame type=0xf0700 len=2 raw=0469
+req 4 HEADERS len=97 block=0000cf508c2f91d35d050ae92a1371e07f2dac72486aa6143c283b242b3c3b3c262b2c24223c3e2b585858582f08ac72486aa6593eab2ad617b5a5427f830fd2802f07aec3f9f4b0ed4ce7b0dec6931eaf8fba34188a49f9a68274afc73fcd3eff
+field 0 :method: CONNECT
+field 1 :authority: example1.test:80
+field 2 padding: <(;$+<;<&+,$"<>+XXXX
+field 3 padding-type-request: 1, 0
+field 4 proxy-authorization: Basic dXNlcjpwYXNz
+control frame type=0xf0700 len=2 raw=0869
+req 8 HEADERS len=107 block=0000cf508c2f91d35d0512e92a1371e07f2dac72486aa61e28232226222b2a3e28273c3e3e29402258585858585858585858585858582f08ac72486aa6593eab2ad617b5a5427f830fd2802f07aec3f9f4b0ed4ce7b0dec6931eaf8fba34188a49f9a68274afc73fcd3eff
+field 0 :method: CONNECT
+field 1 :authority: example2.test:80
+field 2 padding: (#"&"+*>('<>>)@"XXXXXXXXXXXXXX
+field 3 padding-type-request: 1, 0
+field 4 proxy-authorization: Basic dXNlcjpwYXNz
+control frame type=0xf0700 len=2 raw=0c69
+req 12 HEADERS len=104 block=0000cf508c2f91d35d0565749509b8f03f2dac72486aa61b263b2a2c24233f29212c242b3b3b3f3e58585858585858585858582f08ac72486aa6593eab2ad617b5a5427f830fd2802f07aec3f9f4b0ed4ce7b0dec6931eaf8fba34188a49f9a68274afc73fcd3eff
+field 0 :method: CONNECT
+field 1 :authority: example3.test:80
+field 2 padding: &;*,$#?)!,$+;;?>XXXXXXXXXXX
+field 3 padding-type-request: 1, 0
+field 4 proxy-authorization: Basic dXNlcjpwYXNz
+end STOP_SENDING stream=4 code=268 RESET_STREAM stream=4 code=268 final_size=362
+end STOP_SENDING stream=8 code=268 RESET_STREAM stream=8 code=268 final_size=430

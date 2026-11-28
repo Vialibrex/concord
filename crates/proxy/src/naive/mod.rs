@@ -265,4 +265,6 @@ fn naive(def: &ProxyDef, opts: &NaiveOpts, ctx: &BuildCtx) -> Result<Naive, Buil
 }
 
 #[cfg(test)]
+mod h3_tests;
+#[cfg(test)]
 mod tests;

@@ -5,6 +5,7 @@ use concord_common::stream_buffer::ReadBufferOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
 
 use super::*;
+use crate::RESET_DRAIN;
 
 mod cancellation;
 mod direct_write;

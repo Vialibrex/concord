@@ -9,6 +9,8 @@ use std::{
 use bytes::{Buf, BytesMut};
 use futures_util::future;
 use http::request;
+// Concord: this, `VarInt` and `SendStream as _` below serve `Builder::priority_update`.
+use tokio::sync::Mutex;
 
 #[cfg(feature = "tracing")]
 use tracing::{info, instrument, trace};
@@ -20,9 +22,9 @@ use crate::{
         ConnectionError, StreamError,
     },
     frame::FrameStream,
-    proto::{frame::Frame, headers::Header, push::PushId},
+    proto::{frame::Frame, headers::Header, push::PushId, varint::VarInt},
     qpack,
-    quic::{self, StreamId},
+    quic::{self, SendStream as _, StreamId},
     shared_state::{ConnectionState, SharedState},
     stream::{self, BufRecvStream},
 };
@@ -118,6 +120,8 @@ where
     pub(super) sender_count: Arc<AtomicUsize>,
     pub(super) _buf: PhantomData<fn(B)>,
     pub(super) send_grease_frame: bool,
+    // Concord: see `Builder::priority_update`.
+    pub(super) priority_update: Option<(Arc<Mutex<T::SendStream>>, &'static [u8])>,
 }
 
 impl<T, B> ConnectionState for SendRequest<T, B>
@@ -174,6 +178,14 @@ where
         let mut stream = future::poll_fn(|cx| self.open.poll_open_bidi(cx))
             .await
             .map_err(|e| self.handle_quic_stream_error(e))?;
+
+        // Concord: see `Builder::priority_update`.
+        if let Some((control, value)) = &self.priority_update {
+            let element = VarInt::from(stream.send_id());
+            connection::write_shared(control, Frame::<B>::PriorityUpdateRequest(element, value))
+                .await
+                .map_err(|e| self.handle_quic_stream_error(e))?;
+        }
 
         //= https://www.rfc-editor.org/rfc/rfc9114#section-4.2
         //= type=TODO
@@ -244,6 +256,8 @@ where
             sender_count: self.sender_count.clone(),
             _buf: PhantomData,
             send_grease_frame: self.send_grease_frame,
+            // Concord: see `Builder::priority_update`.
+            priority_update: self.priority_update.clone(),
         }
     }
 }

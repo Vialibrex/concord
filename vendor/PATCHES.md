@@ -32,7 +32,11 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | h3 | Opt-in draft-00 datagram SETTINGS for WARP | None | Propose the default-off client builder switch to hyperium/h3 |
 | h3 | Discard unknown frames as they arrive; bound HEADERS and SETTINGS before buffering | None; quic-go bounds both (`http3/frames.go:134`, `:182`) | Propose to hyperium/h3 with the decoder tests |
 | h3 | Fix 0.0.8 rustc warnings under current toolchains | hyperium/h3#318, `18df8ceb` (on master, unreleased) | Backport #318; drop once upgrading past a release that includes it |
+| h3 | QPACK Huffman-codes a string only when that is shorter | None as of 0.0.8 | PR to hyperium/h3 citing Chromium's QPACK encoder and quic-go's, which both choose so |
+| h3 | `client::Builder::open_qpack_streams`, `grease_control_only`, `priority_update` | None | None planned: only the NaiveProxy outbound's fingerprint uses them |
+| h3 | `quic::SendStream::poll_acked` and `RequestStream::poll_acked` | None | Propose with the quinn change, as a way to reset a request without losing its last writes |
 | h3-quinn | Public `SendStream::new` and `RecvStream::new` | None | Propose to hyperium/h3 |
+| h3-quinn | `SendStream::poll_acked` over quinn's | None | With the h3 change |
 | h3-quinn | `RecvStream` keeps its quinn stream while a read waits, so `stop_sending` and `recv_id` do not panic | None | Issue and PR to hyperium/h3 with the NaiveProxy stop-while-reading test |
 | gotatun | Deliver already-ready encrypted IP packets to the bounded UDP queue together | None yet | Propose the batch handoff to mullvad/gotatun |
 | h2 | Ignore DATA and HEADERS on forgotten client streams | None as of 0.4.20 | Issue and PR to hyperium/h2 with the delayed-DATA-after-reset transport test |
@@ -49,9 +53,11 @@ crate's directory, its `[patch.crates-io]` entry and its lines in `UPSTREAM.sha2
 | quinn | Lease receive scratch for a socket poll instead of an endpoint lifetime | None | Propose to quinn-rs/quinn with the endpoint sharing regression and receive-buffer lease contracts |
 | quinn | A connection whose driver has ended lets go of its socket | None | Propose to quinn-rs/quinn with the release contract of `crates/quic/src/release.rs` |
 | quinn | Hold one UDP_GRO socket for the process so per-connection sockets do not flip the kernel's encapsulation static keys | None | Propose to quinn-rs/quinn, or to quinn-udp where `UdpSocketState::new` sets UDP_GRO |
+| quinn | `SendStream::poll_acked` | None | Propose to quinn-rs/quinn with the quinn-proto change and the `quinn_pto.rs` contracts |
 | quinn | Public `RecvStream::poll_read_chunk` | None | Propose with the h3-quinn change; quinn's `read_chunk` future already wraps it |
 | quinn-proto | `send_quantum`, `on_packet_lost`, `min_pacing_delay` and explicit-rate pacing | quinn-rs/quinn#2481; merged as noq#611 | Follow #2481. `min_pacing_delay` is Concord's own addition and needs its own proposal; the pacer changes cannot move into `quic/src/congestion.rs` while the controller API lacks these hooks |
 | quinn-proto | Requeue unacknowledged STREAM data on a PTO; withdraw acknowledged copies | None; quinn `main` `765abecf` requeues only control frames | PR with the recovery contracts of `crates/proxy/tests/quinn_pto.rs` |
+| quinn-proto | `SendStream::wait_acked` and `StreamEvent::Acked` | None | With the quinn change |
 | quinn-proto | A DATAGRAM-only packet does not bundle a pending ACK | None | PR citing quic-go's default path and the `quinn_pto.rs` ACK contracts |
 | rustls | Check that a buffered client can be exported to the record engine | None | PR adding the eligibility check next to rustls's kernel-TLS export |
 | shadowsocks | Zero the AEAD-2022 request padding | None | Small bug-fix PR first: the padding was uninitialized memory |
@@ -221,6 +227,14 @@ The package archive checksum is `7d29020232d6aa3fb1daca64c1127cf662cf97f254ae16c
   closed runs until the destination closes. Until then a listener stopped by a reload could not free its port for
   the listener built in its place. The endpoint itself is released by `crates/quic/src/release.rs`; its contract
   `a_drained_connection_kept_by_a_handle_frees_the_port` holds a server handle past the drain.
+- `src/send_stream.rs`, `src/connection.rs`: `SendStream::poll_acked` completes once every byte written is
+  acknowledged, with the peer's code if it stopped the stream first; a reset or forgotten stream has nothing to wait
+  for, while a finished one waits for its FIN to be acknowledged too. It registers a waker in `State::acked`, woken
+  by `StreamEvent::Acked`, by the stream's `Stopped` event, by a rejected 0-RTT and by the connection's end, and
+  removed when the stream drops. The other quinn users (Hysteria 2, TUIC, MASQUE, xhttp over HTTP/3, the QUIC
+  listeners) never call it, so their streams take the old path: no event, no waker, no allocation. `naive::h3_tests`
+  checks the stop and close wake-ups. The NaiveProxy outbound uses it to cancel a tunnel as Chromium does, with
+  RESET_STREAM, without abandoning bytes in flight. Withdraw with the h3, h3-quinn and quinn-proto changes.
 - `src/recv_stream.rs`: `RecvStream::poll_read_chunk` is public, unchanged otherwise; the vendored h3-quinn reads
   through it so its `RecvStream` never gives up the stream while a read waits.
 - `Cargo.toml`, `benches/`, `examples/`, `tests/`: the `[[example]]`, `[[test]]` and `[[bench]]` targets are removed
@@ -277,6 +291,14 @@ The package archive checksum is the original Cargo.lock checksum
 - Recovery contracts in `crates/proxy/tests/quinn_pto.rs` run real QUIC endpoints on a virtual link, including
   delivery before any new ACK, both ACK orders, pending-probe cancellation, repeated probes, FIN/reset, exhausted
   flow credit, new-data priority and control-only probes.
+- `src/connection/streams/mod.rs`, `src/connection/streams/send.rs`, `src/connection/streams/state.rs`:
+  `SendStream::wait_acked` reports whether every byte written so far, retransmissions included, is acknowledged
+  (`SendBuffer::is_fully_acked`), or the stream is reset, stopped or forgotten; otherwise it marks the stream, and
+  the acknowledgement that leaves none of its bytes unacknowledged raises `StreamEvent::Acked` once and clears the
+  mark. A stream never marked keeps the old path: one `bool` per stream and no event.
+  Contracts in `crates/proxy/tests/quinn_pto.rs`: not acknowledged before the ACK, acknowledged after it, after a
+  lost packet's retransmission, no event for a stream nobody waits on, nothing to wait for after a reset. Withdraw
+  with the quinn change.
 - `src/connection/mod.rs`: a 1-RTT packet that carries DATAGRAM frames and nothing else no longer bundles a pending
   ACK at the end of `populate_packet`; it carries one only when an ACK is already due (`PendingAcks::can_send`, the
   ACK branch at the top of the packet), and otherwise the `MaxAckDelay` timer sends it alone. A datagram exchange
@@ -298,6 +320,12 @@ still queues only control retransmits in `maybe_queue_probe`, with no equivalent
 bookkeeping. The independent upstream DATAGRAM-ready guard is outside this patch.
 
 Upgrade `quinn`, `quinn-proto` and `quinn-udp` together; replay these changes and the quinn changes above.
+
+Known failures of the crate's own tests, which the workspace does not run: `tests::ack_bundled_with_datagrams`
+expects an ACK in every datagram-only packet, the bundling the DATAGRAM ACK change above (`5694ec6e`) removes on
+purpose; `tests::blackhole_after_mtu_change_repairs_itself` expects at least three lost packets, and most likely the
+PTO requeue above (`b8b24977`), which does not report probes as congestion loss, lowers the count (inferred, not
+checked by withdrawing that change alone).
 
 ## rustls 0.23.46
 
@@ -452,6 +480,46 @@ The package archive checksum is `10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662
   payload via `#[allow(dead_code)]`, and elided lifetime syntax) so `Cargo.toml` no longer needs
   `[lints.rust] warnings = "allow"`. Drop once upgrading past a release that includes #318.
 
+- `src/qpack/prefix_string/mod.rs`: a QPACK string literal is Huffman-coded only when that is shorter than the raw
+  octets, as Chromium's QPACK encoder and quic-go's choose; upstream always Huffman-codes. This changes every HTTP/3
+  user, xhttp over HTTP/3, MASQUE, the NaiveProxy outbound and the HTTP/3 server's responses, but only the bytes of
+  values whose Huffman form is not shorter (such as NaiveProxy's `padding` value, or the empty string, now `0x00`),
+  which go out raw; a decoder reads both. `codec_8_empty` now expects the raw empty string;
+  `a_value_huffman_does_not_shorten_goes_raw` checks a raw value. Withdraw by restoring the unconditional Huffman
+  branch.
+- `src/config.rs`, `src/client/builder.rs`, `src/connection.rs`: `client::Builder::open_qpack_streams(false)` opens
+  no QPACK encoder or decoder stream, which RFC 9204 §4.2 lets an endpoint that uses no dynamic table skip; h3 never
+  uses one. Chromium's client opens only its control stream (naiveproxy `v154.0.8037.49-5`). The default, `true`,
+  opens both as upstream does. Withdraw by dropping the option.
+- `src/config.rs`, `src/client/builder.rs`, `src/connection.rs`, `src/proto/frame.rs`, `src/stream.rs`:
+  `client::Builder::grease_control_only(true)` greases as Chromium does (quiche `QuicSendControlStream::
+  MaybeSendSettingsFrame`, `HttpEncoder::SerializeGreasingFrame`): one reserved setting `0x1f * N + 0x21` for a
+  random 32-bit `N`, with a random 32-bit value, last in SETTINGS; then, in the same write
+  (`UniStreamHeader::GreasedControl`), one reserved frame whose type takes another such `N` and whose payload is
+  `N % 4` random octets; no grease stream and no grease frame on request streams. Chromium sorts SETTINGS by id,
+  so its grease setting goes before `0x33` when `N` is 0; Concord's always goes last. Upstream, with
+  `send_grease`, puts a zero-valued reserved setting first and greases with a stream and a request-stream frame;
+  that stays the default. Withdraw by dropping the option, `SettingId::chromium_grease`,
+  `encode_chromium_grease` and `UniStreamHeader::GreasedControl`.
+- `src/client/builder.rs`, `src/client/connection.rs`, `src/connection.rs`, `src/proto/frame.rs`:
+  `client::Builder::priority_update(Some(value))` writes an RFC 9218 PRIORITY_UPDATE for each request stream on the
+  control stream before the request's HEADERS, as Chromium does before every request. The control stream is shared
+  with `SendRequest` behind a `tokio::sync::Mutex` for this (`connection::write_shared`), for every user: a writer
+  holds it to the end of its write, since quinn keeps one waker per stream and writers taking turns between polls
+  could strand one, and flushes first what a writer dropped midway left queued, so the driver's SETTINGS and GOAWAY
+  go out as before. `naive::h3_tests` opens two tunnels at once on a connection out of flow credit. `client::new`
+  and `Builder::build` spell out `OpenStreams::SendStream = Connection::SendStream`, which `quic::Connection`
+  already implies. The default, `None`, sends none. Received PRIORITY_UPDATE frames stay unknown frames and are
+  ignored as before. Withdraw by dropping the option, the frame and the mutex.
+- `src/quic.rs`, `src/frame.rs`, `src/stream.rs`, `src/connection.rs`, `src/client/stream.rs`:
+  `quic::SendStream::poll_acked`, a provided method that does not wait, and `client::RequestStream::poll_acked`,
+  which forwards to it, so a client can reset a request once every byte it sent is acknowledged. Only the
+  NaiveProxy outbound calls it. Withdraw with the h3-quinn, quinn and quinn-proto changes below.
+- Contracts for the client options: `naive::h3_tests::quic_tunnels_open_and_end_as_naiveproxy_does`.
+- Known failure of the crate's own tests, which the workspace does not run: `frame::tests::poll_data_unexpected_end`
+  expects `UnexpectedEnd` while a truncated stream still holds a byte of DATA; with the `src/frame.rs` drain above
+  (`16e5722e`) `poll_data` hands that byte out first and reports the end on the next poll.
+
 ## h3-quinn 0.0.10
 
 - `src/lib.rs`: `SendStream::new` and `RecvStream::new` are public. The hysteria2 server reads the frame type a
@@ -463,4 +531,7 @@ The package archive checksum is `10872b55cfb02a821b69dc7cf8dc6a71d6af25eb9a79662
   `stop_sending` or `recv_id` on a stream whose read is pending unwraps `None` and panics; a NaiveProxy tunnel
   that ends while its reader waits stops its stream that way. `read_chunk` is cancel-safe and the poll keeps no
   state between calls, so a dropped read loses nothing; dropping `RecvStream` drops the quinn stream as before.
-  Contract: `naive::tests::a_quic_tunnel_ended_while_its_reader_waits_stops_the_stream_cancelled`.
+  Contract: `naive::h3_tests::a_quic_tunnel_ended_while_its_reader_waits_stops_the_stream_cancelled`.
+- `src/lib.rs`: `SendStream` and `BidiStream` implement `poll_acked` through `quinn::SendStream::poll_acked`, a
+  peer's STOP_SENDING becoming `StreamTerminated` and a lost connection its connection error. Withdraw with the h3
+  change.

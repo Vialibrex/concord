@@ -25,8 +25,6 @@ use slot::{Live, sender_max_streams};
 const PING_TIMEOUT: Duration = Duration::from_secs(15);
 const AT_RISK: Duration = Duration::from_secs(10);
 const HUNG: Duration = Duration::from_secs(10);
-/// How long a tunnel that ends with RST_STREAM waits for its queued DATA to go out first.
-const RESET_DRAIN: Duration = HUNG;
 /// Least and most padding of the empty END_STREAM DATA frame ahead of the reset, as Chromium's
 /// `SpdySession::EnqueueResetStreamFrame` picks it.
 const END_PADDING_LEAST: u8 = 26;
@@ -584,7 +582,7 @@ impl AsyncWrite for H2Writer {
             if this.send.poll_drained(cx).is_pending() {
                 let deadline = this
                     .drain
-                    .get_or_insert_with(|| Box::pin(sleep(RESET_DRAIN)));
+                    .get_or_insert_with(|| Box::pin(sleep(crate::RESET_DRAIN)));
                 if deadline.as_mut().poll(cx).is_pending() {
                     return Poll::Pending;
                 }

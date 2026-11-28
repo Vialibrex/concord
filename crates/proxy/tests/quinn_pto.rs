@@ -539,3 +539,60 @@ fn a_stream_reply_carries_the_ack() {
     let acks = request(&mut p, |p| p.send(b"response", false).1);
     assert_eq!(acks, 1);
 }
+
+fn acked(p: &mut Pair, id: StreamId) -> usize {
+    std::iter::from_fn(|| p.client.conn().poll())
+        .filter(|e| matches!(e, Event::Stream(StreamEvent::Acked { id: got }) if *got == id))
+        .count()
+}
+
+#[test]
+fn a_waited_stream_is_acknowledged_only_once_its_bytes_are() {
+    let mut p = Pair::new(None);
+    let (id, packets) = p.send(b"last writes", false);
+    assert!(!p.client.conn().send_stream(id).wait_acked());
+    p.deliver_client(packets);
+    assert_eq!(bytes(p.read(id).0), b"last writes");
+    assert_eq!(acked(&mut p, id), 0);
+    assert!(!p.client.conn().send_stream(id).wait_acked());
+    let ack = p.server_ack();
+    p.deliver_server(ack);
+    assert_eq!(acked(&mut p, id), 1);
+    assert!(p.client.conn().send_stream(id).wait_acked());
+}
+
+#[test]
+fn a_waited_stream_whose_packet_is_lost_is_acknowledged_after_the_retransmission() {
+    let mut p = Pair::new(None);
+    let (id, _lost) = p.send(b"lost once", false);
+    assert!(!p.client.conn().send_stream(id).wait_acked());
+    let probes = p.probe();
+    assert_eq!(acked(&mut p, id), 0);
+    p.deliver_client(probes);
+    assert_eq!(bytes(p.read(id).0), b"lost once");
+    let ack = p.server_ack();
+    p.deliver_server(ack);
+    assert_eq!(acked(&mut p, id), 1);
+}
+
+#[test]
+fn a_stream_nobody_waits_on_raises_no_acked_event() {
+    let mut p = Pair::new(None);
+    let (id, packets) = p.send(b"unwatched", false);
+    p.deliver_client(packets);
+    assert_eq!(bytes(p.read(id).0), b"unwatched");
+    let ack = p.server_ack();
+    p.deliver_server(ack);
+    p.drive();
+    assert_eq!(acked(&mut p, id), 0);
+}
+
+#[test]
+fn a_reset_stream_leaves_nothing_to_wait_for() {
+    let mut p = Pair::new(None);
+    let (id, _lost) = p.send(b"abandoned", false);
+    p.client.conn().send_stream(id).reset(7u32.into()).unwrap();
+    assert!(p.client.conn().send_stream(id).wait_acked());
+    p.drive();
+    assert_eq!(acked(&mut p, id), 0);
+}

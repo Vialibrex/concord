@@ -36,10 +36,10 @@ enum Answer {
 }
 
 #[derive(Default)]
-struct Seen {
-    connections: AtomicUsize,
+pub(super) struct Seen {
+    pub(super) connections: AtomicUsize,
     early_data: AtomicUsize,
-    requests: Mutex<Vec<(String, HeaderMap)>>,
+    pub(super) requests: Mutex<Vec<(String, HeaderMap)>>,
     preface: Mutex<Vec<u8>>,
 }
 
@@ -198,7 +198,7 @@ fn built(port: u16, extra: Value) -> Result<Naive, BuildError> {
     naive(&def, opts, &BuildCtx::new(TrustStore::new(b"", vec![])))
 }
 
-async fn echo(node: &dyn Outbound, payload: &[u8]) -> std::io::Result<Vec<u8>> {
+pub(super) async fn echo(node: &dyn Outbound, payload: &[u8]) -> std::io::Result<Vec<u8>> {
     let env = test_env();
     let cx = DialCx::new(&env, Initiator::Direct, None);
     let mut stream = node
@@ -210,7 +210,7 @@ async fn echo(node: &dyn Outbound, payload: &[u8]) -> std::io::Result<Vec<u8>> {
     Ok(got)
 }
 
-fn payload(len: usize) -> Vec<u8> {
+pub(super) fn payload(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 7) as u8).collect()
 }
 
@@ -588,213 +588,4 @@ async fn udp_needs_udp_over_tcp() {
 fn windows_follow_naive_and_cronet_go() {
     assert_eq!(Windows::new(0), Windows::new(128 << 20));
     assert_ne!(Windows::new(0), Windows::new(1 << 20));
-}
-
-/// What a server that never ends its side saw of a tunnel: the bytes, whether they ended with a
-/// FIN, and the error its next write met.
-struct Held {
-    got: Vec<u8>,
-    fin: bool,
-    write_error: String,
-}
-
-/// An HTTP/3 naive server without padding that echoes every tunnel, or with `hold` reads each
-/// tunnel to its end without ever ending its own side and reports it.
-async fn h3_server(
-    hold: Option<tokio::sync::mpsc::UnboundedSender<Held>>,
-) -> (Arc<Seen>, u16, quinn::Endpoint) {
-    let (endpoint, port) = crate::testing::quic_server(b"h3", |socket| socket);
-    let seen = Arc::new(Seen::default());
-    let shared = seen.clone();
-    let accept = endpoint.clone();
-    tokio::spawn(async move {
-        while let Some(connecting) = accept.accept().await {
-            let shared = shared.clone();
-            let hold = hold.clone();
-            tokio::spawn(async move {
-                let Ok(conn) = connecting.await else {
-                    return;
-                };
-                shared.connections.fetch_add(1, Ordering::Relaxed);
-                let mut h3 = ::h3::server::builder()
-                    .build::<_, bytes::Bytes>(h3_quinn::Connection::new(conn))
-                    .await
-                    .unwrap();
-                while let Ok(Some(resolver)) = h3.accept().await {
-                    let shared = shared.clone();
-                    let hold = hold.clone();
-                    tokio::spawn(async move {
-                        let (request, mut stream) = resolver.resolve_request().await.unwrap();
-                        let (head, ()) = request.into_parts();
-                        shared
-                            .requests
-                            .lock()
-                            .unwrap()
-                            .push((head.uri.to_string(), head.headers.clone()));
-                        stream
-                            .send_response(Response::builder().body(()).unwrap())
-                            .await
-                            .unwrap();
-                        if let Some(hold) = hold {
-                            let _ = hold.send(held(&mut stream).await);
-                            return;
-                        }
-                        while let Ok(Some(mut data)) = stream.recv_data().await {
-                            use bytes::Buf;
-                            let chunk = data.copy_to_bytes(data.remaining());
-                            if stream.send_data(chunk).await.is_err() {
-                                return;
-                            }
-                        }
-                    });
-                }
-            });
-        }
-    });
-    (seen, port, endpoint)
-}
-
-async fn held<S>(stream: &mut ::h3::server::RequestStream<S, bytes::Bytes>) -> Held
-where
-    S: ::h3::quic::BidiStream<bytes::Bytes>,
-{
-    use bytes::Buf;
-    let mut got = Vec::new();
-    let fin = loop {
-        match stream.recv_data().await {
-            Ok(Some(mut data)) => got.extend_from_slice(&data.copy_to_bytes(data.remaining())),
-            Ok(None) => break true,
-            Err(_) => break false,
-        }
-    };
-    let write_error = loop {
-        if let Err(err) = stream.send_data(bytes::Bytes::from_static(b"x")).await {
-            break format!("{err:?}");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    };
-    Held {
-        got,
-        fin,
-        write_error,
-    }
-}
-
-fn quic_node(port: u16) -> Arc<dyn Outbound> {
-    let raw = json!({
-        "name": "naive", "type": "naive", "server": "127.0.0.1", "port": port, "quic": true,
-        "username": "user", "password": "pass", "sni": "localhost", "skip-cert-verify": true,
-    });
-    let ProxyParse::Ok(def) = parse_proxy(raw.as_object().unwrap(), &Capabilities::full()).unwrap()
-    else {
-        panic!("naive was quarantined");
-    };
-    let concord_config::proxy::ProxyKind::Naive(opts) = &def.kind else {
-        unreachable!()
-    };
-    build(&def, opts, &BuildCtx::new(TrustStore::new(b"", vec![]))).unwrap()
-}
-
-#[tokio::test]
-async fn quic_tunnels_share_one_connection() {
-    let (seen, port, _endpoint) = h3_server(None).await;
-    let node = quic_node(port);
-    for size in [1, 300, 5000, 100_000] {
-        let data = payload(size);
-        assert_eq!(echo(&*node, &data).await.unwrap(), data);
-    }
-    assert_eq!(seen.connections.load(Ordering::Relaxed), 1);
-    let requests = seen.requests.lock().unwrap();
-    assert_eq!(requests.len(), 4);
-    assert_eq!(requests[0].0, "example.com:443");
-    let names: Vec<&str> = requests[0].1.keys().map(http::HeaderName::as_str).collect();
-    assert_eq!(
-        names,
-        ["padding", "padding-type-request", "proxy-authorization"]
-    );
-}
-
-#[tokio::test]
-async fn a_quic_tunnel_ended_while_its_reader_waits_stops_the_stream_cancelled() {
-    let (hold, mut held) = tokio::sync::mpsc::unbounded_channel();
-    let (_seen, port, _endpoint) = h3_server(Some(hold)).await;
-    let node = quic_node(port);
-    let env = test_env();
-    let cx = DialCx::new(&env, Initiator::Direct, None);
-    let stream = node
-        .connect(&cx, &Address::Domain("example.com".into(), 443))
-        .await
-        .unwrap();
-    let (mut read, mut write) = tokio::io::split(stream);
-    let patience = std::time::Duration::from_secs(5);
-    let reader = tokio::spawn(async move {
-        let mut rest = Vec::new();
-        read.read_to_end(&mut rest).await.map(|_| rest)
-    });
-    write.write_all(b"hello").await.unwrap();
-    write.flush().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    assert!(!reader.is_finished());
-    tokio::time::timeout(patience, write.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
-    tokio::time::timeout(patience, reader)
-        .await
-        .unwrap()
-        .expect("the reader panicked")
-        .unwrap();
-    let held = tokio::time::timeout(patience, held.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(held.got, b"hello");
-    assert!(held.fin);
-    assert!(
-        held.write_error.contains("H3_REQUEST_CANCELLED"),
-        "{}",
-        held.write_error
-    );
-}
-
-#[tokio::test]
-async fn a_closed_quic_tunnel_sends_its_writes_then_stops_the_stream() {
-    let (hold, mut held) = tokio::sync::mpsc::unbounded_channel();
-    let (_seen, port, _endpoint) = h3_server(Some(hold)).await;
-    let node = quic_node(port);
-    let env = test_env();
-    let cx = DialCx::new(&env, Initiator::Direct, None);
-    let stream = node
-        .connect(&cx, &Address::Domain("example.com".into(), 443))
-        .await
-        .unwrap();
-    let (mut read, mut write) = tokio::io::split(stream);
-    let patience = std::time::Duration::from_secs(5);
-    let reader = tokio::spawn(async move {
-        let mut rest = Vec::new();
-        read.read_to_end(&mut rest).await.map(|_| rest)
-    });
-    let data = payload(300_000);
-    write.write_all(&data).await.unwrap();
-    tokio::time::timeout(patience, write.shutdown())
-        .await
-        .unwrap()
-        .unwrap();
-    tokio::time::timeout(patience, reader)
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let held = tokio::time::timeout(patience, held.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(held.got.len(), data.len());
-    assert!(held.got == data);
-    assert!(held.fin);
-    assert!(
-        held.write_error.contains("H3_REQUEST_CANCELLED"),
-        "{}",
-        held.write_error
-    );
 }

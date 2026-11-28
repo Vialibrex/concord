@@ -300,6 +300,20 @@ impl<'a> SendStream<'a> {
         }
     }
 
+    /// Whether there is nothing left to wait for before resetting the stream: every byte
+    /// written so far, retransmissions included, has been acknowledged, or the stream was
+    /// reset, stopped or forgotten. While there is, a [`StreamEvent::Acked`] follows the
+    /// acknowledgement that leaves none unacknowledged.
+    // Concord: lets a client reset a stream without losing its last writes.
+    pub fn wait_acked(&mut self) -> bool {
+        let Some(Some(stream)) = self.state.send.get_mut(&self.id) else {
+            return true;
+        };
+        stream.ack_waiter =
+            !(stream.is_reset() || stream.stop_reason.is_some() || stream.pending.is_fully_acked());
+        !stream.ack_waiter
+    }
+
     /// Finish a send stream, signalling that no more data will be sent.
     ///
     /// If this fails, no [`StreamEvent::Finished`] will be generated.
@@ -494,6 +508,13 @@ pub enum StreamEvent {
     /// A finished stream has been fully acknowledged or stopped
     Finished {
         /// Which stream has been finished
+        id: StreamId,
+    },
+    /// Every byte written to a stream whose application called [`SendStream::wait_acked`] has
+    /// been acknowledged
+    // Concord: raised only for streams with a waiter.
+    Acked {
+        /// Which stream has been acknowledged
         id: StreamId,
     },
     /// The peer asked us to stop sending on an outgoing stream

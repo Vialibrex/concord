@@ -19,6 +19,7 @@ mod xhttp;
 
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use concord_common::{BoxStream, Tasks};
 use concord_tls::TlsConnector;
@@ -40,6 +41,10 @@ pub use singmux::{
 pub use v2ray_plugin::V2rayPluginOptions;
 pub use ws::WsOptions;
 pub use xhttp::{QuicDialFn, XhttpClient, XhttpDial, XhttpDownload, XhttpOptions, XhttpReuse};
+
+/// How long a tunnel that ends with a reset rather than a half close waits for its writes first:
+/// over HTTP/2 for its queued DATA to go out, over HTTP/3 for every byte to be acknowledged.
+pub const RESET_DRAIN: Duration = Duration::from_secs(10);
 
 pub type DialFn = Arc<dyn Fn() -> BoxFuture<'static, io::Result<BoxStream>> + Send + Sync>;
 

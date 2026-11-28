@@ -19,6 +19,8 @@ pub(super) struct Send {
     pub(super) data_blocked_limit: Option<u64>,
     /// The reason the peer wants us to stop, if `STOP_SENDING` was received
     pub(super) stop_reason: Option<VarInt>,
+    // Concord: whether the application waits for every written byte to be acknowledged.
+    pub(super) ack_waiter: bool,
 }
 
 impl Send {
@@ -32,6 +34,8 @@ impl Send {
             connection_blocked: false,
             data_blocked_limit: None,
             stop_reason: None,
+            // Concord: see `SendStream::wait_acked`.
+            ack_waiter: false,
         })
     }
 

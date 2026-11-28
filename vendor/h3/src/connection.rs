@@ -9,6 +9,8 @@ use bytes::{Buf, Bytes, BytesMut};
 use futures_util::{future, ready};
 use http::HeaderMap;
 use stream::WriteBuf;
+// Concord: see `write_shared`.
+use tokio::sync::Mutex;
 
 #[cfg(feature = "tracing")]
 use tracing::{instrument, warn};
@@ -78,7 +80,8 @@ where
     pub shared: Arc<SharedState>,
     /// TODO: breaking encapsulation just to see if we can get this to work, will fix before merging
     pub conn: C,
-    control_send: C::SendStream,
+    // Concord: shared with `client::SendRequest` for PRIORITY_UPDATE frames.
+    pub(crate) control_send: Arc<Mutex<C::SendStream>>,
     control_recv: Option<FrameStream<C::RecvStream, B>>,
     qpack_streams: QpackStreams<C, B>,
     /// Buffers incoming uni/recv streams which have yet to be claimed.
@@ -120,6 +123,24 @@ where
     fn shared_state(&self) -> &SharedState {
         &self.shared
     }
+}
+
+/// Writes `data` on a send stream that more than one task writes. The lock is held to the end,
+/// as quinn keeps one waker per stream; a writer dropped midway leaves its bytes queued in the
+/// stream, and the next one flushes them first.
+// Concord: the control stream is shared with `client::SendRequest`.
+pub(crate) async fn write_shared<S, D, B>(
+    stream: &Mutex<S>,
+    data: D,
+) -> Result<(), StreamErrorIncoming>
+where
+    S: SendStream<B>,
+    D: Into<WriteBuf<B>>,
+    B: Buf,
+{
+    let mut stream = stream.lock().await;
+    future::poll_fn(|cx| stream.poll_ready(cx)).await?;
+    stream::write(&mut *stream, data).await
 }
 
 enum GreaseStatus<S, B>
@@ -193,11 +214,18 @@ where
         let mut decoder_send = Option::take(&mut self.qpack_streams.decoder_send);
         let mut encoder_send = Option::take(&mut self.qpack_streams.encoder_send);
 
+        let grease_control = self.config.send_grease && self.config.grease_control_only;
+        let control_send = self.control_send.clone();
         let (control, ..) = future::join3(
-            stream::write(
-                &mut self.control_send,
-                WriteBuf::from(UniStreamHeader::Control(settings)),
-            ),
+            async move {
+                // Concord: see `client::Builder::grease_control_only`.
+                let header = if grease_control {
+                    UniStreamHeader::GreasedControl(settings)
+                } else {
+                    UniStreamHeader::Control(settings)
+                };
+                write_shared(&control_send, WriteBuf::from(header)).await
+            },
             async {
                 if let Some(stream) = &mut decoder_send {
                     let _ = stream::write(stream, WriteBuf::from(UniStreamHeader::Decoder)).await;
@@ -253,11 +281,16 @@ where
         //# QPACK encoder and decoder streams) first, and then create additional
 
         // start streams
-        let (control_send, qpack_encoder, qpack_decoder) = (
-            future::poll_fn(|cx| conn.poll_open_send(cx)).await,
-            future::poll_fn(|cx| conn.poll_open_send(cx)).await,
-            future::poll_fn(|cx| conn.poll_open_send(cx)).await,
-        );
+        let control_send = future::poll_fn(|cx| conn.poll_open_send(cx)).await;
+        // Concord: see `client::Builder::open_qpack_streams`.
+        let (qpack_encoder, qpack_decoder) = if config.qpack_streams {
+            (
+                future::poll_fn(|cx| conn.poll_open_send(cx)).await.ok(),
+                future::poll_fn(|cx| conn.poll_open_send(cx)).await.ok(),
+            )
+        } else {
+            (None, None)
+        };
 
         let control_send = match control_send {
             Err(StreamErrorIncoming::ConnectionErrorIncoming { connection_error }) => {
@@ -290,9 +323,10 @@ where
         };
 
         let qpack_streams = QpackStreams {
-            decoder_send: qpack_decoder.ok(),
+            // Concord: absent when `open_qpack_streams` is off.
+            decoder_send: qpack_decoder,
             decoder_recv: None,
-            encoder_send: qpack_encoder.ok(),
+            encoder_send: qpack_encoder,
             encoder_recv: None,
         };
 
@@ -304,17 +338,19 @@ where
         let mut conn_inner = Self {
             shared,
             conn,
-            control_send: control_send,
+            // Concord: see `write_shared`.
+            control_send: Arc::new(Mutex::new(control_send)),
             control_recv: None,
             qpack_streams,
             handled_connection_error: None,
             pending_recv_streams: Vec::with_capacity(3),
             got_peer_settings: false,
-            send_grease_frame: config.send_grease,
+            // Concord: see `client::Builder::grease_control_only`.
+            send_grease_frame: config.send_grease && !config.grease_control_only,
             config,
             accepted_streams: Default::default(),
             // send grease stream if configured
-            send_grease_stream_flag: config.send_grease,
+            send_grease_stream_flag: config.send_grease && !config.grease_control_only,
             // start at first step
             grease_step: GreaseStatus::NotStarted(PhantomData),
         };
@@ -349,7 +385,8 @@ where
         //# (Section 5.2) so that both endpoints can reliably determine whether
         //# previously sent frames have been processed and gracefully complete or
         //# terminate any necessary remaining tasks.
-        match stream::write(&mut self.control_send, Frame::Goaway(max_id.into())).await {
+        // Concord: see `write_shared`.
+        match write_shared(&self.control_send, Frame::<B>::Goaway(max_id.into())).await {
             Ok(()) => Ok(()),
             Err(StreamErrorIncoming::ConnectionErrorIncoming { connection_error }) => {
                 Err(self.handle_connection_error(connection_error))
@@ -1095,6 +1132,14 @@ where
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     pub fn stop_stream(&mut self, code: Code) {
         self.stream.reset(code.into());
+    }
+
+    // Concord: see `quic::SendStream::poll_acked`.
+    #[allow(missing_docs)]
+    pub fn poll_acked(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamError>> {
+        self.stream
+            .poll_acked(cx)
+            .map_err(|e| self.handle_quic_stream_error(e))
     }
 
     #[allow(missing_docs)]

@@ -324,6 +324,11 @@ where
     fn send_id(&self) -> StreamId {
         self.send.send_id()
     }
+
+    // Concord: see `quinn::SendStream::poll_acked`.
+    fn poll_acked(&mut self, cx: &mut task::Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
+        self.send.poll_acked(cx)
+    }
 }
 impl<B> quic::SendStreamUnframed<B> for BidiStream<B>
 where
@@ -495,6 +500,24 @@ where
     fn send_id(&self) -> StreamId {
         let num: u64 = self.stream.id().into();
         num.try_into().expect("invalid stream id")
+    }
+
+    // Concord: see `quinn::SendStream::poll_acked`.
+    fn poll_acked(&mut self, cx: &mut task::Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
+        match ready!(self.stream.poll_acked(cx)) {
+            Ok(None) => Poll::Ready(Ok(())),
+            Ok(Some(code)) => Poll::Ready(Err(StreamErrorIncoming::StreamTerminated {
+                error_code: code.into_inner(),
+            })),
+            Err(quinn::StoppedError::ConnectionLost(connection_error)) => {
+                Poll::Ready(Err(StreamErrorIncoming::ConnectionErrorIncoming {
+                    connection_error: convert_connection_error(connection_error),
+                }))
+            }
+            Err(error @ quinn::StoppedError::ZeroRttRejected) => {
+                Poll::Ready(Err(StreamErrorIncoming::Unknown(Box::new(error))))
+            }
+        }
     }
 }
 

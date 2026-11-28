@@ -337,6 +337,15 @@ pub(crate) fn quic_server(
     alpn: &[u8],
     wrap: impl FnOnce(Arc<dyn quinn::AsyncUdpSocket>) -> Arc<dyn quinn::AsyncUdpSocket>,
 ) -> (quinn::Endpoint, u16) {
+    quic_server_tuned(alpn, wrap, |_| {})
+}
+
+/// `quic_server` with `tune` applied to its transport settings.
+pub(crate) fn quic_server_tuned(
+    alpn: &[u8],
+    wrap: impl FnOnce(Arc<dyn quinn::AsyncUdpSocket>) -> Arc<dyn quinn::AsyncUdpSocket>,
+    tune: impl FnOnce(&mut quinn::TransportConfig),
+) -> (quinn::Endpoint, u16) {
     use quinn::Runtime;
 
     #[allow(clippy::unwrap_used, reason = "test helper")]
@@ -348,6 +357,7 @@ pub(crate) fn quic_server(
         ));
         let mut transport = quinn::TransportConfig::default();
         transport.datagram_receive_buffer_size(Some(1 << 20));
+        tune(&mut transport);
         config.transport_config(Arc::new(transport));
         let std_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let port = std_socket.local_addr().unwrap().port();

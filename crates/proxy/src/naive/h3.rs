@@ -24,6 +24,10 @@ type Requests = ::h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 const STREAM_WINDOW: u64 = 6 * 1024 * 1024;
 const SESSION_WINDOW: u64 = 15 * 1024 * 1024;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
+const MAX_FIELD_SECTION: u64 = 256 * 1024;
+const DATAGRAM_FRAME: u64 = 65536;
+/// The Priority Field Value naiveproxy sends for each CONNECT: default urgency, incremental.
+const CONNECT_PRIORITY: &[u8] = b"i";
 const ALPN: &str = "h3";
 
 pub(super) fn link(
@@ -40,7 +44,7 @@ pub(super) fn link(
         transport: transport(opts)?,
         obfs: ObfsSpec::None,
         hop: None,
-        datagram_frame: None,
+        datagram_frame: Some(DATAGRAM_FRAME),
         tasks: ctx.tasks.clone(),
     })
 }
@@ -65,7 +69,7 @@ fn transport(opts: &NaiveOpts) -> Result<Arc<quinn::TransportConfig>, BuildError
         peer_bounded_send: false,
         idle: concord_quic::MAX_IDLE,
         keep_alive: Some(KEEP_ALIVE),
-        datagram_frame: 0,
+        datagram_frame: DATAGRAM_FRAME,
         streams: None,
         mtu_discovery: true,
         congestion,
@@ -96,6 +100,12 @@ impl Session {
     pub(super) async fn connect(link: &QuicLink, cx: &DialCx<'_>) -> io::Result<Arc<Session>> {
         let quic = link.connect(cx).await?;
         let (mut driver, requests) = ::h3::client::builder()
+            .max_field_section_size(MAX_FIELD_SECTION)
+            .omit_zero_settings(true)
+            .enable_datagram(true)
+            .open_qpack_streams(false)
+            .grease_control_only(true)
+            .priority_update(Some(CONNECT_PRIORITY))
             .build(h3_quinn::Connection::new(quic.conn.clone()))
             .await
             .map_err(h3_io_error)?;

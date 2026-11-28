@@ -121,6 +121,8 @@ where
 
 pub enum UniStreamHeader {
     Control(Settings),
+    // Concord: SETTINGS then Chromium's grease frame, in one write as Chromium flushes them.
+    GreasedControl(Settings),
     WebTransportUni(SessionId),
     Encoder,
     Decoder,
@@ -132,6 +134,12 @@ impl Encode for UniStreamHeader {
             Self::Control(settings) => {
                 StreamType::CONTROL.encode(buf);
                 settings.encode(buf);
+            }
+            // Concord: see `UniStreamHeader::GreasedControl`.
+            Self::GreasedControl(settings) => {
+                StreamType::CONTROL.encode(buf);
+                settings.encode(buf);
+                crate::proto::frame::encode_chromium_grease(buf);
             }
             Self::WebTransportUni(session_id) => {
                 StreamType::WEBTRANSPORT_UNI.encode(buf);
@@ -544,6 +552,14 @@ where
 
     fn send_data<T: Into<WriteBuf<B>>>(&mut self, data: T) -> Result<(), StreamErrorIncoming> {
         self.stream.send_data(data)
+    }
+
+    // Concord: see `quic::SendStream::poll_acked`.
+    fn poll_acked(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<(), StreamErrorIncoming>> {
+        self.stream.poll_acked(cx)
     }
 }
 

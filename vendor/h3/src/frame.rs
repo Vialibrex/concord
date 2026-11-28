@@ -200,6 +200,11 @@ where
     fn send_id(&self) -> StreamId {
         self.stream.send_id()
     }
+
+    // Concord: see `quic::SendStream::poll_acked`.
+    fn poll_acked(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), StreamErrorIncoming>> {
+        self.stream.poll_acked(cx)
+    }
 }
 
 impl<S, B> FrameStream<S, B>

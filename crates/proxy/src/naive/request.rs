@@ -20,7 +20,7 @@ const OFFERED: &str = "1, 0";
 /// The first 17 printable characters, by code, that HPACK's Huffman code spends at least 8 bits
 /// on, so the value goes out as its length in raw octets; the 17th fills the tail
 /// (naiveproxy `padding_utils.cc`, `InitializeNonindexCodes`).
-const NON_INDEX: &[u8; 17] = b"!\"#$&'()*+,;<>?@X";
+pub(super) const NON_INDEX: &[u8; 17] = b"!\"#$&'()*+,;<>?@X";
 const PADDING_MIN: usize = 16;
 const PADDING_MAX: usize = 32;
 const PADDING_UNIQUE: usize = 16;

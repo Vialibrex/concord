@@ -28,7 +28,8 @@ pub async fn new<C, O>(
 ) -> Result<(Connection<C, Bytes>, SendRequest<O, Bytes>), ConnectionError>
 where
     C: quic::Connection<Bytes, OpenStreams = O>,
-    O: quic::OpenStreams<Bytes>,
+    // Concord: see `Builder::build`.
+    O: quic::OpenStreams<Bytes, SendStream = C::SendStream>,
 {
     //= https://www.rfc-editor.org/rfc/rfc9114#section-3.3
     //= type=implication
@@ -61,12 +62,16 @@ where
 /// ```
 pub struct Builder {
     config: Config,
+    // Concord: see `Builder::priority_update`.
+    priority_update: Option<&'static [u8]>,
 }
 
 impl Builder {
     pub(super) fn new() -> Self {
         Builder {
             config: Default::default(),
+            // Concord: sends none, as upstream.
+            priority_update: None,
         }
     }
 
@@ -121,6 +126,35 @@ impl Builder {
         self
     }
 
+    /// Whether to open the QPACK encoder and decoder streams. This client never uses a dynamic
+    /// table, so it may leave them unopened (RFC 9204 §4.2). Enabled by default.
+    // Concord: Chromium's client opens only the control stream.
+    pub fn open_qpack_streams(&mut self, enabled: bool) -> &mut Self {
+        self.config.qpack_streams = enabled;
+        self
+    }
+
+    /// With grease on, grease only as Chromium does: one reserved setting, `0x1f * N + 0x21` for a
+    /// random 32-bit `N` with a random 32-bit value, last in SETTINGS, and in the same write one
+    /// reserved frame of `N % 4` random octets for another such `N`; no grease stream and no
+    /// grease frame on request streams. Disabled by default.
+    // Concord: Chromium's grease for clients that copy its fingerprint.
+    pub fn grease_control_only(&mut self, enabled: bool) -> &mut Self {
+        self.config.grease_control_only = enabled;
+        self
+    }
+
+    /// Before each request's HEADERS, send a PRIORITY_UPDATE frame for its stream with this
+    /// Priority Field Value (RFC 9218 §7.2) on the control stream. `None`, the default, sends
+    /// none. The value is at most 32 bytes: the frame is encoded whole into `WriteBuf`'s fixed
+    /// header buffer, which a value that size still leaves room in.
+    // Concord: Chromium sends one ahead of every request.
+    pub fn priority_update(&mut self, value: Option<&'static [u8]>) -> &mut Self {
+        assert!(value.is_none_or(|value| value.len() <= 32));
+        self.priority_update = value;
+        self
+    }
+
     /// Enables the extended CONNECT protocol required for various HTTP/3 extensions.
     pub fn enable_extended_connect(&mut self, value: bool) -> &mut Self {
         self.config.settings.enable_extended_connect = value;
@@ -134,7 +168,8 @@ impl Builder {
     ) -> Result<(Connection<C, B>, SendRequest<O, B>), ConnectionError>
     where
         C: quic::Connection<B, OpenStreams = O>,
-        O: quic::OpenStreams<B>,
+        // Concord: the bound `quic::Connection` already implies, spelled out for `priority_update`.
+        O: quic::OpenStreams<B, SendStream = C::SendStream>,
         B: Buf,
     {
         let open = quic.opener();
@@ -148,7 +183,11 @@ impl Builder {
             conn_state,
             max_field_section_size: self.config.settings.max_field_section_size,
             sender_count: Arc::new(AtomicUsize::new(1)),
-            send_grease_frame: self.config.send_grease,
+            // Concord: see `Builder::grease_control_only`.
+            send_grease_frame: self.config.send_grease && !self.config.grease_control_only,
+            priority_update: self
+                .priority_update
+                .map(|value| (inner.control_send.clone(), value)),
             _buf: PhantomData,
         };
 

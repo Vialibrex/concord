@@ -15,6 +15,10 @@ pub struct Config {
     pub(crate) legacy_datagram: bool,
     // Concord: MASQUE omits disabled extension settings; other clients keep the original encoding.
     pub(crate) omit_zero_settings: bool,
+    // Concord: a client without a dynamic table may skip the QPACK streams (RFC 9204 §4.2).
+    pub(crate) qpack_streams: bool,
+    // Concord: Chromium's grease, a last SETTINGS entry and one control-stream frame only.
+    pub(crate) grease_control_only: bool,
 
     #[cfg(test)]
     pub(crate) send_settings: bool,
@@ -86,6 +90,8 @@ impl TryFrom<Config> for frame::Settings {
             legacy_datagram,
             // Concord: preserve ordinary clients unless the caller selects the WARP profile.
             omit_zero_settings,
+            qpack_streams: _,
+            grease_control_only,
             #[cfg(test)]
                 send_settings: _,
             settings:
@@ -98,7 +104,8 @@ impl TryFrom<Config> for frame::Settings {
                 },
         } = value;
 
-        if send_grease {
+        // Concord: `grease_control_only` moves the grease setting last, below.
+        if send_grease && !grease_control_only {
             //  Grease Settings (https://www.rfc-editor.org/rfc/rfc9114.html#name-defined-settings-parameters)
             //= https://www.rfc-editor.org/rfc/rfc9114#section-7.2.4.1
             //# Setting identifiers of the format 0x1f * N + 0x21 for non-negative
@@ -153,6 +160,10 @@ impl TryFrom<Config> for frame::Settings {
         if legacy_datagram {
             settings.insert(frame::SettingId::LEGACY_H3_DATAGRAM, 1)?;
         }
+        // Concord: Chromium sends its grease setting last, with a random value.
+        if send_grease && grease_control_only {
+            settings.insert(frame::SettingId::chromium_grease(), u64::from(fastrand::u32(..)))?;
+        }
         Ok(settings)
     }
 }
@@ -198,6 +209,8 @@ impl Default for Config {
             legacy_datagram: false,
             // Concord: preserve upstream default bytes.
             omit_zero_settings: false,
+            qpack_streams: true,
+            grease_control_only: false,
             #[cfg(test)]
             send_settings: true,
             settings: Default::default(),

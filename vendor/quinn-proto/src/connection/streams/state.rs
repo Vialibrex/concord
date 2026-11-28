@@ -721,6 +721,11 @@ impl StreamsState {
         let buffered = stream.pending.buffered();
         let finished = stream.ack(frame);
         self.buffered_data -= buffered - stream.pending.buffered();
+        // Concord: see `SendStream::wait_acked`.
+        if stream.ack_waiter && stream.pending.is_fully_acked() {
+            stream.ack_waiter = false;
+            self.events.push_back(StreamEvent::Acked { id });
+        }
         if !finished {
             // The stream is unfinished or may still need retransmits
             return;

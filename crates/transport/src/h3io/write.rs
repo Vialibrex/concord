@@ -2,6 +2,7 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
@@ -38,6 +39,17 @@ impl H3Upload {
         self.finished = true;
         Ok(())
     }
+
+    /// Cancels the stream as Chromium does, with RESET_STREAM H3_REQUEST_CANCELLED and no FIN,
+    /// once every byte written is acknowledged or `limit` has passed: quinn's reset abandons
+    /// unacknowledged bytes.
+    async fn cancel_when_acked(&mut self, limit: Duration) {
+        let acked = std::future::poll_fn(|cx| self.stream.poll_acked(cx));
+        let _ = tokio::time::timeout(limit, acked).await;
+        self.stream
+            .stop_stream(h3::error::Code::H3_REQUEST_CANCELLED);
+        self.finished = true;
+    }
 }
 
 impl Drop for H3Upload {
@@ -51,8 +63,8 @@ impl Drop for H3Upload {
 
 type Sending = BoxFuture<'static, (H3Upload, io::Result<()>)>;
 
-/// The request side as a byte stream: writes become DATA frames, shutdown finishes the stream,
-/// and then `end` takes the reader down with it.
+/// The request side as a byte stream: writes become DATA frames and shutdown finishes the
+/// stream, or, with `end`, cancels it and takes the reader down with it.
 pub struct H3Writer {
     send: Option<H3Upload>,
     pending: Option<Sending>,
@@ -141,7 +153,12 @@ impl AsyncWrite for H3Writer {
             let Some(mut send) = this.send.take() else {
                 return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
             };
+            let cancel = this.end.is_some();
             this.pending = Some(Box::pin(async move {
+                if cancel {
+                    send.cancel_when_acked(crate::RESET_DRAIN).await;
+                    return (send, Ok(()));
+                }
                 let result = send.finish().await;
                 (send, result)
             }));

@@ -268,6 +268,24 @@ impl SendStream {
         }
     }
 
+    /// Completes once every byte written so far has been acknowledged, with `Some` of the
+    /// peer's code if it stopped the stream first; a reset or forgotten stream has nothing left
+    /// to wait for, and a finished one waits for its FIN as well. Waiting costs nothing for
+    /// streams that never call it.
+    // Concord: lets a client reset a stream without losing its last writes.
+    pub fn poll_acked(&mut self, cx: &mut Context) -> Poll<Result<Option<VarInt>, StoppedError>> {
+        let mut conn = self.conn.state.lock("SendStream::poll_acked");
+        if let Some(output) = send_stream_stopped(&mut conn, self.stream, self.is_0rtt) {
+            return Poll::Ready(output);
+        }
+        if conn.inner.send_stream(self.stream).wait_acked() {
+            conn.acked.remove(&self.stream);
+            return Poll::Ready(Ok(None));
+        }
+        conn.acked.insert(self.stream, cx.waker().clone());
+        Poll::Pending
+    }
+
     /// Get the identity of this stream
     pub fn id(&self) -> StreamId {
         self.stream
@@ -347,6 +365,8 @@ impl Drop for SendStream {
 
         // clean up any previously registered wakers
         conn.blocked_writers.remove(&self.stream);
+        // Concord: see `poll_acked`.
+        conn.acked.remove(&self.stream);
 
         if conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
             return;
