@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use aws_lc_rs::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use chacha20::cipher::consts::U10;
 use hmac::{Hmac, Mac};
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 
 use super::meta::{NONCE_LEN, invalid};

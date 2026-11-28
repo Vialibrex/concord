@@ -17,7 +17,7 @@ use chacha20::ChaCha20;
 use chacha20::cipher::{KeyIvInit, StreamCipher};
 use concord_common::sync::lock;
 use concord_config::proxy::AmneziaWgOpts;
-use rand::Rng;
+use rand::RngExt;
 
 use self::mac::{COOKIE_REPLY, INITIATION, Macs, RESPONSE};
 use self::template::Template;

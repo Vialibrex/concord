@@ -12,7 +12,7 @@ use quinn_proto::crypto::{
 };
 use quinn_proto::transport_parameters::TransportParameters;
 use quinn_proto::{ConnectError, ConnectionId, Side, TransportError, TransportErrorCode};
-use rand::Rng;
+use rand::RngExt;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{
     ActiveKeyExchange, GetRandomFailed, SecureRandom, SharedSecret, SupportedKxGroup,

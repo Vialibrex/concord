@@ -219,7 +219,7 @@ impl V3Write {
             return;
         }
         let mut record = [0u8; ALERT_RECORD];
-        rand::Rng::fill(&mut rand::rng(), &mut record);
+        rand::RngExt::fill(&mut rand::rng(), &mut record);
         let [hi, lo] = u16::try_from(ALERT_RECORD - HEADER)
             .unwrap_or_default()
             .to_be_bytes();

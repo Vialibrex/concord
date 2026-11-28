@@ -7,7 +7,7 @@ use concord_common::{
     Address, ClockOffset, CoreError, DialCx, DialEnv, Initiator, IpVersion, PacketBuf, Tasks,
     recv_packet, send_packet,
 };
-use rand::Rng;
+use rand::RngExt;
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;

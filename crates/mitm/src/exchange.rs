@@ -10,7 +10,7 @@ use http_body_util::BodyExt;
 use hyper::body::{Body as HttpBody, Incoming};
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
-use rand::RngCore;
+use rand::Rng;
 use tokio::sync::OwnedSemaphorePermit;
 
 use crate::body::{Body, DataHook, EndHook, Tap, empty, file_body, from_incoming, full};

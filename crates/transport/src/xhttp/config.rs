@@ -1,6 +1,6 @@
 use std::io;
 
-use rand::Rng;
+use rand::RngExt;
 
 use crate::http1::invalid;
 

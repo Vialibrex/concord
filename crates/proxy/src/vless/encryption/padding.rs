@@ -1,7 +1,7 @@
 use std::io;
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 
 use super::invalid;
 

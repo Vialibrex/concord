@@ -2,7 +2,7 @@ use std::io;
 
 use concord_common::{BoxStream, Tasks};
 use http::{Method, Request, Uri};
-use rand::Rng;
+use rand::RngExt;
 
 use crate::h2io::{
     Activity, H2Body, Incoming, client_builder, h2_io_error, handshake_split, spawn_connection,

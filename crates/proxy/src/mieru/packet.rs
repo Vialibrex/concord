@@ -8,7 +8,7 @@ use std::time::Duration;
 use concord_common::addr::unmap;
 use concord_common::packet::{PacketSession, recv_packet, send_packet};
 use concord_common::{Address, PacketBuf, Tasks};
-use rand::Rng;
+use rand::RngExt;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::time::Instant;

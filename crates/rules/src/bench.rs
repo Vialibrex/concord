@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 use crate::testkit::{Flow, Kit, defs};
 use crate::{MatchCtx, RouteProgram, Step};

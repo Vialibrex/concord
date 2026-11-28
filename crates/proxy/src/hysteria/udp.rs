@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use concord_common::{Address, PacketBuf, PacketSession, Tasks};
 use concord_quic::{DatagramHub, QuicStream};
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;

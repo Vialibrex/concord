@@ -3,7 +3,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use tokio::net::UdpSocket;
 use tokio::time::{Instant, MissedTickBehavior, interval, timeout_at};

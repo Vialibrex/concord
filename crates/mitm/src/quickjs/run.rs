@@ -14,7 +14,7 @@ use bytes::Bytes;
 use concord_common::ScriptNotification;
 use concord_config::mitm::text::canonical_header;
 use concord_tls::TrustStore;
-use rand::RngCore;
+use rand::Rng;
 
 use super::bytecode::Thrown;
 use rquickjs::{

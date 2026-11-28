@@ -293,7 +293,7 @@ impl<S: Stream> Stream for RecordIo<S> {
 
 #[cfg(test)]
 mod tests {
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{RngExt, SeedableRng, rngs::StdRng};
     use tokio::io::{AsyncReadExt, AsyncWriteExt, duplex};
 
     use super::*;

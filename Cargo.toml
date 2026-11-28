@@ -167,7 +167,7 @@ proc-macro2 = { version = "1", default-features = false }
 # Built from the list revision `crates/group/data/public-suffix/VERSION` pins; they move together.
 psl = "=2.1.232"
 quote = { version = "1", default-features = false }
-rand = "0.9"
+rand = "0.10"
 smallvec = "1"
 syn = { version = "2", default-features = false }
 thiserror = "2"

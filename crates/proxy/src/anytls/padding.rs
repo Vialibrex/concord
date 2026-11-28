@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use md5::{Digest, Md5};
-use rand::Rng;
+use rand::RngExt;
 
 pub(super) const DEFAULT_SCHEME: &str = "stop=8\n0=30-30\n1=100-400\n2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000\n3=9-9,500-1000\n4=500-1000\n5=500-1000\n6=500-1000\n7=500-1000";
 

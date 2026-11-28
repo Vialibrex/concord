@@ -117,7 +117,7 @@ pub(super) fn derive(context: &[u8], material: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::{Rng, SeedableRng};
+    use rand::{RngExt, SeedableRng};
 
     #[test]
     fn binary_context_matches_blake3_for_random_utf8_at_tree_boundaries() {

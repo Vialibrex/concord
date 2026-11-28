@@ -23,7 +23,7 @@ use concord_common::{
     Address, BoxStream, DialCx, Outbound, OutboundInfo, OutboundKind, PacketSession, Tasks,
 };
 use concord_config::proxy::{MieruOpts, ProxyDef};
-use rand::Rng;
+use rand::RngExt;
 
 use self::packet::{Carrier, PacketUnderlay};
 use self::pattern::Pattern;

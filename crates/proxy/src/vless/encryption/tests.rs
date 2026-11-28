@@ -1,7 +1,7 @@
 use super::crypto::{Aead, Ctr};
 use super::*;
 use concord_common::Stream;
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 

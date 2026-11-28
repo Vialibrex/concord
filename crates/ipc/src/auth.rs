@@ -3,7 +3,7 @@ use std::io;
 use std::time::Duration;
 
 use hmac::{Hmac, Mac};
-use rand::Rng;
+use rand::RngExt;
 use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

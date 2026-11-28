@@ -4,7 +4,7 @@ use std::task::{Context, Poll, ready};
 
 use concord_common::stream_buffer::{StreamBuffer, poll_write_buffer};
 use concord_common::{BoxRead, BoxStream, BoxWrite, Stream};
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 const FRAMES: u32 = 8;

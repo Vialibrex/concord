@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use concord_common::addr::unmap;
 use concord_common::sync::lock;
 use concord_config::hosts::{HostValue as ConfigValue, HostsConfig};
-use rand::Rng;
+use rand::RngExt;
 
 use crate::DnsError;
 use crate::trie::DomainTrie;

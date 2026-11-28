@@ -11,7 +11,7 @@ use concord_common::Tasks;
 use concord_common::sync::lock;
 use quinn::udp::{RecvMeta, Transmit};
 use quinn::{AsyncUdpSocket, UdpPoller};
-use rand::Rng;
+use rand::RngExt;
 use tokio::task::JoinHandle;
 
 use crate::obfs::{Gecko, Opened, Seal};

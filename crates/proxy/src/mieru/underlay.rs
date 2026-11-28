@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use concord_common::{BoxRead, BoxStream, BoxWrite, Tasks};
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

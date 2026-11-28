@@ -8,7 +8,7 @@ use concord_config::rule::{NetworkKind, parse_rule};
 use indexmap::IndexMap;
 use rand::rngs::StdRng;
 use rand::seq::IndexedRandom;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 use crate::geo::is_lan;
 use crate::testkit::{Flow, Kit, Trace, drive};

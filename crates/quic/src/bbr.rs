@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use quinn::congestion::{BbrConfig, Controller, ControllerFactory};
 use quinn_proto::RttEstimator;
 use quinn_proto::congestion::ControllerMetrics;
-use rand::Rng;
+use rand::RngExt;
 
 const PACING_GAIN: [f32; 8] = [1.25, 0.75, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0];
 const STARTUP_GROWTH_TARGET: f32 = 1.25;

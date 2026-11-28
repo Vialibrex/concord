@@ -7,7 +7,7 @@ use concord_common::{Address, CoreError};
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, Request, StatusCode};
 use indexmap::IndexMap;
-use rand::Rng;
+use rand::RngExt;
 
 use super::padding::PaddingType;
 use crate::ctx::BuildError;

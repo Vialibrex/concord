@@ -10,7 +10,7 @@ use chacha20poly1305::ChaCha8Poly1305;
 use chacha20poly1305::aead::AeadInPlace;
 use concord_common::sync::lock;
 use concord_common::{Address, PacketBuf};
-use rand::Rng;
+use rand::RngExt;
 use shadowsocks::crypto::CipherKind;
 use shadowsocks::crypto::v1::Cipher;
 

@@ -1,7 +1,7 @@
 //! Summaries of repeated trials and the test that decides whether two cores differ.
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use serde::Serialize;
 
 const RESAMPLES: usize = 4000;

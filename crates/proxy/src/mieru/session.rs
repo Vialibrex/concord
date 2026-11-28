@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use rand::Rng;
+use rand::RngExt;
 use tokio::sync::mpsc;
 use tokio::time::{Instant, sleep_until};
 

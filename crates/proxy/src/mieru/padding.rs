@@ -1,7 +1,7 @@
 use std::io;
 
 use rand::seq::SliceRandom;
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 use sha2::{Digest, Sha256};
 
 use super::meta::invalid;

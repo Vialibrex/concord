@@ -3,7 +3,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
-use rand::Rng;
+use rand::RngExt;
 use tokio::net::UdpSocket;
 use tokio::time::{Instant, timeout_at};
 

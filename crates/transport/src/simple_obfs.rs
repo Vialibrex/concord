@@ -8,7 +8,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE;
 use concord_common::BoxStream;
 use concord_common::layered::{Layered, ReadLayer, WriteLayer, poll_drain};
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::http_obfs::wrap_with;

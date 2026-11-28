@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use aws_lc_rs::kem::{DecapsulationKey, ML_KEM_768};
 use concord_common::BoxStream;
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use x25519_dalek::{PublicKey as XPublic, StaticSecret};
 

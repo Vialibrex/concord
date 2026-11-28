@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand::Rng;
+use rand::RngExt;
 
 use crate::http1::HeaderMap;
 
@@ -77,7 +77,7 @@ pub(crate) struct Browser {
     curl_ua: String,
 }
 
-fn squared(rng: &mut impl Rng) -> f64 {
+fn squared(rng: &mut impl RngExt) -> f64 {
     let x: f64 = rng.random();
     x * x
 }

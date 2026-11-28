@@ -2,7 +2,7 @@ use std::io;
 
 use bytes::Bytes;
 use concord_quic::Fragment;
-use rand::Rng;
+use rand::RngExt;
 #[cfg(feature = "server")]
 use tokio::io::{AsyncRead, AsyncReadExt};
 

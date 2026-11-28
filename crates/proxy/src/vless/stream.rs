@@ -6,7 +6,7 @@ use std::task::{Context, Poll, ready};
 
 use concord_common::{Address, BoxRead, BoxWrite, Stream};
 use concord_tls::{TlsConn, TlsRead, TlsWrite};
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use super::vision_io::{VisionRead, VisionWrite};

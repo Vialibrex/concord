@@ -8,7 +8,7 @@ use concord_common::Address;
 use concord_common::stream_buffer::{BufferRequirements, StreamBuffer};
 use hmac::{Hmac, Mac};
 use md5::{Digest as _, Md5};
-use rand::Rng;
+use rand::RngExt;
 use sha3::Shake128;
 use sha3::digest::{ExtendableOutput, XofReader};
 

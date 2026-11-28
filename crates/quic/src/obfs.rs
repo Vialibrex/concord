@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
-use rand::Rng;
+use rand::RngExt;
 use sha2::Sha256;
 
 type Blake2b256 = Blake2b<U32>;

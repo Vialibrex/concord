@@ -10,7 +10,7 @@ use std::task::Poll;
 use concord_common::BoxStream;
 use concord_common::sync::lock;
 use concord_tls::{DecoyHandshake, TlsConnector, TlsOptions, TrustStore};
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::{AsyncRead, ReadBuf};
 
 use self::conn::{HMAC_SIZE, new_hmac, v2_conn, v3_conn};

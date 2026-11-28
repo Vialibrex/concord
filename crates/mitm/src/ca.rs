@@ -8,7 +8,7 @@ use arc_swap::ArcSwap;
 use concord_common::PRODUCT_NAME;
 use concord_common::sync::lock;
 use concord_platform::HomeDir;
-use rand::RngCore;
+use rand::Rng;
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256, RsaKeySize, SanType,

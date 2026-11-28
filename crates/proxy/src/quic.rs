@@ -7,7 +7,7 @@ use arc_swap::ArcSwapOption;
 use concord_common::{Address, ConnStep, DialCx, Initiator, SockOpts, Tasks};
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::{AsyncUdpSocket, Endpoint, EndpointConfig, Runtime, TokioRuntime};
-use rand::Rng;
+use rand::RngExt;
 
 use concord_config::proxy::TlsOpts;
 use concord_quic::{

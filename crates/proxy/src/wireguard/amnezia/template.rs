@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rand::Rng;
+use rand::RngExt;
 
 const MAX_PACKET: usize = 65_535;
 const MAX_RANDOM: usize = 1000;

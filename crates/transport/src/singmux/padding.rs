@@ -4,7 +4,7 @@ use std::task::{Context, Poll, ready};
 
 use concord_common::BoxStream;
 use concord_common::layered::{Layered, ReadLayer, WriteLayer};
-use rand::Rng;
+use rand::RngExt;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::http1::invalid;

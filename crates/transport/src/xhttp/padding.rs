@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 
 const CHARSET_BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const AVG_HUFFMAN_BYTES_PER_CHAR_BASE62: f64 = 0.8;
