@@ -52,6 +52,10 @@ fn normalize(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
+pub fn is_setuid_elevated_for(euid: u32, uid: u32) -> bool {
+    euid == 0 && uid != 0
+}
+
 pub fn is_setuid_elevated() -> bool {
     #[cfg(unix)]
     {
@@ -339,6 +343,22 @@ mod tests {
         for bad in ["../outside", "a/../../outside", "/etc/passwd", ".."] {
             let err = home.confine(bad).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{bad}");
+        }
+    }
+
+    #[test]
+    fn elevation_only_applies_to_root_acting_for_another_user() {
+        for (euid, uid, expected) in [
+            (0, 501, true),
+            (0, 0, false),
+            (502, 501, false),
+            (501, 501, false),
+        ] {
+            assert_eq!(
+                is_setuid_elevated_for(euid, uid),
+                expected,
+                "euid={euid}, uid={uid}",
+            );
         }
     }
 

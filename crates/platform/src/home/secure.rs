@@ -17,7 +17,7 @@ impl Owner {
     pub fn detect() -> Option<Owner> {
         // SAFETY: these calls take no arguments and cannot fail.
         let (euid, uid, gid) = unsafe { (libc::geteuid(), libc::getuid(), libc::getgid()) };
-        (euid == 0 && uid != 0).then_some(Owner { uid, gid })
+        super::is_setuid_elevated_for(euid, uid).then_some(Owner { uid, gid })
     }
 }
 

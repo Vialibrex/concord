@@ -45,7 +45,7 @@ pub use certs::{certs_from_dirs, system_root_certs};
 pub use clock::{local_utc_offset, set_system_time};
 pub use cpus::{assignable_cpus, available_cpus};
 pub use exhaustion::is_local_exhaustion;
-pub use home::{HomeDir, is_setuid_elevated};
+pub use home::{HomeDir, is_setuid_elevated, is_setuid_elevated_for};
 pub use icmp::{IcmpSocket, icmp_echo_socket};
 pub use identity::{SocketIdentity, with_same_socket};
 pub use limits::{FdPressure, fd_limit, open_fd_count, raise_fd_limit};

@@ -43,10 +43,22 @@ pub(crate) fn open(path: &Path, elevated: bool) -> Result<Opened, LoadError> {
 }
 
 fn read_file(path: &Path) -> io::Result<Vec<u8>> {
-    if !fs::metadata(path)?.is_file() {
+    use std::io::Read as _;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    let mut file = options.open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_file() {
         return Err(io::Error::other("not a regular file"));
     }
-    fs::read(path)
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Elevated, it keeps the hash it found to itself: the file may be one only root may read.
@@ -167,11 +179,14 @@ fn stage(bytes: &[u8], temp: &Path) -> io::Result<std::path::PathBuf> {
     let dir = temp.join(format!("{STAGE_PREFIX}{}-{stamp}", std::process::id()));
     private_dir(&dir)?;
     let copy = dir.join(crate::LIBRARY_NAME);
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&copy)?
-        .write_all(bytes)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o500);
+    }
+    options.open(&copy)?.write_all(bytes)?;
     Ok(copy)
 }
 
@@ -279,15 +294,66 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn only_a_regular_file_is_read_as_the_library() {
+        use std::os::unix::fs::symlink;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
         let temp = tempfile::tempdir().unwrap();
         let fifo = temp.path().join("fifo");
         let made = std::process::Command::new("mkfifo").arg(&fifo).status();
         assert!(made.unwrap().success());
+        let fifo_link = temp.path().join("fifo-link");
+        symlink(&fifo, &fifo_link).unwrap();
         assert!(read_file(&fifo).is_err());
+        assert!(read_file(&fifo_link).is_err());
         assert!(read_file(temp.path()).is_err());
+
         let file = temp.path().join("lib");
         fs::write(&file, b"library").unwrap();
+        let file_link = temp.path().join("file-link");
+        symlink(&file, &file_link).unwrap();
         assert_eq!(read_file(&file).unwrap(), b"library");
+        assert_eq!(read_file(&file_link).unwrap(), b"library");
+
+        let target = temp.path().join("swap");
+        let stage_link = temp.path().join("swap-next");
+        symlink(&file, &target).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let stop = stop.clone();
+            let (file, fifo, target, stage_link) = (file, fifo, target.clone(), stage_link);
+            std::thread::spawn(move || {
+                let mut to_fifo = true;
+                while !stop.load(Ordering::Relaxed) {
+                    let _ = fs::remove_file(&stage_link);
+                    let src = if to_fifo { &fifo } else { &file };
+                    if symlink(src, &stage_link).is_ok() {
+                        let _ = fs::rename(&stage_link, &target);
+                    }
+                    to_fifo = !to_fifo;
+                }
+            })
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = {
+            let target = target.clone();
+            std::thread::spawn(move || {
+                for _ in 0..400 {
+                    if let Ok(bytes) = read_file(&target) {
+                        assert_eq!(bytes, b"library");
+                    }
+                }
+                let _ = done_tx.send(());
+            })
+        };
+        let finished = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        stop.store(true, Ordering::Relaxed);
+        let _ = swapper.join();
+        if finished {
+            reader.join().unwrap();
+        }
+        assert!(finished, "read_file blocked on a path swapped to a FIFO");
     }
 
     #[test]
@@ -307,11 +373,13 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(copy.parent().unwrap())
+            let dir_mode = fs::metadata(copy.parent().unwrap())
                 .unwrap()
                 .permissions()
                 .mode();
-            assert_eq!(mode & 0o777, 0o700);
+            assert_eq!(dir_mode & 0o777, 0o700);
+            let file_mode = fs::metadata(&copy).unwrap().permissions().mode();
+            assert_eq!(file_mode & 0o777, 0o500);
         }
         let again = stage(b"again", temp.path()).unwrap();
         assert!(copy.exists(), "staging leaves another start's copy alone");
@@ -330,9 +398,14 @@ mod tests {
         fs::create_dir_all(&inner).unwrap();
         mode(&open, 0o777).unwrap();
         mode(&inner, 0o700).unwrap();
+        let open_canonical = fs::canonicalize(&open).unwrap().display().to_string();
         for refused in [&open, &inner] {
             let err = trusted_root(refused).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                err.to_string(),
+                format!("{open_canonical} may be changed by other users"),
+            );
         }
     }
 
@@ -340,8 +413,18 @@ mod tests {
     #[test]
     fn only_root_acting_for_a_user_stages_outside_tmpdir_not_setgid_or_another_user() {
         assert!(!concord_platform::is_setuid_elevated());
-        assert_eq!(stage_root(false).unwrap(), std::env::temp_dir());
         let own = fs::canonicalize(own_temp_dir().unwrap()).unwrap();
-        assert_eq!(stage_root(true).unwrap(), own);
+        let tmp = std::env::temp_dir();
+        assert_eq!(
+            stage_root(concord_platform::is_setuid_elevated_for(0, 501)).unwrap(),
+            own
+        );
+        for (euid, uid) in [(0, 0), (502, 501), (501, 501)] {
+            assert_eq!(
+                stage_root(concord_platform::is_setuid_elevated_for(euid, uid)).unwrap(),
+                tmp,
+                "euid={euid}, uid={uid}",
+            );
+        }
     }
 }

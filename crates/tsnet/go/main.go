@@ -453,6 +453,10 @@ func cts_query_dns(h C.int64_t, id C.uint64_t, query *C.uint8_t, length C.size_t
 }
 
 func (n *node) queryDNS(raw []byte) ([]byte, error) {
+	<-n.startDone
+	if !n.started {
+		return nil, net.ErrClosed
+	}
 	var parser dnsmessage.Parser
 	if _, err := parser.Start(raw); err != nil {
 		return nil, err

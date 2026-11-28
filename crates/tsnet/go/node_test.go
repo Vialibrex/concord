@@ -3,13 +3,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/metacubex/tailscale/ipn/store/mem"
+	"github.com/metacubex/tailscale/tsnet"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -151,5 +155,39 @@ func TestWriteAfterTheBuffersAreFreedIsClosed(t *testing.T) {
 	tun.free()
 	if _, err := tun.Write([][]byte{make([]byte, 20)}, 0); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("Write after free = %v", err)
+	}
+}
+
+func TestQueryDNSDoesNotStartANodeWhoseStartWasSkipped(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	startDone := make(chan struct{})
+	close(startDone)
+	s := &tsnet.Server{
+		Dir:        t.TempDir(),
+		Hostname:   "test",
+		ControlURL: deadControl,
+		Ephemeral:  true,
+		Store:      new(mem.Store),
+		Logf:       func(string, ...any) {},
+		UserLogf:   func(string, ...any) {},
+	}
+	defer func() {
+		if s.Sys() != nil {
+			_ = s.Close()
+		}
+	}()
+	n := &node{
+		server:    s,
+		ctx:       ctx,
+		cancel:    cancel,
+		startDone: startDone,
+		started:   false,
+	}
+	if _, err := n.queryDNS(dnsQuery(t)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("queryDNS on unstarted node = %v, want net.ErrClosed", err)
+	}
+	if s.Sys() != nil {
+		t.Fatal("queryDNS implicitly started tsnet.Server when Start was skipped")
 	}
 }
