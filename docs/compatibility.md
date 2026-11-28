@@ -251,9 +251,10 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   tailscale node, so a profile without one never loads it; without the library such a dial fails and says where the
   library belongs. Its connections run on Concord's own IP stack, as WireGuard's do, which answers a peer's ping of
   the node. `ts://<node>` and `tailscale://<node>` DNS servers ask the node's resolver: MagicDNS, then the tailnet's
-  DNS settings. A node with no `auth-key` and no saved login fails its dials at once with the login URL, logs it at
-  warning level and sends a `nodeLogin` event, where mihomo logs it at info level and its dials fail without it; in
-  an app, the URL shows as the failed connection's reason. When the device's network changes or the TUN comes up,
+  DNS settings; a percent-encoded host that decodes to invalid UTF-8 is rejected when loading, where mihomo loads it
+  and fails on query because no YAML node name can match. A node with no `auth-key` and no saved login fails its dials
+  at once with the login URL, logs it at warning level and sends a `nodeLogin` event, where mihomo logs it at info
+  level and its dials fail without it; in an app, the URL shows as the failed connection's reason. When the device's network changes or the TUN comes up,
   the node keeps its login and address, as in mihomo, and opens its UDP sockets again on the network now in use; its
   control and DERP connections carry on until they fail. A node without `hostname` presents its own name, where
   mihomo presents the program's name, which in an app is the app process and tells the tailnet nothing. As in

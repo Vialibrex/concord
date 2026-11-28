@@ -1,3 +1,5 @@
+mod url_host;
+
 use std::net::IpAddr;
 
 use indexmap::IndexMap;
@@ -203,15 +205,13 @@ pub fn parse_upstream(server: &str) -> Result<Upstream> {
             make(UpstreamScheme::Rcode(code), name, 0, String::new())
         }
         "ts" | "tailscale" => {
-            if hostport.is_empty() {
+            let host = url_host::parse_url_host(hostport).map_err(|err| {
+                ConfigError::new(format!("parse {normalized:?}: {}", err.message))
+            })?;
+            if host.is_empty() {
                 return Err(ConfigError::new("missing Tailscale proxy name"));
             }
-            make(
-                UpstreamScheme::Tailscale,
-                hostport.to_string(),
-                0,
-                String::new(),
-            )
+            make(UpstreamScheme::Tailscale, host, 0, String::new())
         }
         "et" | "easytier" => {
             return Err(ConfigError::new(format!(
@@ -823,12 +823,89 @@ mod tests {
 
     #[test]
     fn a_tailscale_server_names_its_node() {
-        for text in ["ts://office", "tailscale://office", "ts://someone@office"] {
+        for (text, want) in [
+            ("ts://office", "office"),
+            ("tailscale://office", "office"),
+            ("ts://someone@office", "office"),
+            ("ts://%E5%AE%B6", "家"),
+            ("ts://%e5%ae%b6", "家"),
+            ("tailscale://%E5%AE%B6", "家"),
+            ("ts://家", "家"),
+            ("ts://someone@%E5%AE%B6", "家"),
+            ("ts://%E5%AE%B6:53", "家:53"),
+            ("ts://a%25b", "a%b"),
+            ("ts://a!b<c", "a!b<c"),
+            ("ts://[fe80::1]", "[fe80::1]"),
+            ("ts://[::ffff:1.2.3.4]", "[::ffff:1.2.3.4]"),
+            ("ts://[fe80::1%25en0]:53", "[fe80::1%en0]:53"),
+            ("ts://[fe80::1%25en%200]", "[fe80::1%en 0]"),
+            ("ts://[fe80::1%25家]", "[fe80::1%家]"),
+        ] {
             let up = parse_upstream(text).unwrap();
             assert_eq!(
                 (up.scheme, up.host.as_str()),
-                (UpstreamScheme::Tailscale, "office")
+                (UpstreamScheme::Tailscale, want),
+                "{text}"
             );
+        }
+    }
+
+    #[test]
+    fn a_tailscale_server_rejects_invalid_url_host_escapes_and_characters() {
+        for (bad, expected) in [
+            (
+                "ts://my%20node",
+                "parse \"ts://my%20node\": invalid URL escape \"%20\"",
+            ),
+            (
+                "ts://a%2Fb",
+                "parse \"ts://a%2Fb\": invalid URL escape \"%2F\"",
+            ),
+            (
+                "ts://a%ZZb",
+                "parse \"ts://a%ZZb\": invalid URL escape \"%ZZ\"",
+            ),
+            ("ts://a%2", "parse \"ts://a%2\": invalid URL escape \"%2\""),
+            ("ts://a%", "parse \"ts://a%\": invalid URL escape \"%\""),
+            (
+                "ts://my node",
+                "parse \"ts://my node\": invalid character \" \" in host name",
+            ),
+            (
+                "ts://node:abc",
+                "parse \"ts://node:abc\": invalid port \":abc\" after host",
+            ),
+            (
+                "ts://bad\tname",
+                "parse \"ts://bad\\tname\": net/url: invalid control character in URL",
+            ),
+            ("ts://%FF", "parse \"ts://%FF\": invalid UTF-8 in host name"),
+            ("ts://%E5", "parse \"ts://%E5\": invalid UTF-8 in host name"),
+            ("ts://a[b", "parse \"ts://a[b\": invalid IP-literal"),
+            (
+                "ts://[fe80::1",
+                "parse \"ts://[fe80::1\": missing ']' in host",
+            ),
+            ("ts://[]", "parse \"ts://[]\": invalid host"),
+            (
+                "ts://[1.2.3.4]",
+                "parse \"ts://[1.2.3.4]\": invalid IP-literal",
+            ),
+            (
+                "ts://[1.2.3.4%25en0]",
+                "parse \"ts://[1.2.3.4%25en0]\": invalid host",
+            ),
+            (
+                "ts://[fe80::1%25]",
+                "parse \"ts://[fe80::1%25]\": invalid host",
+            ),
+            (
+                "ts://[fe80::1%25%C3%A9]",
+                "parse \"ts://[fe80::1%25%C3%A9]\": invalid URL escape \"%C3\"",
+            ),
+        ] {
+            let err = parse_upstream(bad).unwrap_err();
+            assert_eq!(err.message, expected, "{bad}");
         }
     }
 
