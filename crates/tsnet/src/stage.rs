@@ -23,7 +23,7 @@ pub(crate) enum Opened {
     Missing(String),
 }
 
-pub(crate) fn open(path: &Path) -> Result<Opened, LoadError> {
+pub(crate) fn open(path: &Path, elevated: bool) -> Result<Opened, LoadError> {
     let Some(pinned) = PINNED else {
         // SAFETY: the library is Concord's own Go build; loading runs the Go runtime's
         // initialisers, which start its threads and touch no state of this process.
@@ -32,17 +32,25 @@ pub(crate) fn open(path: &Path) -> Result<Opened, LoadError> {
             Err(err) => Opened::Missing(format!("{}: {err}", path.display())),
         });
     };
-    let bytes = match fs::read(path) {
+    let bytes = match read_file(path) {
         Ok(bytes) => bytes,
         Err(err) => return Ok(Opened::Missing(format!("{}: {err}", path.display()))),
     };
-    check(path, &bytes, pinned)?;
-    load(&bytes, &std::env::temp_dir())
+    check(path, &bytes, pinned, elevated)?;
+    load(&bytes)
         .map(Opened::Loaded)
         .map_err(|err| LoadError::Stage(err.to_string()))
 }
 
-fn check(path: &Path, bytes: &[u8], pinned: &'static str) -> Result<(), LoadError> {
+fn read_file(path: &Path) -> io::Result<Vec<u8>> {
+    if !fs::metadata(path)?.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    fs::read(path)
+}
+
+/// Elevated, it keeps the hash it found to itself: the file may be one only root may read.
+fn check(path: &Path, bytes: &[u8], pinned: &'static str, elevated: bool) -> Result<(), LoadError> {
     let found: String = Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -52,13 +60,13 @@ fn check(path: &Path, bytes: &[u8], pinned: &'static str) -> Result<(), LoadErro
     }
     Err(LoadError::Mismatch {
         path: path.display().to_string(),
-        found,
+        found: (!elevated).then_some(found),
         pinned,
     })
 }
 
 #[cfg(target_os = "linux")]
-fn load(bytes: &[u8], _temp: &Path) -> io::Result<libloading::Library> {
+fn load(bytes: &[u8]) -> io::Result<libloading::Library> {
     use std::os::fd::{AsRawFd, FromRawFd};
     // SAFETY: a valid NUL-terminated name and flags; the result is checked below.
     let fd = unsafe { libc::memfd_create(c"concord-tsnet".as_ptr(), libc::MFD_CLOEXEC) };
@@ -74,13 +82,80 @@ fn load(bytes: &[u8], _temp: &Path) -> io::Result<libloading::Library> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn load(bytes: &[u8], temp: &Path) -> io::Result<libloading::Library> {
-    let copy = stage(bytes, temp)?;
+fn load(bytes: &[u8]) -> io::Result<libloading::Library> {
+    let root = stage_root(concord_platform::is_setuid_elevated())?;
+    let copy = stage(bytes, &root)?;
     // SAFETY: as in `open`; the copy is the checked library in a directory only this process's
     // user may write.
     let lib = unsafe { libloading::Library::new(&copy) }.map_err(io::Error::other)?;
-    remove_stale(temp, copy.parent());
+    remove_stale(&root, copy.parent());
     Ok(lib)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn stage_root(elevated: bool) -> io::Result<std::path::PathBuf> {
+    if elevated {
+        trusted_root(&own_temp_dir()?)
+    } else {
+        Ok(std::env::temp_dir())
+    }
+}
+
+#[cfg(windows)]
+fn stage_root(_elevated: bool) -> io::Result<std::path::PathBuf> {
+    Ok(std::env::temp_dir())
+}
+
+/// Kept per user under `/var/folders`, not taken from the environment the caller set.
+#[cfg(target_vendor = "apple")]
+fn own_temp_dir() -> io::Result<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut buf = vec![0u8; 1024];
+    // SAFETY: `buf` is writable for its whole length, which is passed with it.
+    let len = unsafe {
+        libc::confstr(
+            libc::_CS_DARWIN_USER_TEMP_DIR,
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+        )
+    };
+    if len == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len > buf.len() {
+        return Err(io::Error::other(
+            "the temporary directory's path is too long",
+        ));
+    }
+    buf.truncate(len - 1);
+    Ok(std::ffi::OsString::from_vec(buf).into())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_vendor = "apple"))))]
+fn own_temp_dir() -> io::Result<std::path::PathBuf> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "no directory to stage the library in that only this user may change",
+    ))
+}
+
+/// Refused unless root or this user owns each level, so nobody else can replace what is staged.
+#[cfg(all(unix, any(not(target_os = "linux"), test)))]
+fn trusted_root(dir: &Path) -> io::Result<std::path::PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    let resolved = fs::canonicalize(dir)?;
+    for dir in resolved.ancestors() {
+        let meta = fs::metadata(dir)?;
+        if (meta.uid() != 0 && meta.uid() != euid) || meta.mode() & 0o022 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} may be changed by other users", dir.display()),
+            ));
+        }
+    }
+    Ok(resolved)
 }
 
 /// Writes the checked bytes into a directory made new for this process under `temp`.
@@ -191,10 +266,28 @@ mod tests {
         let bytes = b"not the library";
         let pin = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         assert!(matches!(
-            check(Path::new("lib"), bytes, pin),
-            Err(LoadError::Mismatch { .. })
+            check(Path::new("lib"), bytes, pin, false),
+            Err(LoadError::Mismatch { found: Some(_), .. })
         ));
-        assert!(check(Path::new("lib"), b"", pin).is_ok());
+        assert!(matches!(
+            check(Path::new("lib"), bytes, pin, true),
+            Err(LoadError::Mismatch { found: None, .. })
+        ));
+        assert!(check(Path::new("lib"), b"", pin, true).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_regular_file_is_read_as_the_library() {
+        let temp = tempfile::tempdir().unwrap();
+        let fifo = temp.path().join("fifo");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.unwrap().success());
+        assert!(read_file(&fifo).is_err());
+        assert!(read_file(temp.path()).is_err());
+        let file = temp.path().join("lib");
+        fs::write(&file, b"library").unwrap();
+        assert_eq!(read_file(&file).unwrap(), b"library");
     }
 
     #[test]
@@ -224,5 +317,31 @@ mod tests {
         assert!(copy.exists(), "staging leaves another start's copy alone");
         remove_stale(temp.path(), again.parent());
         assert!(!copy.exists() && again.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_elevated_copy_is_staged_only_where_nobody_else_may_write_it_or_above_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |dir: &Path, mode| fs::set_permissions(dir, fs::Permissions::from_mode(mode));
+        let temp = tempfile::tempdir().unwrap();
+        let open = temp.path().join("open");
+        let inner = open.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        mode(&open, 0o777).unwrap();
+        mode(&inner, 0o700).unwrap();
+        for refused in [&open, &inner] {
+            let err = trusted_root(refused).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        }
+    }
+
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn only_root_acting_for_a_user_stages_outside_tmpdir_not_setgid_or_another_user() {
+        assert!(!concord_platform::is_setuid_elevated());
+        assert_eq!(stage_root(false).unwrap(), std::env::temp_dir());
+        let own = fs::canonicalize(own_temp_dir().unwrap()).unwrap();
+        assert_eq!(stage_root(true).unwrap(), own);
     }
 }

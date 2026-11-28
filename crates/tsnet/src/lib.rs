@@ -163,11 +163,12 @@ pub enum LoadError {
     #[error("the Tailscale library speaks ABI {found}, this Concord needs {ABI_VERSION}")]
     Version { found: i32 },
     #[error(
-        "the Tailscale library {path} failed verification: its SHA-256 is {found}, this Concord was built for {pinned}"
+        "the Tailscale library {path} failed verification: {}this Concord was built for {pinned}",
+        found.as_ref().map(|found| format!("its SHA-256 is {found}, ")).unwrap_or_default()
     )]
     Mismatch {
         path: String,
-        found: String,
+        found: Option<String>,
         pinned: &'static str,
     },
     #[error("the checked Tailscale library could not be loaded: {0}")]
@@ -213,9 +214,10 @@ pub struct Library {
 
 static LOADED: OnceLock<Result<Library, LoadError>> = OnceLock::new();
 
-fn candidates() -> Vec<PathBuf> {
+/// Elevated, only paths beside the core remain, which on macOS its caller can still redirect.
+fn candidates(elevated: bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(path) = std::env::var_os("CONCORD_TSNET_LIB") {
+    if let Some(path) = std::env::var_os("CONCORD_TSNET_LIB").filter(|_| !elevated) {
         out.push(PathBuf::from(path));
     }
     if let Some(dir) = std::env::current_exe()
@@ -228,7 +230,9 @@ fn candidates() -> Vec<PathBuf> {
     }
     // Windows looks a bare name up along PATH too, where anyone may put a DLL of that name.
     #[cfg(not(windows))]
-    out.push(PathBuf::from(LIBRARY_NAME));
+    if !elevated {
+        out.push(PathBuf::from(LIBRARY_NAME));
+    }
     out
 }
 
@@ -246,18 +250,20 @@ impl Library {
     /// Runs once; a library that fails its check is not replaced by another candidate.
     fn load() -> Result<Library, LoadError> {
         let mut causes = Vec::new();
-        let loaded = candidates()
-            .into_iter()
-            .find_map(|path| match stage::open(&path) {
-                Ok(stage::Opened::Loaded(lib)) => {
-                    Some(kept_on_error(lib, Library::bind).map(|(fns, lib)| fns.into_library(lib)))
-                }
-                Ok(stage::Opened::Missing(why)) => {
-                    causes.push(why);
-                    None
-                }
-                Err(err) => Some(Err(err)),
-            });
+        let elevated = concord_platform::is_setuid_elevated();
+        let loaded =
+            candidates(elevated)
+                .into_iter()
+                .find_map(|path| match stage::open(&path, elevated) {
+                    Ok(stage::Opened::Loaded(lib)) => Some(
+                        kept_on_error(lib, Library::bind).map(|(fns, lib)| fns.into_library(lib)),
+                    ),
+                    Ok(stage::Opened::Missing(why)) => {
+                        causes.push(why);
+                        None
+                    }
+                    Err(err) => Some(Err(err)),
+                });
         let result = loaded.unwrap_or_else(|| {
             Err(LoadError::NotFound {
                 name: LIBRARY_NAME.to_string(),
@@ -702,6 +708,15 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
+
+    #[test]
+    fn an_elevated_core_looks_for_the_library_only_beside_itself() {
+        let elevated = candidates(true);
+        assert!(!elevated.is_empty());
+        assert!(elevated.iter().all(|path| path.is_absolute()));
+        #[cfg(not(windows))]
+        assert!(candidates(false).contains(&PathBuf::from(LIBRARY_NAME)));
+    }
 
     struct Loaded(Arc<AtomicBool>);
 

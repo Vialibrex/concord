@@ -1572,6 +1572,7 @@ name = "concord-tsnet"
 version = "0.1.0"
 dependencies = [
  "concord-common",
+ "concord-platform",
  "libc",
  "libloading 0.9.0",
  "sha2 0.10.9",
