@@ -472,6 +472,7 @@ dependencies = [
  "bytes",
  "clap",
  "concord-ipc",
+ "concord-tsnet",
  "h3",
  "h3-quinn",
  "hex",
@@ -1396,6 +1397,7 @@ dependencies = [
  "concord-test-support",
  "concord-tls",
  "concord-transport",
+ "concord-tsnet",
  "crc32fast",
  "futures-util",
  "gotatun",
@@ -1563,6 +1565,20 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "concord-tsnet"
+version = "0.1.0"
+dependencies = [
+ "concord-common",
+ "libc",
+ "libloading 0.9.0",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

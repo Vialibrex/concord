@@ -47,6 +47,7 @@ fn build_kind(def: &ProxyDef, ctx: &BuildCtx) -> Result<Arc<dyn Outbound>, Build
         ProxyKind::Masque(opts) => crate::masque::build(def, opts, ctx),
         ProxyKind::Naive(opts) => crate::naive::build(def, opts, ctx),
         ProxyKind::OpenVpn(opts) => crate::openvpn::build(def, opts, ctx),
+        ProxyKind::Tailscale(opts) => crate::tailscale::build(def, opts, ctx),
         ProxyKind::Ssr(opts) => crate::ssr::build(def, opts, ctx),
         ProxyKind::Snell(opts) => crate::snell::build(def, opts, ctx),
         ProxyKind::Ssh(opts) => crate::ssh::build(def, opts, ctx),

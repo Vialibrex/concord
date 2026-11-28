@@ -10,7 +10,7 @@ use concord_config::dns::{
 };
 use concord_config::hosts::HostsConfig;
 
-use crate::client::{ClientRef, DisableTypes, EcsClient, Params, RcodeClient};
+use crate::client::{ClientRef, DisableTypes, EcsClient, NodeClient, Params, RcodeClient};
 use crate::dialer::{Connector, Shared, Via};
 use crate::doh::{DohClient, DohTarget};
 use crate::doh3::{Doh3Client, PreferH3Client};
@@ -118,6 +118,9 @@ impl Builder<'_> {
             }
             UpstreamScheme::System | UpstreamScheme::Dhcp(_) => Arc::clone(&self.system_client),
             UpstreamScheme::Rcode(code) => Arc::new(RcodeClient::new(rcode_of(*code), &up.host)),
+            UpstreamScheme::Tailscale => {
+                Arc::new(NodeClient::new(up.host.clone(), self.shared.dialer.clone()))
+            }
             UpstreamScheme::Quic => {
                 Arc::new(DoqClient::new(up.host.clone(), up.port, connector, &params).map_err(io)?)
             }

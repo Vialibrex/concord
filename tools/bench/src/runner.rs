@@ -43,6 +43,8 @@ pub struct Rig {
     pub mihomo: PathBuf,
     pub sing_box: Option<PathBuf>,
     pub openvpn: Option<PathBuf>,
+    pub tailscale: Option<PathBuf>,
+    pub core_log: String,
     pub cpus: Option<CpuPlan>,
     pub netns: Option<Netns>,
     pub dir: PathBuf,
@@ -63,6 +65,20 @@ struct Far {
     cases: Vec<Case>,
     /// Cases whose listener the server refused, with its reason.
     refused: Vec<(String, String)>,
+}
+
+/// The cases whose listener the server log says failed, with its message.
+fn refused_listeners(dir: &Path, built: &[Case]) -> Vec<(String, String)> {
+    let log = std::fs::read_to_string(dir.join("logs/server.log")).unwrap_or_default();
+    built
+        .iter()
+        .filter_map(|c| {
+            let marker = format!("Listener {} listen err", c.name());
+            let line = log.lines().find(|l| l.contains(&marker))?;
+            let message = line.split_once("msg=").map_or(line, |(_, m)| m);
+            Some((c.name().to_string(), message.trim_matches('"').to_string()))
+        })
+        .collect()
 }
 
 impl Rig {
@@ -143,7 +159,7 @@ impl Rig {
         let certs = self.dir.join("server/certs");
         std::fs::create_dir_all(&certs).map_err(|e| e.to_string())?;
         cases::write_certs(&certs).map_err(|e| e.to_string())?;
-        let built = self.build_cases(ip, &certs);
+        let mut built = self.build_cases(ip, &certs);
         let server = if built.iter().any(|c| c.listener.is_some()) {
             let home = self.dir.join("server");
             std::fs::create_dir_all(&home).map_err(|e| e.to_string())?;
@@ -221,23 +237,12 @@ impl Rig {
         let server_side = self.placement(Role::Server);
         let openvpn =
             crate::openvpn::start(&built, ip, self.openvpn.as_deref(), &self.dir, &server_side);
-        let openvpn = openvpn.await.map_err(|error| error.to_string())?;
+        let mut openvpn = openvpn.await.map_err(|error| error.to_string())?;
+        let tools = self.tailscale.as_deref();
+        let peers = crate::tailscale::start(&mut built, ip, tools, &self.dir, &server_side);
+        openvpn.extend(peers.await.map_err(|error| error.to_string())?);
         tokio::time::sleep(Duration::from_millis(800)).await;
-        let log = std::fs::read_to_string(self.dir.join("logs/server.log")).unwrap_or_default();
-        let refused = built
-            .iter()
-            .filter_map(|c| {
-                let marker = format!("Listener {} listen err", c.name());
-                let line = log.lines().find(|l| l.contains(&marker))?;
-                Some((
-                    c.name().to_string(),
-                    line.split_once("msg=")
-                        .map_or(line, |(_, m)| m)
-                        .trim_matches('"')
-                        .to_string(),
-                ))
-            })
-            .collect();
+        let refused = refused_listeners(&self.dir, &built);
         Ok(Far {
             ip,
             ports,
@@ -480,7 +485,7 @@ impl Rig {
             core,
             server: if case.xray_listener.is_some() {
                 far.xray.as_ref().and_then(Child::id)
-            } else if case.gost.is_some() || case.openvpn.is_some() {
+            } else if case.gost.is_some() || case.openvpn.is_some() || case.tailscale {
                 far.gost
                     .iter()
                     .chain(&far.openvpn)
@@ -581,6 +586,7 @@ impl Rig {
                 .join(format!("{}-{}-{tag}.log", spec.name, case.name())),
             probe: SocketAddr::new(far.ip, far.ports.echo),
             entry,
+            log_level: &self.core_log,
         })
         .await
     }

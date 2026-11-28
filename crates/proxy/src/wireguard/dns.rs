@@ -33,7 +33,7 @@ pub(crate) struct RemoteDns {
     cache: Mutex<HashMap<String, Cached>>,
 }
 
-fn query(host: &str, rtype: RecordType) -> io::Result<(u16, Vec<u8>)> {
+pub(crate) fn query(host: &str, rtype: RecordType) -> io::Result<(u16, Vec<u8>)> {
     let mut text = host.to_string();
     if !text.ends_with('.') {
         text.push('.');
@@ -50,13 +50,13 @@ fn query(host: &str, rtype: RecordType) -> io::Result<(u16, Vec<u8>)> {
     Ok((id, wire))
 }
 
-struct Answer {
-    ips: Vec<IpAddr>,
+pub(crate) struct Answer {
+    pub(crate) ips: Vec<IpAddr>,
     ttl: u32,
     truncated: bool,
 }
 
-fn parse(wire: &[u8], id: u16) -> Option<Answer> {
+pub(crate) fn parse(wire: &[u8], id: u16) -> Option<Answer> {
     let message = Message::from_vec(wire).ok()?;
     if message.metadata.id != id {
         return None;

@@ -7,8 +7,8 @@ use std::sync::{Arc, Weak};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use concord_common::{
-    Address, BoxStream, ClockOffset, CoreOptions, DialEnv, EventSink, HostResolver, NodeDialer,
-    PacketSession, SockOpts,
+    Address, BoxStream, ClockOffset, CoreOptions, DialCx, DialEnv, EventSink, HostResolver,
+    Initiator, NodeDialer, PacketSession, SockOpts,
 };
 use concord_config::general::General;
 use concord_config::mitm::modules::{ModuleTexts, Unreadable};
@@ -18,10 +18,10 @@ use concord_config::tun::TunConfig;
 use concord_config::{Capabilities, ConfigError, LoadOptions, Profile, RawConfig};
 use concord_dns::{
     DnsError, DomainMatch, GeoIpLookup, RESPECT_RULES, Resolver, ResolverDeps, RuleEnv, RuleError,
-    UpstreamDialer, domain_matchers, ip_matchers,
+    UpstreamDialer, domain_matchers, ip_matchers, no_node_dns,
 };
 use concord_group::{
-    EnvFactory, GroupDeps, GroupError, Outbounds, ProxyFactory, RouteMoved, SelectionStore,
+    EnvFactory, GroupDeps, GroupError, Node, Outbounds, ProxyFactory, RouteMoved, SelectionStore,
     TestDefaults,
 };
 use concord_inbound::ListenSpec;
@@ -104,6 +104,19 @@ impl UpstreamDialer for TunnelUpstream {
         target: &Address,
     ) -> std::io::Result<Arc<dyn PacketSession>> {
         self.tunnel.associate_inner(target, via_proxy(via)).await
+    }
+
+    async fn exchange(&self, via: &str, query: &[u8]) -> std::io::Result<Vec<u8>> {
+        let runtime = self.tunnel.runtime().ok_or_else(|| no_node_dns(via))?;
+        let Some(Node::Leaf(leaf)) = runtime.outbounds.node(via) else {
+            return Err(no_node_dns(via));
+        };
+        let env = runtime.outbounds.env();
+        let cx = DialCx::new(&env, Initiator::Other, None);
+        leaf.outbound()
+            .exchange_dns(&cx, query)
+            .await
+            .unwrap_or_else(|| Err(no_node_dns(via)))
     }
 }
 

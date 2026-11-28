@@ -47,6 +47,7 @@ impl SelfExclusion for KeepOffDevice {
             && let Some(runtime) = self.tunnel.runtime()
         {
             runtime.outbounds.reset_sessions();
+            runtime.outbounds.link_changed();
             runtime.dns.reset_connections();
         }
     }

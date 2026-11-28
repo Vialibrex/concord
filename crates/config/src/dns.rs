@@ -45,6 +45,8 @@ pub enum UpstreamScheme {
     System,
     Dhcp(String),
     Rcode(Rcode),
+    /// `ts://<node>`: the resolver of the tailscale node of that name; `host` is the name.
+    Tailscale,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,9 +202,20 @@ pub fn parse_upstream(server: &str) -> Result<Upstream> {
                 .ok_or_else(|| ConfigError::new(format!("unsupported RCode type: {name}")))?;
             make(UpstreamScheme::Rcode(code), name, 0, String::new())
         }
-        "ts" | "tailscale" | "et" | "easytier" => {
+        "ts" | "tailscale" => {
+            if hostport.is_empty() {
+                return Err(ConfigError::new("missing Tailscale proxy name"));
+            }
+            make(
+                UpstreamScheme::Tailscale,
+                hostport.to_string(),
+                0,
+                String::new(),
+            )
+        }
+        "et" | "easytier" => {
             return Err(ConfigError::new(format!(
-                "unsupported DNS scheme {scheme}://, tailscale and easytier are not supported by this core"
+                "unsupported DNS scheme {scheme}://, easytier is not supported by this core"
             )));
         }
         other => {
@@ -212,12 +225,12 @@ pub fn parse_upstream(server: &str) -> Result<Upstream> {
     Ok(upstream)
 }
 
-/// A tailscale or easytier server is reached through a node of that type, which this core sets
-/// aside, so the server is skipped; a list left with none answers REFUSED rather than letting the
-/// names go to another resolver.
+/// An easytier server is reached through a node of that type, which this core sets aside, so the
+/// server is skipped; a list left with none answers REFUSED rather than letting the names go to
+/// another resolver.
 fn overlay(server: &str) -> bool {
     let scheme = server.split_once("://").map_or("", |(scheme, _)| scheme);
-    ["ts", "tailscale", "et", "easytier"].contains(&scheme.to_ascii_lowercase().as_str())
+    ["et", "easytier"].contains(&scheme.to_ascii_lowercase().as_str())
 }
 
 fn fake_ip_range(text: &str, key: &str, v4: bool) -> Result<Option<IpCidr>> {
@@ -247,7 +260,7 @@ pub fn parse_upstreams(
             notes.push(Ignored {
                 code: "not_applied",
                 key: format!("{what}[{index}]"),
-                why: format!("{server}: tailscale and easytier DNS are not supported by this core"),
+                why: format!("{server}: easytier DNS is not supported by this core"),
             });
             continue;
         }
@@ -809,10 +822,21 @@ mod tests {
     }
 
     #[test]
+    fn a_tailscale_server_names_its_node() {
+        for text in ["ts://office", "tailscale://office", "ts://someone@office"] {
+            let up = parse_upstream(text).unwrap();
+            assert_eq!(
+                (up.scheme, up.host.as_str()),
+                (UpstreamScheme::Tailscale, "office")
+            );
+        }
+    }
+
+    #[test]
     fn unsupported_forms_are_errors() {
         for bad in [
-            "ts://node",
-            "tailscale://node",
+            "ts://",
+            "ts://someone@",
             "et://node",
             "easytier://node",
             "ftp://x",

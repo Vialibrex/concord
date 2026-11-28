@@ -28,16 +28,16 @@
   gets a forwarding arm in the macro and a decision in every policy.
 - A data-path crate is built at `opt-level = 3` in the release profile and declared `Speed` in the layer table; the
   rest inherit `z` or use `s`. Moving a third-party crate to 3 needs a measurement that shows it.
-- `unsafe` is denied in the workspace and allowed only in `concord-platform`, `concord-tun`, `concord-ffi`, the
-  binaries and `tools/`, and in test files. Clippy's `undocumented_unsafe_blocks` holds every block to a `// SAFETY:`
-  comment above it; the bench harness alone states its argument in the `allow(unsafe_code)` reason instead. xtask's
-  `unsafe_policy` test rejects an `allow` or `expect` of `unsafe_code` anywhere else. A file that must call FFI
-  outside those crates is listed here with its reason and in that test's `EXEMPT`. One is today:
-  `crates/mitm/src/quickjs/bytecode.rs` compiles a script to QuickJS bytecode once and runs that bytecode in each
-  run's fresh context, through `JS_Eval`, `JS_WriteObject`, `JS_ReadObject` and `JS_EvalFunction`, which rquickjs
-  0.14 offers only as raw calls; it reads only bytecode the same process compiled. (The record-layer reads
-  `concord-tls` needed are safe methods in `vendor/boring`.) The same test requires `[lints] workspace = true`
-  in every member's `Cargo.toml`, since a member that sets its own lints could allow `unsafe_code` there.
+- `unsafe` is denied in the workspace and allowed only in `concord-platform`, `concord-tun`, `concord-ffi`,
+  `concord-tsnet`, the binaries and `tools/`, and in test files. Clippy's `undocumented_unsafe_blocks` holds every block
+  to a `// SAFETY:` comment above it; the bench harness alone states its argument in the `allow(unsafe_code)` reason
+  instead. xtask's `unsafe_policy` test rejects an `allow` or `expect` of `unsafe_code` anywhere else. A file that must
+  call FFI outside those crates is listed here with its reason and in that test's `EXEMPT`. One is today:
+  `crates/mitm/src/quickjs/bytecode.rs` compiles a script to QuickJS bytecode once and runs that bytecode in each run's
+  fresh context, through `JS_Eval`, `JS_WriteObject`, `JS_ReadObject` and `JS_EvalFunction`, which rquickjs 0.14 offers
+  only as raw calls; it reads only bytecode the same process compiled. (The record-layer reads `concord-tls` needed are
+  safe methods in `vendor/boring`.) The same test requires `[lints] workspace = true` in every member's `Cargo.toml`,
+  since a member that sets its own lints could allow `unsafe_code` there.
 - `#[allow]` always carries a `reason`.
 - An error a caller branches on, or that reaches the host as a code, is a typed enum (`thiserror`) that keeps its
   cause as the source. An error that only joins a list of diagnostics shown to a person (a config line that does not

@@ -374,15 +374,23 @@ impl Outbounds {
     }
 
     pub fn reset_sessions(&self) {
+        self.each_leaf(|outbound| outbound.reset_sessions());
+    }
+
+    pub fn link_changed(&self) {
+        self.each_leaf(|outbound| outbound.link_changed());
+    }
+
+    fn each_leaf(&self, mut visit: impl FnMut(&dyn Outbound)) {
         for entry in self.table.values() {
             if let Entry::Leaf(leaf) = entry {
-                leaf.outbound().reset_sessions();
+                visit(&**leaf.outbound());
             }
         }
         for provider in &self.providers {
             for item in provider.nodes().items() {
                 if let Item::Live(Node::Leaf(leaf)) = item {
-                    leaf.outbound().reset_sessions();
+                    visit(&**leaf.outbound());
                 }
             }
         }

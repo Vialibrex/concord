@@ -75,6 +75,10 @@ impl Outbound for Muxed {
         self.tasks
             .spawn_detached(async move { client.close().await });
     }
+
+    fn link_changed(&self) {
+        self.inner.link_changed();
+    }
 }
 
 fn dial_through(inner: Arc<dyn Outbound>, slot: EnvSlot) -> MuxDialFn {
@@ -129,4 +133,54 @@ pub(crate) fn wrap(
         only_tcp: opts.only_tcp,
         tasks: tasks.clone(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use concord_common::OutboundKind;
+
+    use super::*;
+    use crate::reject::Reject;
+
+    struct Heard {
+        closed: Reject,
+        links: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Outbound for Heard {
+        fn info(&self) -> &OutboundInfo {
+            self.closed.info()
+        }
+
+        async fn connect(&self, cx: &DialCx<'_>, dst: &Address) -> io::Result<BoxStream> {
+            self.closed.connect(cx, dst).await
+        }
+
+        async fn associate(
+            &self,
+            cx: &DialCx<'_>,
+            hint: &Address,
+        ) -> io::Result<Arc<dyn PacketSession>> {
+            self.closed.associate(cx, hint).await
+        }
+
+        fn link_changed(&self) {
+            self.links.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_link_change_reaches_the_node_under_the_mux() {
+        let tracked = crate::testing::Tracked::new();
+        let inner = Arc::new(Heard {
+            closed: Reject::new("inner", OutboundKind::Reject),
+            links: AtomicUsize::new(0),
+        });
+        let muxed = wrap(inner.clone(), &SmuxOpts::default(), &tracked.tasks).unwrap();
+        muxed.link_changed();
+        assert_eq!(inner.links.load(Ordering::SeqCst), 1);
+    }
 }

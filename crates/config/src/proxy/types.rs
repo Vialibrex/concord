@@ -670,6 +670,7 @@ pub enum ProxyKind {
     WireGuard(Box<WireGuardOpts>),
     Masque(Box<MasqueOpts>),
     OpenVpn(Box<super::OpenVpnOpts>),
+    Tailscale(Box<super::TailscaleOpts>),
     Hysteria(Box<HysteriaOpts>),
     Ssr(SsrOpts),
     Snell(SnellOpts),
@@ -699,6 +700,7 @@ impl ProxyKind {
             ProxyKind::WireGuard(_) => "wireguard",
             ProxyKind::Masque(_) => "masque",
             ProxyKind::OpenVpn(_) => "openvpn",
+            ProxyKind::Tailscale(_) => "tailscale",
             ProxyKind::Hysteria(_) => "hysteria",
             ProxyKind::Ssr(_) => "ssr",
             ProxyKind::Snell(_) => "snell",
@@ -715,7 +717,8 @@ impl ProxyKind {
             | ProxyKind::Reject(_)
             | ProxyKind::Dns(_)
             | ProxyKind::Rematch(_)
-            | ProxyKind::WireGuard(_) => None,
+            | ProxyKind::WireGuard(_)
+            | ProxyKind::Tailscale(_) => None,
             ProxyKind::Masque(o) => Some((&o.server, o.port)),
             ProxyKind::OpenVpn(o) => Some((&o.server, o.port)),
 

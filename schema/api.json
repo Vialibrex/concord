@@ -4171,6 +4171,27 @@
           "properties": {
             "type": {
               "type": "string",
+              "const": "nodeLogin"
+            },
+            "name": {
+              "type": "string"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "name",
+            "url"
+          ],
+          "description": "The node of that name can carry nothing until its user logs in at `url`: a tailscale\nnode with no auth key and no saved login. Sent each time the node asks, which is on\nits first dial and again if the login expires."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
               "const": "delay"
             },
             "name": {

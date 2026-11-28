@@ -29,6 +29,27 @@ pub fn raw_socket_of<T: std::os::fd::AsRawFd>(socket: &T) -> RawSocket {
     RawSocket(i64::from(socket.as_raw_fd()))
 }
 
+/// Runs `f` on a socket another library owns, without taking it over: the descriptor stays open
+/// when `f` returns.
+#[cfg(unix)]
+pub fn with_foreign_socket<R>(socket: RawSocket, f: impl FnOnce(&Socket) -> R) -> io::Result<R> {
+    use std::os::fd::{FromRawFd, RawFd};
+    let fd = RawFd::try_from(socket.0).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: the owner keeps the descriptor open for this call, and ManuallyDrop never closes it.
+    let borrowed = std::mem::ManuallyDrop::new(unsafe { Socket::from_raw_fd(fd) });
+    Ok(f(&borrowed))
+}
+
+#[cfg(windows)]
+pub fn with_foreign_socket<R>(socket: RawSocket, f: impl FnOnce(&Socket) -> R) -> io::Result<R> {
+    use std::os::windows::io::{FromRawSocket, RawSocket as WinSocket};
+    let handle =
+        WinSocket::try_from(socket.0).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    // SAFETY: the owner keeps the socket open for this call, and ManuallyDrop never closes it.
+    let borrowed = std::mem::ManuallyDrop::new(unsafe { Socket::from_raw_socket(handle) });
+    Ok(f(&borrowed))
+}
+
 #[cfg(windows)]
 pub fn raw_socket_of<T: std::os::windows::io::AsRawSocket>(socket: &T) -> RawSocket {
     RawSocket(socket.as_raw_socket() as i64)

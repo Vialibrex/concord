@@ -68,6 +68,17 @@ Dependencies that need a note:
   `07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51`), under WireGuard LLC's Prebuilt Binaries
   License in `assets/wintun/LICENSE.txt`. It allows redistribution alongside software that uses the DLL only through
   the `wintun.h` API, which is all tun-rs does; the licence text has to ship with the core.
+- **The Tailscale library** (`crates/tsnet/go`, built into `libconcord_tsnet` and shipped beside the core) links Go
+  modules under their own licences, read from the module cache for the versions `go.sum` pins:
+  - BSD-3-Clause: the Go standard library, metacubex/tailscale (Tailscale Inc & contributors), tailscale/hujson and
+    tailscale/peercred (Tailscale Inc.), go4.org/netipx (The Inet.af AUTHORS), klauspost/compress, and the
+    Go Authors' golang.org/x/{crypto,exp,net,sync,sys,term,text,time} and metacubex/{cpu,edwards25519,hkdf,hpke,http,jsonv2,mlkem,tls};
+  - MIT: metacubex/tailscale-wireguard-go (WireGuard LLC), metacubex/bart, fxamacker/cbor, x448/float16,
+    josharian/native, jsimonetti/rtnetlink, mdlayher/netlink, mdlayher/socket, tailscale/certstore,
+    tailscale/go-winio;
+  - Apache-2.0: metacubex/gvisor, golang/groupcache, google/btree, pires/go-proxyproto, safchain/ethtool,
+    go4.org/mem;
+  - GPL-3.0: metacubex/randv2.
 - **`assets/ca-certificates.crt`** is embedded into the core as the CA bundle. The file in this repository is empty;
   CI fills it before building (Concord's `Check` job, and FlClash's build jobs for the copy they check out). If it is
   filled from Mozilla's root store, that data is MPL-2.0.

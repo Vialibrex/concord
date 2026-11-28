@@ -36,6 +36,7 @@ mod sockets;
 mod socks;
 mod stats;
 mod syscalls;
+mod tailscale;
 
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -127,6 +128,18 @@ struct RunArgs {
         help = "OpenVPN 2.6 `openvpn` binary, serving the openvpn and openvpn-tcp cases."
     )]
     openvpn: Option<PathBuf>,
+    #[arg(
+        long,
+        env = "CONCORD_TAILSCALE",
+        help = "Directory with headscale, tailscale and tailscaled, serving the tailscale case."
+    )]
+    tailscale: Option<PathBuf>,
+    #[arg(
+        long,
+        default_value = "error",
+        help = "Log level of a Concord core run embedded; its log is the core's file under logs/."
+    )]
+    core_log: String,
     #[arg(help = "Comma-separated case names; replaces the tier's list.")]
     #[arg(long, value_delimiter = ',')]
     cases: Vec<String>,
@@ -717,6 +730,8 @@ fn run(args: RunArgs) -> Result<bool, String> {
         mihomo,
         sing_box: args.sing_box,
         openvpn: args.openvpn,
+        tailscale: args.tailscale,
+        core_log: args.core_log,
         cpus,
         netns,
         dir: out.clone(),

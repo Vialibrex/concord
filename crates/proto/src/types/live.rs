@@ -473,6 +473,13 @@ pub enum CoreEvent {
     DialerLoop {
         name: String,
     },
+    /// The node of that name can carry nothing until its user logs in at `url`: a tailscale
+    /// node with no auth key and no saved login. Sent each time the node asks, which is on
+    /// its first dial and again if the login expires.
+    NodeLogin {
+        name: String,
+        url: String,
+    },
     Delay {
         name: String,
         url: String,

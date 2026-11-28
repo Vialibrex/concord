@@ -635,6 +635,7 @@ impl Engine {
         self.network_changed();
         if let Some(outbounds) = self.outbounds() {
             outbounds.reset_sessions();
+            outbounds.link_changed();
         }
         self.route.reset(self.is_running());
     }

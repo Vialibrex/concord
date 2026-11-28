@@ -115,9 +115,20 @@ impl CoreSpec {
             ));
         }
         let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        std::fs::create_dir_all(snapshot_dir).map_err(|e| e.to_string())?;
-        let binary = snapshot_dir.join(name);
+        // A Concord core loads its Tailscale library from beside its binary, so each gets a
+        // directory of its own with the library that sat beside the original.
+        let dir = match kind {
+            Kind::Concord => snapshot_dir.join(name),
+            _ => snapshot_dir.to_path_buf(),
+        };
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let binary = dir.join(name);
         std::fs::write(&binary, &bytes).map_err(|e| e.to_string())?;
+        let library = path.with_file_name(concord_tsnet::LIBRARY_NAME);
+        if kind == Kind::Concord && library.exists() {
+            std::fs::copy(&library, dir.join(concord_tsnet::LIBRARY_NAME))
+                .map_err(|e| format!("{}: {e}", library.display()))?;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -279,6 +290,7 @@ pub struct Launch<'a> {
     pub log: PathBuf,
     pub probe: SocketAddr,
     pub entry: Entry,
+    pub log_level: &'a str,
 }
 
 pub struct Running {
@@ -384,7 +396,7 @@ impl Running {
                 let mut overlay = json!({
                     "mixed-port": launch.mixed,
                     "allow-lan": false,
-                    "log-level": "error",
+                    "log-level": launch.log_level,
                     "ipv6": false,
                     "find-process-mode": "off",
                 });
@@ -568,6 +580,7 @@ mod tests {
                 netns: None,
             },
             log: PathBuf::new(),
+            log_level: "warning",
             probe: SocketAddr::from(([127, 0, 0, 1], 1)),
             entry: Entry::Tun,
         })
@@ -709,6 +722,26 @@ mod output_tests {
         std::fs::write(&log, "").unwrap();
         assert_eq!(with_output("e".into(), &log), "e; the core wrote nothing");
         assert_eq!(with_output("e".into(), &dir.join("missing")), "e");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::CoreSpec;
+
+    #[test]
+    fn a_concord_core_is_copied_with_the_tailscale_library_beside_it() {
+        let dir = std::env::temp_dir().join(format!("bench-snapshot-{}", std::process::id()));
+        let (from, to) = (dir.join("frozen"), dir.join("bin"));
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("concord"), b"core").unwrap();
+        std::fs::write(from.join(concord_tsnet::LIBRARY_NAME), b"library").unwrap();
+        let text = format!("tsn=concord:{}", from.join("concord").display());
+
+        let spec = CoreSpec::parse(&text, &to, false).unwrap();
+        let library = spec.binary.with_file_name(concord_tsnet::LIBRARY_NAME);
+        assert_eq!(std::fs::read(&library).unwrap(), b"library");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

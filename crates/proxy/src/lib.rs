@@ -34,6 +34,7 @@ mod ss;
 mod ssh;
 mod ssr;
 mod stack;
+mod tailscale;
 mod tlsmap;
 mod trojan;
 mod tuic;

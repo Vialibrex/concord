@@ -377,7 +377,7 @@ async fn an_unsupported_node_in_a_provider_is_listed_nowhere_but_still_named() {
     type: inline
     payload:
       - {name: ok, type: direct}
-      - {name: ghost, type: tailscale}
+      - {name: ghost, type: easytier}
 proxy-groups:
   - {name: g, type: select, use: [p]}
 ",

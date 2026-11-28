@@ -234,6 +234,11 @@ pub enum CoreEvent {
     Resource(ResourceUpdate),
     RouteChanged(RouteView),
     DialerLoop(Arc<str>),
+    /// The node of that name can carry nothing until its user logs in at `url`.
+    NodeLogin {
+        name: Arc<str>,
+        url: String,
+    },
     State(StateChange),
     ScriptNotification(ScriptNotification),
 }

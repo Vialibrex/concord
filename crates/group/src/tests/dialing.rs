@@ -375,3 +375,20 @@ async fn a_reject_variant_is_built_in_and_keeps_its_name() {
     };
     assert_eq!(&*chain[0], "REJECT-TINYGIF");
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_link_change_reaches_every_node_and_a_session_reset_none() {
+    let rig = Rig::new(
+        "proxies:
+  - {name: a, type: direct}
+  - {name: b, type: direct}
+proxy-groups:
+  - {name: g, type: select, proxies: [a, b]}
+",
+    );
+    let links = |name: &str| rig.book.get(name).links.load(Ordering::SeqCst);
+    rig.out.reset_sessions();
+    assert_eq!((links("a"), links("b")), (0, 0));
+    rig.out.link_changed();
+    assert_eq!((links("a"), links("b")), (1, 1));
+}

@@ -208,6 +208,11 @@ pub const ALL: &[Spec] = &[
         true,
         "OpenVPN over TCP, tls-crypt, AES-256-GCM (needs --openvpn and --link)",
     ),
+    spec(
+        "tailscale",
+        true,
+        "Tailscale: headscale and a tailscaled peer routing the origin (needs --tailscale and --link)",
+    ),
 ];
 
 pub const QUICK: &[&str] = &[
@@ -246,6 +251,8 @@ pub struct Case {
     pub gost: Option<(&'static str, String)>,
     /// The OpenVPN server's configuration, for `openvpn.rs` to run.
     pub openvpn: Option<String>,
+    /// A headscale control server and a tailscaled peer, for `tailscale.rs` to run.
+    pub tailscale: bool,
 }
 
 impl Case {
@@ -258,6 +265,7 @@ impl Case {
             proxy: None,
             gost: None,
             openvpn: None,
+            tailscale: false,
         }
     }
 
@@ -285,6 +293,7 @@ pub fn needs_mihomo(spec: Spec) -> bool {
             | "masque-l4"
             | "openvpn"
             | "openvpn-tcp"
+            | "tailscale"
     ) && !is_mitm(spec)
 }
 
@@ -341,6 +350,9 @@ pub fn build(spec: Spec, host: &str, port: u16, decoy: u16, certs: &Path) -> Cas
         };
     }
     if let Some(case) = singbox_case(spec, host, port, certs) {
+        return case;
+    }
+    if let Some(case) = crate::tailscale::case(spec, host, port) {
         return case;
     }
     if let Some(case) = crate::openvpn::case(spec, host, port, certs) {

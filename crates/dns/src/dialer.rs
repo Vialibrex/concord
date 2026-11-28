@@ -32,6 +32,18 @@ pub trait UpstreamDialer: Send + Sync {
     async fn connect(&self, via: &str, target: &Address) -> io::Result<BoxStream>;
 
     async fn bind_udp(&self, via: &str, target: &Address) -> io::Result<Arc<dyn PacketSession>>;
+
+    /// A DNS query for the node `via` to answer from its own resolver (`ts://<node>`).
+    async fn exchange(&self, via: &str, _query: &[u8]) -> io::Result<Vec<u8>> {
+        Err(no_node_dns(via))
+    }
+}
+
+pub fn no_node_dns(via: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("proxy {via:?} does not provide Tailscale DNS"),
+    )
 }
 
 tokio::task_local! {

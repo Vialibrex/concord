@@ -9,7 +9,7 @@ proxy-providers:
     type: inline
     payload:
       - {name: n1, type: direct}
-      - {name: ts, type: tailscale}
+      - {name: ts, type: easytier}
       - {name: a, type: direct}
 proxy-groups:
   - {name: sel, type: select, proxies: [a, b], use: [p]}
@@ -129,7 +129,7 @@ async fn an_emptied_group_lists_its_fallback_and_one_of_ghosts_lists_nothing() {
   p:
     type: inline
     payload:
-      - {name: ts, type: tailscale}
+      - {name: ts, type: easytier}
       - {name: ok, type: direct}
 proxy-groups:
   - {name: none, type: select, use: [p], filter: zzz}
@@ -161,8 +161,8 @@ proxy-providers:
   first:
     type: inline
     payload:
-      - {name: shadow_live, type: tailscale}
-      - {name: shadow_group, type: tailscale}
+      - {name: shadow_live, type: easytier}
+      - {name: shadow_group, type: easytier}
       - {name: p_clash, type: direct}
   second:
     type: inline
@@ -250,7 +250,7 @@ proxy-providers:
   first:
     type: inline
     payload:
-      - {name: shadow_fb, type: tailscale}
+      - {name: shadow_fb, type: easytier}
 proxy-groups:
   - {name: fb, type: fallback, proxies: [a, b], url: 'http://probe.test/generate_204'}
   - {name: shadow_fb, type: fallback, proxies: [a, b], url: 'http://probe.test/generate_204'}

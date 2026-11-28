@@ -318,6 +318,7 @@ async fn measure(
         log: args.out.join("logs/core.log"),
         probe: sites::echo_target(),
         entry: Entry::Socks(proxy),
+        log_level: "error",
     })
     .await?;
     let watcher = watch_group(clock.clone(), recorder.clone());

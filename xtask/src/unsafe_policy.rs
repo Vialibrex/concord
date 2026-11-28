@@ -11,6 +11,7 @@ const SOURCE_ROOTS: &[&str] = &["crates", "bins", "tools"];
 const ALLOWED: &[&str] = &[
     "crates/platform/",
     "crates/tun/",
+    "crates/tsnet/",
     "crates/ffi/",
     "bins/",
     "tools/",

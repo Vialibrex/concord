@@ -36,6 +36,7 @@ const LAYERS: &[(&str, Opt, &[&str])] = &[
         &["concord-common", "concord-config"],
     ),
     ("concord-platform", Opt::Inherit, &["concord-common"]),
+    ("concord-tsnet", Opt::Inherit, &["concord-common"]),
     (
         "concord-net",
         Opt::Speed,
@@ -64,6 +65,7 @@ const LAYERS: &[(&str, Opt, &[&str])] = &[
             "concord-quic",
             "concord-platform",
             "concord-netstack",
+            "concord-tsnet",
         ],
     ),
     (

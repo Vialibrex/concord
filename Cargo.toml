@@ -5,6 +5,7 @@ members = [
     "crates/config",
     "crates/rules",
     "crates/platform",
+    "crates/tsnet",
     "crates/net",
     "crates/tls",
     "crates/transport",
@@ -45,6 +46,7 @@ repository = "https://github.com/Vialibrex/concord"
 concord-common = { path = "crates/common", default-features = false }
 concord-config = { path = "crates/config" }
 concord-rules = { path = "crates/rules" }
+concord-tsnet = { path = "crates/tsnet" }
 concord-platform = { path = "crates/platform" }
 concord-net = { path = "crates/net" }
 concord-tls = { path = "crates/tls" }
@@ -79,6 +81,7 @@ arc-swap = "1.9.3"
 dashmap = "6"
 socket2 = { version = "0.6.5", features = ["all"] }
 libc = "0.2"
+libloading = "0.9"
 windows-sys = "0.61"
 
 # Serialization and config.

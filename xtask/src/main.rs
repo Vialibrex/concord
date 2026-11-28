@@ -4,6 +4,7 @@ mod commits;
 mod default_features;
 #[cfg(test)]
 mod doc_paths;
+mod go;
 mod internal_marks;
 mod interop_peers;
 mod layers;
@@ -43,11 +44,12 @@ fn main() -> ExitCode {
         Some("check-commits") => commits::check(&args.collect::<Vec<_>>()),
         Some("mihomo-keys") => mihomo_keys::run(args.next().as_deref()),
         Some("check-interop-peers") => interop_peers::check(),
+        Some("check-go") => go::check(),
         Some("public-suffix") => public_suffix::run(),
         Some("module-corpus") => module_corpus::run(),
         _ => Err(
             "usage: xtask check-layers | schema [--check] | check-size <file> <max-bytes> \
-             | check-commits <git log revisions> | mihomo-keys <mihomo checkout> | check-interop-peers \
+             | check-commits <git log revisions> | mihomo-keys <mihomo checkout> | check-interop-peers | check-go \
              | public-suffix | module-corpus | bench [--quick|--full] [--base <rev>|--no-baseline] [--mihomo <path>] [concord-bench run options]"
                 .to_string(),
         ),

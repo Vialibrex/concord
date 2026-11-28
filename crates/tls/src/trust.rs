@@ -63,6 +63,7 @@ pub struct TrustStore {
     configs: Mutex<Configs>,
     clock: Arc<ClockOffset>,
     system: Option<Arc<SystemRoots>>,
+    custom: Vec<CertificateDer<'static>>,
 }
 
 impl TrustStore {
@@ -123,7 +124,7 @@ impl TrustStore {
     ) -> Arc<TrustStore> {
         let bundle: Vec<_> = CertificateDer::pem_slice_iter(bundle_pem)
             .filter_map(Result::ok)
-            .chain(custom)
+            .chain(custom.iter().cloned())
             .collect();
         let rest = anchors_of(&bundle);
         let anchors: AnchorsInit = Box::new(move || {
@@ -136,7 +137,13 @@ impl TrustStore {
             configs: Mutex::new(Configs::default()),
             clock,
             system: roots,
+            custom,
         })
+    }
+
+    /// The profile's own certificates, for a library that verifies with roots of its own.
+    pub fn custom(&self) -> &[CertificateDer<'static>] {
+        &self.custom
     }
 
     /// Starts reading the OS store for a policy that will check a chain against it,

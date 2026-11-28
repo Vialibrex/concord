@@ -5,16 +5,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use concord_common::{BoxStream, CoreError, SockOpts, SocketFactory, io_error, ip4p_target};
+use concord_common::{
+    BoxStream, CoreError, RawSocket, SockOpts, SocketFactory, io_error, ip4p_target,
+};
 use concord_platform::{
     IcmpSocket, Platform, bind_to_interface, enable_tfo, grow_udp_buffers, icmp_echo_socket,
     is_global_unicast, mptcp_protocol, prepare_udp_socket, raw_socket_of, set_routing_mark,
+    with_foreign_socket,
 };
 use socket2::{Domain, Protocol, Socket, TcpKeepalive, Type};
 use tokio::net::{TcpSocket, TcpStream, UdpSocket};
 
 use crate::fast_open::{self, Start};
 use crate::held::Held;
+
+/// Stand-ins for "any peer" when a socket is bound for many: what routes a global address.
+const ANY_GLOBAL_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1));
+const ANY_GLOBAL_V6: IpAddr = IpAddr::V6(Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111));
 
 const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(15);
 
@@ -247,6 +254,17 @@ impl EchoRequest {
 
 #[async_trait]
 impl SocketFactory for Sockets {
+    fn prepare_foreign(
+        &self,
+        socket: RawSocket,
+        ipv6: bool,
+        dest: Option<IpAddr>,
+        opts: &SockOpts,
+    ) -> io::Result<()> {
+        let dest = dest.unwrap_or(if ipv6 { ANY_GLOBAL_V6 } else { ANY_GLOBAL_V4 });
+        with_foreign_socket(socket, |socket| self.route(socket, opts, dest))?
+    }
+
     async fn connect_tcp(&self, target: SocketAddr, opts: &SockOpts) -> io::Result<TcpStream> {
         let (socket, target) = self.open_tcp(target, opts)?;
         TcpSocket::from_std_stream(socket.into())

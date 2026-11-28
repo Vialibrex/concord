@@ -45,11 +45,11 @@ Size every run to the change, and keep the full gate for the two cases below.
 
 ## The Full Gate
 
-A branch is done when all of these pass; Test Scope says which rounds run them. `.github/workflows/ci.yaml` runs
-them on Linux with `--locked`, split into parallel jobs, and fails if they changed a tracked file; it also runs clippy
-and the tests on macOS, clippy for the three Android ABIs FlClash ships and for Windows (the Windows job does not fail
-the run yet), the arm64-v8a release `libconcord.so` against its size budget, and the interop tests that need only
-mihomo or OpenSSH. Run the clippy of every platform whose code the change touches.
+A branch is done when all of these pass; Test Scope says which rounds run them. `.github/workflows/ci.yaml` runs all
+but `check-go` on Linux with `--locked`, split into parallel jobs, and fails if they changed a tracked file; it also
+runs clippy and the tests on macOS, clippy for the three Android ABIs FlClash ships and for Windows (the Windows job
+does not fail the run yet), the arm64-v8a release `libconcord.so` against its size budget, and the interop tests that
+need only mihomo or OpenSSH. Run the clippy of every platform whose code the change touches.
 
 ```sh
 cargo fmt --check
@@ -61,6 +61,7 @@ for crate in concord-common concord-engine concord-mitm; do  # every member with
 done
 cargo xtask check-layers
 cargo xtask schema --check
+cargo xtask check-go                                     # crates/tsnet/go; skipped where go is missing
 cargo deny check
 cargo check --manifest-path fuzz/Cargo.toml
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps

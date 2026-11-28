@@ -519,6 +519,10 @@ impl EventSink for EventBus {
             EngineEvent::DialerLoop(name) => self.publish_event(CoreEvent::DialerLoop {
                 name: name.to_string(),
             }),
+            EngineEvent::NodeLogin { name, url } => self.publish_event(CoreEvent::NodeLogin {
+                name: name.to_string(),
+                url,
+            }),
             EngineEvent::State(change) => self.publish_event(convert::state_event(change)),
             EngineEvent::ScriptNotification(notice) => {
                 self.publish_event(CoreEvent::ScriptNotification {

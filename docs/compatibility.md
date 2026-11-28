@@ -152,8 +152,8 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
 
 ## Not Supported
 
-- Outbound types, networks, TLS options and Shadowsocks plugins outside Concord's scope (among them tailscale,
-  easytier, zerotier, sudoku, kcp, restls and kcptun): the node is set aside with a warning,
+- Outbound types, networks, TLS options and Shadowsocks plugins outside Concord's scope (among them easytier,
+  zerotier, sudoku, kcp, restls and kcptun): the node is set aside with a warning,
   also when the TLS option is given in xhttp `download-settings`. The full lists are the `T2_*` constants in
   `crates/config/src/proxy/parse.rs`.
 - A provider's `override.override-expr`: the provider gets no proxies and a warning, because its nodes must not run
@@ -232,6 +232,20 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   carries and `dns` with `remote-dns-resolve` resolves through it; `ca`, `cert`, `key` and the static keys are
   inline PEM. The tunnel runs on the native IP stack with an MTU of 1500 unless `mtu` says otherwise, kept within
   1280–65495 as for WireGuard, and `ip-stack.mode` is ignored as it is there.
+- **Tailscale:** the node is tsnet from the same metacubex/tailscale module mihomo uses, built as a separate library
+  (`libconcord_tsnet.so`, `libconcord_tsnet.dylib` or `concord_tsnet.dll`) that Concord loads on the first dial of a
+  tailscale node, so a profile without one never loads it; without the library such a dial fails and says where the
+  library belongs. Its connections run on Concord's own IP stack, as WireGuard's do, which answers a peer's ping of
+  the node. `ts://<node>` and `tailscale://<node>` DNS servers ask the node's resolver: MagicDNS, then the tailnet's
+  DNS settings. A node with no `auth-key` and no saved login fails its dials at once with the login URL, logs it at
+  warning level and sends a `nodeLogin` event, where mihomo logs it at info level and its dials fail without it; in
+  an app, the URL shows in the node's delay test. When the device's network changes or the TUN comes up, the node
+  keeps its login and address, as in mihomo, and opens its UDP sockets again on the network now in use; its control
+  and DERP connections carry on until they fail. A node without `hostname` presents its own name, where mihomo
+  presents the program's name, which in an app is the app process and tells the tailnet nothing. As in mihomo, several
+  nodes need their own `state-dir` each, and a `dialer-proxy` carries all of the node's own traffic: control, DERP and
+  WireGuard's UDP. A UDP packet over 4096 bytes on that path is dropped. A build that pins the library's SHA-256
+  refuses any other library, so a library swapped in beside a core started with privileges does not run in it.
 - **mieru:** both transports work against mihomo's mieru listener; the UDP transport with a `dialer-proxy` is
   rejected when the node is built, and padding statistics are approximated.
 - **Hysteria2 `realm-opts`:** works against mihomo's `hysteria2-realm` listener, including through two NATs; it speaks
@@ -267,9 +281,9 @@ paths, fields, status codes, `Authorization: Bearer` secret and CORS. The differ
   The keys that narrow what the TUN captures by package, Android user, uid range, port range, MAC address or route
   set are ignored, so the TUN captures other traffic than they say; the warning says so. An app that embeds Concord
   picks the apps that go through its TUN itself.
-- **DNS:** a `dhcp://<interface>` upstream runs as `system://` with a warning. A `ts://`, `tailscale://`, `et://` or
-  `easytier://` server is skipped with a warning, as its tailscale or easytier node is set aside; a list, such as one
-  `nameserver-policy` entry, left with no other server answers REFUSED, so those names do not go to another resolver.
+- **DNS:** a `dhcp://<interface>` upstream runs as `system://` with a warning. An `et://` or `easytier://` server is
+  skipped with a warning, as its easytier node is set aside; a list, such as one `nameserver-policy` entry, left with
+  no other server answers REFUSED, so those names do not go to another resolver.
 - **Accepted without effect:** `inbound-tfo` (a non-empty value gets a warning).
 - **Deprecated fingerprint names:** `chrome_psk`, the other `chrome_*` variants and `randomized` are read as `chrome`
   and `random` with a warning.

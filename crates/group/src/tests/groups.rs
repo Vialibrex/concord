@@ -331,7 +331,7 @@ async fn a_quarantined_provider_node_is_rejected_when_selected() {
     type: inline
     payload:
       - {name: good, type: direct}
-      - {name: ts, type: tailscale}
+      - {name: ts, type: easytier}
 proxy-groups:
   - {name: g, type: select, use: [p]}
 ",
@@ -347,7 +347,7 @@ async fn a_selector_pinned_on_a_node_the_config_dropped_is_rejected() {
     let rig = Rig::new(
         "proxies:
   - {name: a, type: direct}
-  - {name: ts, type: tailscale}
+  - {name: ts, type: easytier}
 proxy-groups:
   - {name: g, type: select, proxies: [a, ts]}
 ",
@@ -363,7 +363,7 @@ async fn a_group_whose_only_members_are_quarantined_is_rejected_unless_it_says_o
   p:
     type: inline
     payload:
-      - {name: ts, type: tailscale}
+      - {name: ts, type: easytier}
 ";
     let rig = Rig::new(&format!(
         "{payload}proxy-groups:\n  - {{name: g, type: select, use: [p]}}\n  - {{name: kept, type: select, use: [p], empty-fallback: DIRECT}}\n"

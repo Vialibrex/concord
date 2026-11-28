@@ -676,7 +676,7 @@ rules:
         let text = "\
 proxies:
   - {name: a, type: socks5, server: 127.0.0.1, port: 1080}
-  - {name: ts, type: tailscale}
+  - {name: ts, type: easytier}
   - {name: kcp, type: vmess, server: x, port: 1, uuid: u, cipher: auto, network: mkcp}
 proxy-groups:
   - {name: mixed, type: select, proxies: [a, ts]}
@@ -773,9 +773,9 @@ rules:
     }
 
     #[test]
-    fn a_tailscale_dns_server_is_skipped_and_a_list_of_only_those_answers_refused() {
+    fn an_easytier_dns_server_is_skipped_and_a_list_of_only_those_answers_refused() {
         let profile = load_text(
-            "dns:\n  nameserver: ['ts://node', 8.8.8.8]\n  nameserver-policy: {'+.ts.net': 'tailscale://node'}\n",
+            "dns:\n  nameserver: ['et://node', 8.8.8.8]\n  nameserver-policy: {'+.ts.net': 'easytier://node'}\n",
         )
         .unwrap();
         let texts: Vec<&str> = profile
@@ -977,7 +977,7 @@ proxy-groups:
     #[test]
     fn an_include_all_group_names_the_set_aside_nodes_it_lost() {
         let profile = load_text(
-            "proxies:\n  - {name: hk-a, type: socks5, server: 127.0.0.1, port: 1}\n  - {name: hk-b, type: tailscale}\n\
+            "proxies:\n  - {name: hk-a, type: socks5, server: 127.0.0.1, port: 1}\n  - {name: hk-b, type: easytier}\n\
              proxy-groups:\n  - {name: HK, type: select, include-all-proxies: true, filter: hk}\n  \
              - {name: TS, type: select, include-all-proxies: true, filter: hk-b, empty-fallback: DIRECT}\n",
         )
@@ -1222,7 +1222,7 @@ proxy-providers:
     type: inline
     payload:
       - {name: c, type: socks5, server: 127.0.0.3, port: 1080}
-      - {name: d, type: tailscale}
+      - {name: d, type: easytier}
 proxy-groups:
   - {name: g, type: select, use: [sub]}
 ";

@@ -136,7 +136,7 @@ mod tests {
         assert!(
             schema["proxy-types"]["t2"]
                 .as_array()
-                .is_some_and(|a| a.iter().any(|v| v == "tailscale"))
+                .is_some_and(|a| a.iter().any(|v| v == "easytier"))
         );
     }
 

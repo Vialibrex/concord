@@ -11,7 +11,7 @@ use hickory_proto::rr::RecordType;
 use hickory_proto::rr::rdata::opt::{ClientSubnet, EdnsCode, EdnsOption};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::dialer::Cx;
+use crate::dialer::{Cx, UpstreamDialer};
 use crate::msg;
 
 pub(crate) const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -112,6 +112,35 @@ where
         if resp.metadata.id == req.metadata.id && is_answer_to(req, &resp) {
             return Ok(resp);
         }
+    }
+}
+
+/// `ts://<node>`: the node answers from its own resolver; for a tailscale node that is
+/// MagicDNS, then the tailnet's DNS settings.
+pub(crate) struct NodeClient {
+    node: String,
+    dialer: std::sync::Weak<dyn UpstreamDialer>,
+}
+
+impl NodeClient {
+    pub(crate) fn new(node: String, dialer: std::sync::Weak<dyn UpstreamDialer>) -> Self {
+        NodeClient { node, dialer }
+    }
+}
+
+#[async_trait]
+impl Client for NodeClient {
+    async fn exchange(&self, req: &Message, _cx: Cx) -> io::Result<Message> {
+        let dialer = self
+            .dialer
+            .upgrade()
+            .ok_or_else(|| io::Error::other("the tunnel is gone"))?;
+        let answer = with_timeout(dialer.exchange(&self.node, &encode(req)?)).await?;
+        decode(&answer)
+    }
+
+    fn address(&self) -> String {
+        format!("tailscale://{}", self.node)
     }
 }
 

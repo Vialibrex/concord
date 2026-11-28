@@ -40,6 +40,7 @@ pub struct Behavior {
     pub fail: AtomicBool,
     pub status: AtomicU16,
     pub connects: AtomicUsize,
+    pub links: AtomicUsize,
     pub requests: AtomicUsize,
     pub last_request: Mutex<String>,
     pub dialer: Mutex<Option<String>>,
@@ -52,6 +53,7 @@ impl Default for Behavior {
             fail: AtomicBool::new(false),
             status: AtomicU16::new(204),
             connects: AtomicUsize::new(0),
+            links: AtomicUsize::new(0),
             requests: AtomicUsize::new(0),
             last_request: Mutex::new(String::new()),
             dialer: Mutex::new(None),
@@ -104,6 +106,10 @@ impl FakeNode {
 impl Outbound for FakeNode {
     fn info(&self) -> &OutboundInfo {
         &self.info
+    }
+
+    fn link_changed(&self) {
+        self.behavior.links.fetch_add(1, Ordering::SeqCst);
     }
 
     async fn connect(&self, cx: &DialCx<'_>, dst: &Address) -> io::Result<BoxStream> {

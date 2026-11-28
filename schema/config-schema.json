@@ -487,6 +487,7 @@
       "wireguard",
       "masque",
       "openvpn",
+      "tailscale",
       "hysteria",
       "ssr",
       "snell",
@@ -499,7 +500,6 @@
       "naive"
     ],
     "t2": [
-      "tailscale",
       "easytier",
       "zerotier",
       "sudoku",

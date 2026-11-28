@@ -12,6 +12,7 @@ use crate::error::CoreError;
 use crate::event::{EventSink, Initiator};
 use crate::packet::PacketSession;
 use crate::stream::BoxStream;
+use crate::stream::RawSocket;
 use crate::timing::{ConnStep, ConnTiming};
 
 /// `wire_name` is mihomo's `AdapterType.String()`, which Dart compares literally.
@@ -39,6 +40,7 @@ pub enum OutboundKind {
     WireGuard,
     Masque,
     OpenVpn,
+    Tailscale,
     Tuic,
     Ssh,
     Mieru,
@@ -72,6 +74,7 @@ impl OutboundKind {
             OutboundKind::WireGuard => "WireGuard",
             OutboundKind::Masque => "Masque",
             OutboundKind::OpenVpn => "OpenVPN",
+            OutboundKind::Tailscale => "Tailscale",
             OutboundKind::Tuic => "Tuic",
             OutboundKind::Ssh => "Ssh",
             OutboundKind::Mieru => "Mieru",
@@ -128,9 +131,20 @@ pub trait Outbound: Send + Sync + 'static {
 
     fn reset_sessions(&self) {}
 
+    /// The device's network changed under the core, or the TUN came up and sockets opened before
+    /// it would follow its routes. A node that keeps sockets of its own (Tailscale) opens its UDP
+    /// sockets again; `reset_sessions` comes too, for pooled sessions.
+    fn link_changed(&self) {}
+
     /// The node's own answer for a UDP destination name, mihomo's per-adapter
     /// `ResolveUDP`; `None` leaves it to the engine's resolver.
     async fn resolve_udp(&self, _cx: &DialCx<'_>, _host: &str) -> Option<io::Result<IpAddr>> {
+        None
+    }
+
+    /// The node's own answer to a DNS query, for a `ts://<node>` server; `None` when it has no
+    /// resolver of its own.
+    async fn exchange_dns(&self, _cx: &DialCx<'_>, _query: &[u8]) -> Option<io::Result<Vec<u8>>> {
         None
     }
 }
@@ -161,6 +175,20 @@ pub trait SocketFactory: Send + Sync {
     }
 
     fn bind_udp(&self, peer: IpAddr, opts: &SockOpts) -> io::Result<UdpSocket>;
+
+    /// Routes a socket another library opened the way this factory routes its own: `protect`, the
+    /// interface binding and the routing mark. `dest` is where it connects; a socket bound for
+    /// many peers passes `None` and is routed as for a global address of its family.
+    fn prepare_foreign(
+        &self,
+        socket: RawSocket,
+        ipv6: bool,
+        dest: Option<IpAddr>,
+        opts: &SockOpts,
+    ) -> io::Result<()> {
+        let _ = (socket, ipv6, dest, opts);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
 
     /// Where a UDP server address really points once `dialer-ip4p-convert` is on.
     fn ip4p(&self, addr: SocketAddr) -> SocketAddr {

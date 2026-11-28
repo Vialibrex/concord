@@ -105,7 +105,7 @@ impl Plan {
                     .filter(|case| {
                         !matches!(
                             case.name,
-                            "ss-gost" | "gost-relay" | "openvpn" | "openvpn-tcp"
+                            "ss-gost" | "gost-relay" | "openvpn" | "openvpn-tcp" | "tailscale"
                         ) && !cases::is_mitm(**case)
                     })
                     .copied()

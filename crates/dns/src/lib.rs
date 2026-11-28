@@ -29,7 +29,7 @@ mod trie;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-pub use dialer::{RESPECT_RULES, UpstreamDialer};
+pub use dialer::{RESPECT_RULES, UpstreamDialer, no_node_dns};
 pub use engine::{Resolver, ResolverDeps};
 pub use fakeip::FakeIpPool;
 pub use hosts::{HostValue, Hosts};

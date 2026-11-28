@@ -14,7 +14,7 @@ async fn static_covers_preserves_max_timeout_extra_urls_and_3000_node_lookup() {
     for i in 0..3000 {
         yaml.push_str(&format!("  - {{name: n{i}, type: direct}}\n"));
     }
-    yaml.push_str("proxy-providers:\n  p:\n    type: inline\n    health-check:\n      enable: true\n      url: 'http://prov.test/204'\n      timeout: 7000\n    payload:\n      - {name: prov-a, type: direct}\n      - {name: ghost-ts, type: tailscale}\n");
+    yaml.push_str("proxy-providers:\n  p:\n    type: inline\n    health-check:\n      enable: true\n      url: 'http://prov.test/204'\n      timeout: 7000\n    payload:\n      - {name: prov-a, type: direct}\n      - {name: ghost-ts, type: easytier}\n");
     yaml.push_str("proxy-groups:\n  - name: g_short\n    type: url-test\n    url: 'http://probe.test/generate_204'\n    timeout: 3000\n    proxies:\n");
     for i in 0..3000 {
         yaml.push_str(&format!("      - n{i}\n"));
@@ -200,7 +200,7 @@ async fn smart_attempt_budget_prechecks_without_building_candidates_or_locking_h
   q:
     type: inline
     payload:
-      - {{name: ts, type: tailscale}}
+      - {{name: ts, type: easytier}}
 proxy-groups:
   - name: bad
     type: select

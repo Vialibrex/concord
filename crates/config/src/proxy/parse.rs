@@ -37,6 +37,7 @@ pub const T1_PROXY_TYPES: &[&str] = &[
     "wireguard",
     "masque",
     "openvpn",
+    "tailscale",
     "hysteria",
     "ssr",
     "snell",
@@ -48,7 +49,7 @@ pub const T1_PROXY_TYPES: &[&str] = &[
     "gost-relay",
     "naive",
 ];
-pub const T2_PROXY_TYPES: &[&str] = &["tailscale", "easytier", "zerotier", "sudoku", "trusttunnel"];
+pub const T2_PROXY_TYPES: &[&str] = &["easytier", "zerotier", "sudoku", "trusttunnel"];
 
 const T2_NETWORKS: &[&str] = &["mkcp", "kcp", "mekya"];
 const T2_TLS_KEYS: &[&str] = &["restls-opts", "tlsmirror-opts"];
@@ -188,6 +189,7 @@ fn parse_typed(
         "wireguard" => ProxyKind::WireGuard(Box::new(parse_wireguard(f)?)),
         "masque" => ProxyKind::Masque(Box::new(masque::parse(f)?)),
         "openvpn" => ProxyKind::OpenVpn(Box::new(super::openvpn::parse(f)?)),
+        "tailscale" => ProxyKind::Tailscale(Box::new(super::tailscale::parse(f)?)),
         "hysteria" => ProxyKind::Hysteria(Box::new(parse_hysteria(f, caps)?)),
         "ssr" => ProxyKind::Ssr(parse_ssr(f)?),
         "snell" => ProxyKind::Snell(parse_snell(f)?),
@@ -1196,7 +1198,7 @@ mod tests {
 
     #[test]
     fn unsupported_things_are_quarantined_not_rejected() {
-        for kind in ["tailscale", "easytier", "zerotier", "sudoku", "trusttunnel"] {
+        for kind in ["easytier", "zerotier", "sudoku", "trusttunnel"] {
             let reason = quarantined(json!({"name": "n", "type": kind}));
             assert!(reason.contains(kind), "{reason}");
         }

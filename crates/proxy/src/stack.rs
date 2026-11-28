@@ -14,7 +14,8 @@ pub(crate) use stream::IpStream;
 use concord_common::{Stream, Tasks};
 use concord_netstack::frag::Reassembler;
 use concord_netstack::wire::{
-    BuildError, IpView, L4Checksum, L4Kind, Parsed, build_udp, parse_packet, parse_udp,
+    BuildError, IpView, L4Checksum, L4Kind, Parsed, build_echo_reply, build_udp, parse_packet,
+    parse_udp,
 };
 use concord_netstack::{Admit, Egress, NetReadHalf, NetStream, NetWriteHalf, TcpConfig, TcpStack};
 use gotatun::packet::{Ip, Packet, PacketBufPool};
@@ -32,7 +33,7 @@ pub(crate) use concord_netstack::Congestion;
 mod serve;
 
 const UDP_RECEIVE_CAPACITY: usize = 212_992;
-const OUTBOUND_QUEUE: usize = 1024;
+pub(crate) const OUTBOUND_QUEUE: usize = 1024;
 const MAX_TX_BACKLOG: usize = 256;
 const RX_BATCH: usize = 64;
 const EPHEMERAL_START: u16 = 32768;
@@ -160,6 +161,15 @@ impl Inner {
                         waker.wake();
                     }
                 }
+            }
+            // Pings to the stack's own address, as the peer's `ping` of this node expects.
+            L4Kind::Icmp if [self.v4, self.v6].contains(&Some(view.dst)) => {
+                let mut out = Out {
+                    queue: &mut self.tx,
+                    pool: &mut self.pool,
+                    mtu: self.mtu,
+                };
+                out.send(&mut |buf| build_echo_reply(buf, view));
             }
             L4Kind::Icmp => {}
         }
@@ -625,5 +635,90 @@ impl Drop for UdpPort {
     fn drop(&mut self) {
         lock(&self.stack.inner).udp.remove(&self.port);
         self.stack.active.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests assert on fixed packets")]
+
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use concord_netstack::wire::{
+        PROTO_ICMP, PROTO_ICMPV6, emit_ip, finish, parse_ip, pseudo_header, sum_bytes,
+    };
+
+    use super::*;
+
+    const ADDR: Ipv4Addr = Ipv4Addr::new(100, 64, 0, 2);
+    const ADDR6: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 2);
+    const PEER6: Ipv6Addr = Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 1);
+    const NEIGHBOR_SOLICITATION: u8 = 135;
+
+    fn icmp(src: IpAddr, dst: IpAddr, kind: u8) -> Packet {
+        let (proto, header) = if src.is_ipv4() {
+            (PROTO_ICMP, 20)
+        } else {
+            (PROTO_ICMPV6, 40)
+        };
+        let mut raw = vec![0u8; header + 12];
+        emit_ip(&mut raw, src, dst, proto, 12).unwrap();
+        let body = &mut raw[header..];
+        body.copy_from_slice(&[kind, 0, 0, 0, 0, 7, 0, 1, 1, 2, 3, 4]);
+        let pseudo = if src.is_ipv4() {
+            0
+        } else {
+            pseudo_header(src, dst, proto, 12)
+        };
+        let sum = finish(sum_bytes(pseudo, body));
+        body[2..4].copy_from_slice(&sum.to_be_bytes());
+        Packet::from_bytes(raw.as_slice().into())
+    }
+
+    #[tokio::test]
+    async fn answers_pings_to_its_own_addresses_only() {
+        let wired = Stack::start(
+            &StackConfig {
+                addrs: vec![ADDR.into(), ADDR6.into()],
+                mtu: 1280,
+            },
+            &Default::default(),
+        );
+        let (mut send, mut recv) = (wired.send, wired.recv);
+        let peer = IpAddr::from(Ipv4Addr::new(100, 64, 0, 1));
+        let peer6 = IpAddr::from(PEER6);
+        for (src, dst, kind) in [
+            (peer, Ipv4Addr::new(100, 64, 0, 9).into(), 8),
+            (
+                peer6,
+                Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 9).into(),
+                128,
+            ),
+            (peer6, ADDR6.into(), NEIGHBOR_SOLICITATION),
+            (peer, ADDR.into(), 8),
+            (peer6, ADDR6.into(), 128),
+        ] {
+            send.send(icmp(src, dst, kind).try_into_ip().unwrap())
+                .await
+                .unwrap();
+        }
+        let mut out = Vec::new();
+        while out.len() < 2 {
+            recv.recv_many(&mut out, 8).await.unwrap();
+        }
+        let replies: Vec<_> = out
+            .iter()
+            .map(|reply| {
+                let view = parse_ip(reply).unwrap();
+                (view.src, view.dst, view.l4[0])
+            })
+            .collect();
+        assert_eq!(
+            replies,
+            [
+                (IpAddr::from(ADDR), peer, 0),
+                (IpAddr::from(ADDR6), peer6, 129)
+            ]
+        );
     }
 }
