@@ -479,8 +479,7 @@ async fn a_silent_peer_is_dropped_though_streams_keep_opening() {
         let _silent: Result<h2::server::Connection<_, Bytes>, _> = h2::server::handshake(far).await;
         std::future::pending::<()>().await;
     });
-    let (_send, conn) = client_builder()
-        .handshake::<BoxStream, Bytes>(Box::new(near))
+    let (_send, conn) = handshake_split(&client_builder(), Box::new(near))
         .await
         .unwrap();
     let activity = Activity::new();
@@ -502,8 +501,7 @@ async fn a_peer_that_answers_pings_stays_up() {
         };
         while conn.accept().await.is_some() {}
     });
-    let (_send, conn) = client_builder()
-        .handshake::<BoxStream, Bytes>(Box::new(near))
+    let (_send, conn) = handshake_split(&client_builder(), Box::new(near))
         .await
         .unwrap();
     let activity = Activity::new();
@@ -570,9 +568,29 @@ async fn holding_server(far: DuplexStream) -> (Vec<u8>, Option<h2::Reason>) {
 async fn a_tunnel_without_half_close_sends_its_writes_then_resets_the_stream() {
     let (near, far) = duplex(1 << 16);
     let server = tokio::spawn(holding_server(far));
-    let (mut sender, connection) = h2::client::handshake(near).await.unwrap();
+    let (sender, connection) = h2::client::handshake(near).await.unwrap();
     tokio::spawn(connection);
+    writes_then_reset(sender, server, false).await;
+}
+
+#[tokio::test]
+async fn a_split_tunnel_without_half_close_sends_its_writes_then_resets_the_stream() {
+    let (near, far) = duplex(1 << 16);
+    let server = tokio::spawn(holding_server(far));
+    let (sender, conn) = handshake_split(&client_builder(), Box::new(near))
+        .await
+        .unwrap();
+    tokio::spawn(conn);
+    writes_then_reset(sender, server, true).await;
+}
+
+async fn writes_then_reset(
+    mut sender: h2::client::SendRequest<Bytes>,
+    server: tokio::task::JoinHandle<(Vec<u8>, Option<h2::Reason>)>,
+    direct: bool,
+) {
     let (response, send) = sender.send_request(http::Request::new(()), false).unwrap();
+    assert_eq!(send.has_direct_writer(), direct);
     let body = H2Body::new(send, Incoming::Response(response)).without_half_close();
     let (mut read, mut write) = Box::new(body).into_split();
     let payload: Vec<u8> = (0..300_000).map(|n| (n % 251) as u8).collect();
@@ -646,4 +664,47 @@ async fn a_tunnel_whose_peer_grants_no_window_is_reset_after_the_drain_limit() {
     assert_eq!(code, u32::from(h2::Reason::CANCEL));
     let mut one = [0; 1];
     assert_eq!(body.read(&mut one).await.unwrap(), 0);
+}
+
+struct WriteLog(Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+impl tokio::io::AsyncWrite for WriteLog {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        concord_common::sync::lock(&self.0).push(buf.to_vec());
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn split_handshake_writes_preface_settings_and_window_update_at_once() {
+    let writes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (near, _far) = duplex(1 << 16);
+    let (_sender, _conn) = client_builder()
+        .handshake_split::<_, _, Bytes>(near, WriteLog(writes.clone()))
+        .await
+        .unwrap();
+    let writes = concord_common::sync::lock(&writes);
+    assert_eq!(writes.len(), 1);
+    let frames = writes[0]
+        .strip_prefix(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".as_slice())
+        .unwrap();
+    let settings_len = u32::from_be_bytes([0, frames[0], frames[1], frames[2]]) as usize;
+    let (settings, rest) = frames.split_at(9 + settings_len);
+    assert_eq!(settings[3], 0x4);
+    assert_eq!(rest[..9], [0, 0, 4, 0x8, 0, 0, 0, 0, 0]);
+    let increment = u32::from_be_bytes(rest[9..13].try_into().unwrap());
+    assert_eq!(increment, CONN_WINDOW - 65_535);
+    assert_eq!(rest.len(), 13);
 }

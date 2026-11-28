@@ -103,6 +103,13 @@ where
         }
     }
 
+    // Concord: bytes sent ahead of the first buffered frame, in the same write.
+    pub(crate) fn with_prefix(inner: T, prefix: &[u8]) -> FramedWrite<T, B> {
+        let mut framed = FramedWrite::new(inner);
+        framed.encoder.buf.get_mut().extend_from_slice(prefix);
+        framed
+    }
+
     /// Returns `Ready` when `send` is able to accept a frame
     ///
     /// Calling this function may result in the current contents of the buffer

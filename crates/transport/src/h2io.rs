@@ -157,7 +157,7 @@ pub fn spawn_connection(
 /// been read for the hung interval after it.
 pub(crate) fn spawn_checked_connection(
     tasks: &Tasks,
-    conn: h2::client::Connection<BoxStream, Bytes>,
+    conn: h2::client::SplitConnection<BoxRead, Bytes>,
     activity: Arc<Activity>,
 ) {
     activity.touch();
@@ -167,7 +167,7 @@ pub(crate) fn spawn_checked_connection(
     });
 }
 
-async fn drive_checked(conn: h2::client::Connection<BoxStream, Bytes>, activity: &Activity) {
+async fn drive_checked(conn: h2::client::SplitConnection<BoxRead, Bytes>, activity: &Activity) {
     let mut conn = Box::pin(conn);
     let mut pings = conn.ping_pong();
     loop {

@@ -1125,7 +1125,8 @@ impl Recv {
     }
 
     /// Send connection level window update
-    fn send_connection_window_update<D, B>(&mut self, dst: &mut D) -> io::Result<BufferStatus>
+    // Concord: crate-visible for the split handshake (`Streams::buffer_connection_window_update`).
+    pub(crate) fn send_connection_window_update<D, B>(&mut self, dst: &mut D) -> io::Result<BufferStatus>
     where
         D: CodecWrite<Prioritized<B>> + ?Sized,
         B: Buf,

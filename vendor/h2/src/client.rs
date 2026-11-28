@@ -1534,7 +1534,7 @@ where
 {
     async fn handshake2<W>(
         read: R,
-        mut write: W,
+        write: W,
         builder: Builder,
     ) -> Result<(SendRequest<B>, SplitConnection<R, B>), crate::Error>
     where
@@ -1542,24 +1542,31 @@ where
     {
         tracing::debug!("binding split client connection");
         let msg: &'static [u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-        write.write_all(msg).await.map_err(crate::Error::from_io)?;
 
         let mut split_read = SplitRead::new(read);
         builder.apply_recv_limits(&mut split_read);
 
-        let mut sink = new_framed_write::<W, proto::Prioritized<B>>(write);
+        // Concord: the preface, SETTINGS and the connection WINDOW_UPDATE go out in one write,
+        // as Go's HTTP/2 client (`net/http/internal/http2`) and Chromium send them.
+        let mut sink = new_framed_write::<W, proto::Prioritized<B>>(write, msg);
         sink.buffer(builder.settings.clone().into())
             .expect("invalid SETTINGS frame");
-        crate::poll_fn(|cx| sink.flush(cx))
-            .await
-            .map_err(crate::Error::from_io)?;
 
         let writer = Arc::new(DirectWriter::new(sink));
         let target_window = builder.initial_target_connection_window_size;
-        let mut inner = proto::SplitConnection::new(split_read, writer, builder.proto_config());
+        let mut inner =
+            proto::SplitConnection::new(split_read, writer.clone(), builder.proto_config());
         if let Some(sz) = target_window {
             inner.set_target_window_size(sz);
+            let mut state = writer.lock();
+            inner
+                .streams()
+                .buffer_connection_window_update(&mut *state.sink)
+                .map_err(crate::Error::from_io)?;
         }
+        crate::poll_fn(|cx| writer.lock().sink.flush(cx))
+            .await
+            .map_err(crate::Error::from_io)?;
         let send_request = SendRequest {
             inner: inner.streams().clone(),
             pending: None,

@@ -215,6 +215,17 @@ where
             .clear_expired_reset_streams(&mut me.store, &mut me.counts);
     }
 
+    // Concord: buffers the connection WINDOW_UPDATE a new target window scheduled, so the split
+    // handshake sends it with the preface and SETTINGS.
+    pub(crate) fn buffer_connection_window_update<D>(&self, dst: &mut D) -> io::Result<()>
+    where
+        D: CodecWrite<Prioritized<B>> + ?Sized,
+    {
+        let mut me = self.inner.lock().unwrap();
+        me.actions.recv.send_connection_window_update(dst)?;
+        Ok(())
+    }
+
     pub fn poll_complete<D>(&mut self, cx: &mut Context, dst: &mut D) -> Poll<io::Result<()>>
     where
         D: CodecWrite<Prioritized<B>> + ?Sized,

@@ -97,12 +97,12 @@ where
     }
 }
 
-pub(crate) fn new_framed_write<W, B>(io: W) -> Box<dyn FrameSink<B>>
+pub(crate) fn new_framed_write<W, B>(io: W, prefix: &[u8]) -> Box<dyn FrameSink<B>>
 where
     W: AsyncWrite + Send + Unpin + 'static,
     B: Buf + Send + 'static,
 {
-    Box::new(FramedWrite::new(io))
+    Box::new(FramedWrite::with_prefix(io, prefix))
 }
 
 /// Concord: read-only HTTP/2 frame decoder for split-I/O client connections.
